@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response as HttpResponse;
 use axum::routing::get;
-use futures_util::SinkExt;
+use futures::SinkExt;
 use secrecy::SecretBox;
 use snow::Error as NoiseError;
 use tokio::sync::mpsc::UnboundedSender;
@@ -218,7 +218,7 @@ mod tests {
     use crate::celestia::proto::tests::sample;
     use crate::noise::tests::test_keypair;
     use axum::serve;
-    use futures_util::{SinkExt, StreamExt};
+    use futures::{SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::spawn;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};

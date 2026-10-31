@@ -3,7 +3,7 @@ use log::{info, warn};
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use secrecy::SecretBox;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Receiver;

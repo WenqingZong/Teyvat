@@ -9,7 +9,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Request};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, Uri};
-use futures_util::StreamExt;
+use futures::StreamExt;
 use hex::encode as encode_hex;
 use tokio::time::{Instant, timeout_at};
 

@@ -1911,7 +1911,7 @@ dependencies = [
  "cbc",
  "clap",
  "env_logger",
- "futures-util",
+ "futures",
  "hex",
  "jiff",
  "log",
