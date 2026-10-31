@@ -1,0 +1,25 @@
+# Copy to /etc/phanes/phanes.toml (chmod 600, it holds the Bark credentials) and fill in.
+listen_address = "127.0.0.1:8888"                    # cloudflared ingress; release builds require loopback
+gnosis_private_key_file = "/etc/phanes/gnosis.key"   # from `phanes keygen`, chmod 600
+celestia_private_key_file = "/etc/phanes/celestia.key"
+api_keys_directory = "/etc/phanes/api_keys"          # <key_id>.txt per secret
+max_clock_skew_seconds = 60
+
+# One table per client: the addresses Cloudflare reports in CF-Connecting-IP.
+[clients.Osaka]
+ipv4 = "<Osaka IPv4>"                              # required
+ipv6 = "<Osaka IPv6>"                              # optional
+
+[gnosis_service_config]
+public_key = "<base64 public key printed by keygen on Osaka>"
+allowed_key_ids = ["binance_demo"]
+allowed_clients = ["Osaka"]
+
+[celestia_service_config]
+public_key = "<base64 Celestia public key printed by keygen on Osaka>"
+allowed_clients = ["Osaka"]
+
+# Required by release builds; debug builds log notifications instead.
+[bark]
+device_key = "<fill me>"
+encryption_key = "<fill me: 32 characters, set AES-256-CBC in the Bark app>"

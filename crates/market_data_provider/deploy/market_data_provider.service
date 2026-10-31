@@ -1,0 +1,24 @@
+# /etc/systemd/system/market_data_provider.service
+[Unit]
+Description=Market Data Provider (exchange market data to strategies over shared memory)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# The same user as the strategies, so they can map the rings it creates in /dev/shm.
+User=<your user>
+ExecStart=/usr/local/bin/market_data_provider --config /etc/market_data_provider/market_data_provider.toml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# No PrivateDevices or PrivateIPC: strategies outside this unit must see /dev/shm/market_data_provider.
+# Own journal namespace so uninstall can delete provider logs only: journalctl --namespace=market_data_provider
+LogNamespace=market_data_provider
+
+[Install]
+WantedBy=multi-user.target
