@@ -34,6 +34,3 @@ market_data_provider.toml
 
 # Windows download markers (from copying files in via WSL)
 *:Zone.Identifier
-
-# Reference copies of the old repos' root files, used only while merging
-.legacy/

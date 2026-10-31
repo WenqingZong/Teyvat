@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Deploy / redeploy / remove the Market Data Provider on the trading host (Osaka).
 #
-#   deploy/market_data_provider.sh install      build and (re)deploy; keeps the existing key and config
-#   deploy/market_data_provider.sh uninstall    remove everything the provider put on this machine
-#   deploy/market_data_provider.sh reinstall    uninstall, then install (new Gnosis client key!)
+#   crates/market_data_provider/deploy/market_data_provider.sh install      build and (re)deploy; keeps the existing key and config
+#   crates/market_data_provider/deploy/market_data_provider.sh uninstall    remove everything the provider put on this machine
+#   crates/market_data_provider/deploy/market_data_provider.sh reinstall    uninstall, then install (new Gnosis client key!)
 #
 # Add --yes to skip the confirmation prompt of uninstall / reinstall.
 # Run as the user the strategies run as, from anywhere; sudo is used where needed.
@@ -19,8 +19,11 @@ readonly CONFIG_FILE=$CONFIG_DIRECTORY/market_data_provider.toml
 readonly UNIT_FILE=/etc/systemd/system/$SERVICE.service
 # DEFAULT_ROOT_DIRECTORY: one ring file per topic, read by the strategies.
 readonly RING_DIRECTORY=/dev/shm/market_data_provider
-REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-readonly REPOSITORY_ROOT
+# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root holds target/.
+CRATE_DIRECTORY=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly CRATE_DIRECTORY
+WORKSPACE_ROOT=$(cd "$CRATE_DIRECTORY/../.." && pwd)
+readonly WORKSPACE_ROOT
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -33,14 +36,14 @@ confirm() {
 }
 
 install_provider() {
-    cd "$REPOSITORY_ROOT"
+    cd "$CRATE_DIRECTORY"
     command -v cargo >/dev/null || die "cargo not found; install Rust via rustup first"
     command -v openssl >/dev/null || die "openssl not found; it generates the Gnosis client key"
 
     log "building release binary"
     cargo build --release -p market_data_provider --bin market_data_provider
     # Install beside, then rename: overwriting the running binary in place fails with "Text file busy".
-    sudo install -m 755 target/release/market_data_provider "$BINARY.new"
+    sudo install -m 755 "$WORKSPACE_ROOT/target/release/market_data_provider" "$BINARY.new"
     sudo mv "$BINARY.new" "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"

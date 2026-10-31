@@ -1,0 +1,50 @@
+name: Rust CI
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust_ci.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  code_quality_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: module dependency cycle check
+        run: cargo test --workspace --test module_dependencies
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  code_coverage:
+    runs-on: ubuntu-latest
+    needs: [code_quality_check]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Require 90% line coverage
+        run: cargo llvm-cov --workspace --summary-only --fail-under-lines 90

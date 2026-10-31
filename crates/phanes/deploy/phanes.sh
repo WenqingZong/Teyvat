@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Deploy / redeploy / remove Phanes (the Control Center for Quant Trading Bot) on RedmiBook.
 #
-#   deploy/phanes.sh install      build and (re)deploy; keeps existing keys and config
-#   deploy/phanes.sh uninstall    remove everything phanes put on this machine
-#   deploy/phanes.sh reinstall    uninstall, then install (new Gnosis and Celestia keys!)
+#   crates/phanes/deploy/phanes.sh install      build and (re)deploy; keeps existing keys and config
+#   crates/phanes/deploy/phanes.sh uninstall    remove everything phanes put on this machine
+#   crates/phanes/deploy/phanes.sh reinstall    uninstall, then install (new Gnosis and Celestia keys!)
 #
 # Add --yes to skip the confirmation prompt of uninstall / reinstall.
 # Run as your normal user from anywhere; sudo is used where needed.
@@ -19,8 +19,11 @@ readonly CELESTIA_PRIVATE_KEY=$CONFIG_DIRECTORY/celestia.key
 readonly CELESTIA_PUBLIC_KEY=$CONFIG_DIRECTORY/celestia.pub
 readonly CONFIG_FILE=$CONFIG_DIRECTORY/phanes.toml
 readonly UNIT_FILE=/etc/systemd/system/phanes.service
-REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-readonly REPOSITORY_ROOT
+# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root holds target/.
+CRATE_DIRECTORY=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly CRATE_DIRECTORY
+WORKSPACE_ROOT=$(cd "$CRATE_DIRECTORY/../.." && pwd)
+readonly WORKSPACE_ROOT
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -33,13 +36,13 @@ confirm() {
 }
 
 install_phanes() {
-    cd "$REPOSITORY_ROOT"
+    cd "$CRATE_DIRECTORY"
     command -v cargo >/dev/null || die "cargo not found; install Rust via rustup first"
-    compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in the repository; nothing to serve"
+    compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in crates/phanes; nothing to serve"
 
     log "building release binary"
-    cargo build --release
-    sudo install -m 755 target/release/phanes "$BINARY"
+    cargo build --release -p phanes --bin phanes
+    sudo install -m 755 "$WORKSPACE_ROOT/target/release/phanes" "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"
     sudo mkdir -p "$API_KEYS_DIRECTORY"
