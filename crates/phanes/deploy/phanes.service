@@ -1,0 +1,22 @@
+# /etc/systemd/system/phanes.service
+[Unit]
+Description=Phanes (Control Centre for Quant Trading Bot)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+User=<your user>
+ExecStart=/usr/local/bin/phanes serve --config /etc/phanes/phanes.toml
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Own journal namespace so uninstall can delete Phanes logs only: journalctl --namespace=phanes
+LogNamespace=phanes
+
+[Install]
+WantedBy=multi-user.target
