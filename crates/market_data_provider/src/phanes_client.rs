@@ -1,18 +1,12 @@
 //! Client of Phanes Gnosis, which releases API keys over an end-to-end encrypted HTTP round trip.
-//!
-//! TODO: `noise` and `gnosis` are copied from Phanes. Deduplicate once MarketDataProvider, Phanes and future
-//! repos merge into one repo, so both ends share one protocol definition.
-
-mod gnosis;
-mod noise;
 
 use crate::alert::SendAlert;
 use crate::exit_reason::ExitReason;
-use crate::secrets::read_secret_file;
 use crate::utils::{Clock, RealClock};
 use anyhow::{Context, Result, bail};
-use gnosis::{GNOSIS_PATH, Initiator, Request, Response};
-use noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};
+use layline::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::secrets::read_secret_file;
 use reqwest::{Client, StatusCode};
 use secrecy::{SecretBox, SecretString};
 use serde::Deserialize;
@@ -142,8 +136,9 @@ pub(crate) mod tests {
     use crate::alert::tests::RecordingAlert;
     use crate::utils::tests::MockClock;
     use futures::FutureExt;
-    use gnosis::tests::Responder;
-    use noise::tests::{encode_key, test_keypair};
+    use layline::gnosis::Responder;
+    use layline::noise::encode_key;
+    use layline::testing::test_keypair;
     use secrecy::ExposeSecret;
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -236,7 +231,7 @@ pub(crate) mod tests {
             else {
                 return Ok((StatusCode::NOT_FOUND, Vec::new()));
             };
-            let request = responder.request().clone();
+            let request = responder.parse_request()?;
             let response = match self.grants.get(&request.key_id) {
                 Some(secret) => Response::Granted {
                     secret: SecretString::from(secret.as_str()),

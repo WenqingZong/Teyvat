@@ -1,19 +1,19 @@
 //! Sends a test push using the `[bark]` section of phanes.toml. Usage:
 //! cargo run --example bark_push -- [path/to/phanes.toml] ["message"]
 
-use log::info;
 use std::env::args;
 use std::path::PathBuf;
+use tracing::info;
 
 use anyhow::{Context, Result};
 
-use phanes::bark::{BarkMessage, BarkNotifier};
+use layline::bark::{BarkMessage, BarkNotifier};
+use layline::logging::init_tracing;
 use phanes::config::PhanesConfig;
-use phanes::utils::init_logger;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logger();
+    let _log_guard = init_tracing();
     let mut arguments = args().skip(1);
     let config_path = PathBuf::from(arguments.next().unwrap_or_else(|| "phanes.toml".to_owned()));
     let body = arguments.next().unwrap_or_else(|| "test".to_owned());

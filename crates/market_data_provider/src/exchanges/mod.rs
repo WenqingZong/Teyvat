@@ -10,11 +10,11 @@ use binance::BinanceConnector;
 use okx::OkxConnector;
 pub(crate) use router::ExchangeRouter;
 
-use crate::alert::Notifier;
 use crate::phanes_client::PhanesClient;
-use crate::types::{ConnectedApi, ConnectedApis};
-use crate::types::{Exchange, MarketData, Topic};
 use anyhow::Result;
+use layline::bark::Notifier;
+use layline::types::{ConnectedApi, ConnectedApis};
+use layline::types::{Exchange, MarketData, Topic};
 use std::collections::HashSet;
 use strum::IntoEnumIterator;
 

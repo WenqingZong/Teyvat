@@ -1,10 +1,10 @@
 //! Phanes side of Gnosis: authenticates the client and releases API keys from disk.
 
-use log::{error, info, warn};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::{error, info, warn};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -17,12 +17,12 @@ use tokio::fs::read_to_string;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client_filter::ClientName;
-use crate::gnosis::proto::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
-use crate::noise::StaticKey;
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
-use crate::server::Service;
-use crate::utils::since_unix_epoch;
+use crate::service::Service;
+use layline::gnosis::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
+use layline::noise::StaticKey;
+use layline::time::since_unix_epoch;
 
 /// Noise message 1 carries a small JSON payload; anything bigger is not a real client.
 const MAX_REQUEST_BODY_BYTES: usize = 4096;
@@ -256,10 +256,11 @@ mod tests {
     use super::*;
     use crate::client_filter::UNFILTERED_CLIENT_NAME;
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
-    use crate::gnosis::proto::Initiator;
-    use crate::noise::tests::test_keypair;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request as HttpRequest};
+    use layline::gnosis::Initiator;
+    use layline::testing::test_keypair;
+    use layline::time::get_current_timestamp_nanoseconds;
     use std::fs::write;
     use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -369,7 +370,10 @@ mod tests {
     #[tokio::test]
     async fn grants_allowed_key_and_notifies() {
         let mut harness = harness();
-        match harness.gnosis(&Request::new(KEY_ID)).await {
+        match harness
+            .gnosis(&Request::new(KEY_ID, get_current_timestamp_nanoseconds()))
+            .await
+        {
             Response::Granted { secret } => assert_eq!(secret.expose_secret(), SECRET),
             Response::Denied { reason } => panic!("unexpected denial: {reason}"),
         }
@@ -386,7 +390,12 @@ mod tests {
     async fn denies_key_not_in_allow_list() {
         let mut harness = harness();
         assert_denied(
-            harness.gnosis(&Request::new(NOT_ALLOWED_KEY_ID)).await,
+            harness
+                .gnosis(&Request::new(
+                    NOT_ALLOWED_KEY_ID,
+                    get_current_timestamp_nanoseconds(),
+                ))
+                .await,
             "not allowed",
         );
         assert_eq!(
@@ -403,7 +412,12 @@ mod tests {
     async fn denies_missing_key_file() {
         let harness = harness();
         assert_denied(
-            harness.gnosis(&Request::new(MISSING_KEY_ID)).await,
+            harness
+                .gnosis(&Request::new(
+                    MISSING_KEY_ID,
+                    get_current_timestamp_nanoseconds(),
+                ))
+                .await,
             "not found",
         );
     }
@@ -413,7 +427,10 @@ mod tests {
         let harness = harness();
         assert_denied(
             harness
-                .gnosis(&Request::new("../binance_demo_trading"))
+                .gnosis(&Request::new(
+                    "../binance_demo_trading",
+                    get_current_timestamp_nanoseconds(),
+                ))
                 .await,
             "invalid key id",
         );
@@ -422,7 +439,7 @@ mod tests {
     #[tokio::test]
     async fn denies_replayed_nonce() {
         let harness = harness();
-        let request = Request::new(KEY_ID);
+        let request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
         assert!(matches!(
             harness.gnosis(&request).await,
             Response::Granted { .. }
@@ -433,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn denies_stale_timestamp() {
         let harness = harness();
-        let mut request = Request::new(KEY_ID);
+        let mut request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
         // One second past the allowed skew.
         request.timestamp = since_unix_epoch().as_secs() - (DEFAULT_MAX_CLOCK_SKEW_SECONDS + 1);
         assert_denied(harness.gnosis(&request).await, "clock skew");
@@ -442,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn denies_malformed_nonce() {
         let harness = harness();
-        let mut request = Request::new(KEY_ID);
+        let mut request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
         request.nonce = "abc".into();
         assert_denied(harness.gnosis(&request).await, "malformed nonce");
     }
@@ -456,7 +473,7 @@ mod tests {
             let (_, first_message) = Initiator::write_request(
                 &impostor_private_key,
                 &harness.gnosis_public_key,
-                &Request::new(KEY_ID),
+                &Request::new(KEY_ID, get_current_timestamp_nanoseconds()),
             )
             .expect("impostor writes request");
             first_messages.push(first_message.clone());

@@ -1,10 +1,10 @@
 use super::websocket::TungsteniteClient;
 use super::worker::{WorkerHandle, WorkerReply, failed_reply, spawn_worker};
 use super::{BinanceConnector, ConnectorContext, OkxConnector};
-use crate::types::{Exchange, Topic};
 use crate::utils::RealClock;
 use anyhow::Result;
 use futures::future::join_all;
+use layline::types::{Exchange, Topic};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -153,12 +153,12 @@ mod tests {
     use super::*;
     use crate::exchanges::tests::test_connector_context;
     use crate::exchanges::worker::tests::wait_until_stopped;
-    use crate::types::{Currency, MarketDataType, UnderlyingType};
+    use layline::types::{Currency, MarketDataType, UnderlyingType};
     use tempfile::tempdir;
 
     fn topic(exchange: Exchange, market_data_type: MarketDataType) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(
+        layline::testing::topic(
+            layline::testing::instrument(
                 exchange,
                 Currency::Btc,
                 Currency::Usdt,

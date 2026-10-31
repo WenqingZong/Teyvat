@@ -3,17 +3,17 @@
 //! Request handlers only enqueue a [`Notification`]; a background task delivers them
 //! through a [`Notifier`] so a slow push never delays a response.
 
-use log::{error, info};
 use std::mem::take;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::error;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::bark::{BarkConfig, BarkError, BarkMessage, BarkNotifier};
 use crate::request_details::RequestDetails;
-use crate::server::{Language, Service};
+use crate::service::{Language, Service};
+use layline::bark::{BarkMessage, Notifier};
 
 const GROUP: &str = "phanes";
 const ALARM_SOUND: &str = "alarm";
@@ -153,44 +153,13 @@ impl UnauthenticatedThrottle {
     }
 }
 
-/// Where notifications go: Bark pushes in release builds, the log in debug builds.
-pub enum Notifier {
-    Bark(BarkNotifier),
-    /// Local development: no Bark credentials needed, every push becomes an `info!` line.
-    Log,
-}
-
-impl Notifier {
-    /// Release builds require the `[bark]` section of phanes.toml; debug builds always log.
-    pub fn new(release_build: bool, bark_config: Option<BarkConfig>) -> Result<Self, BarkError> {
-        if !release_build {
-            return Ok(Self::Log);
-        }
-        let bark_config = bark_config.ok_or(BarkError::MissingConfig)?;
-        Ok(Self::Bark(BarkNotifier::new(bark_config)?))
-    }
-
-    pub async fn send(&self, notification: &Notification) -> Result<(), BarkError> {
-        let message = notification.to_bark_message();
-        match self {
-            Self::Bark(bark) => bark.send(&message).await,
-            Self::Log => {
-                let title = &message.title;
-                let body = message.body.replace('\n', " | ");
-                info!("[push] {title}: {body}");
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Delivers queued notifications until every sender is dropped.
 pub async fn run_dispatcher(
     notifier: Arc<Notifier>,
     mut receiver: UnboundedReceiver<Notification>,
 ) {
     while let Some(notification) = receiver.recv().await {
-        if let Err(error) = notifier.send(&notification).await {
+        if let Err(error) = notifier.send(&notification.to_bark_message()).await {
             error!("failed to push notification {notification:?}: {error}");
         }
     }
@@ -244,20 +213,6 @@ mod tests {
         assert_eq!(message.group, GROUP);
         assert!(message.body.contains("osaka"));
         assert!(message.body.contains("binance_demo_trading"));
-    }
-
-    #[test]
-    fn debug_build_logs_without_bark_config() {
-        let notifier = Notifier::new(false, None).expect("debug build never needs Bark");
-        assert!(matches!(notifier, Notifier::Log));
-    }
-
-    #[test]
-    fn release_build_requires_bark_config() {
-        assert!(matches!(
-            Notifier::new(true, None),
-            Err(BarkError::MissingConfig)
-        ));
     }
 
     #[test]
@@ -322,13 +277,5 @@ mod tests {
             throttle.record(start + UNAUTHENTICATED_NOTIFY_INTERVAL),
             Some(2)
         );
-    }
-
-    #[tokio::test]
-    async fn log_notifier_always_succeeds() {
-        let notification = Notification::Crashed {
-            reason: "test".into(),
-        };
-        assert!(Notifier::Log.send(&notification).await.is_ok());
     }
 }

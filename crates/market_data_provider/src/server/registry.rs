@@ -1,5 +1,5 @@
-use crate::server::api::TopicStatus;
-use crate::types::Topic;
+use layline::provider_api::TopicStatus;
+use layline::types::Topic;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
@@ -99,7 +99,7 @@ impl SubscriptionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Exchange, MarketDataType, UnderlyingType};
+    use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
     use std::time::Duration;
 
     const FIRST: &str = "first";
@@ -107,8 +107,8 @@ mod tests {
     const LEASE: Duration = Duration::from_secs(60);
 
     fn topic(market_data_type: MarketDataType) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(
+        layline::testing::topic(
+            layline::testing::instrument(
                 Exchange::Okx,
                 Currency::Btc,
                 Currency::Usdt,

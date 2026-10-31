@@ -1,13 +1,13 @@
 //! Latency of the market data path, bottom up: codec, publish, reader fan-out, cross-thread delivery.
-//! Run with `cargo bench -p market_data_provider --features bench`.
+//! Run with `cargo bench -p market_data_provider`.
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use market_data_provider::server::api::Subscription;
-use market_data_provider::shared_memory::{MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter};
-use market_data_provider::types::{
+use layline::provider_api::Subscription;
+use layline::shared_memory::{MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter};
+use layline::time::get_current_timestamp_nanoseconds;
+use layline::types::{
     Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side, Topic,
     Trade, UnderlyingType,
 };
-use market_data_provider::utils::get_current_timestamp_nanoseconds;
 use rkyv::rancor::Error as RkyvError;
 use rust_decimal::dec;
 use std::hint::{black_box, spin_loop};

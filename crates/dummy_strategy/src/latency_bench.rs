@@ -1,6 +1,6 @@
 use crate::strategy::Strategy;
-use market_data_provider::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
-use market_data_provider::utils::get_current_timestamp_nanoseconds;
+use layline::time::get_current_timestamp_nanoseconds;
+use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
 use std::collections::HashMap;
 use std::mem::take;
 use std::num::NonZeroU64;
@@ -188,9 +188,7 @@ impl Strategy for LatencyBench {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use market_data_provider::types::{
-        Currency, Exchange, Instrument, MarketData, Side, UnderlyingType,
-    };
+    use layline::types::{Currency, Exchange, Instrument, MarketData, Side, UnderlyingType};
     use rust_decimal::Decimal;
 
     fn instrument() -> Instrument {

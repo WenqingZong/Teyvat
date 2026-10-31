@@ -1,7 +1,7 @@
 //! TEMPORARY, development only: synthetic data standing in for venue feeds.
 //! Never human-reviewed; the whole module will be deleted once real connectors land.
-use crate::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
 use crate::utils::Clock;
+use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
 use rust_decimal::{Decimal, dec};
 use std::collections::{HashSet, VecDeque};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
@@ -92,11 +92,12 @@ fn synthetic_data(topic: Topic, latency_metric: LatencyMetric, sequence: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Exchange, Instrument, UnderlyingType};
-    use crate::utils::{RealClock, get_current_timestamp_nanoseconds};
+    use crate::utils::RealClock;
+    use layline::time::get_current_timestamp_nanoseconds;
+    use layline::types::{Currency, Exchange, Instrument, UnderlyingType};
 
     fn instrument() -> Instrument {
-        crate::testing::instrument(
+        layline::testing::instrument(
             Exchange::Binance,
             Currency::Eth,
             Currency::Usdt,
@@ -105,7 +106,7 @@ mod tests {
     }
 
     fn topic(market_data_type: MarketDataType) -> Topic {
-        crate::testing::topic(instrument(), market_data_type)
+        layline::testing::topic(instrument(), market_data_type)
     }
 
     #[tokio::test]

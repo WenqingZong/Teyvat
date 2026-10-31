@@ -1,8 +1,8 @@
 use super::format_topics;
 use super::registry::SubscriptionRegistry;
 use crate::exchanges::ExchangeRouter;
-use crate::server::api::{SubscriptionResult, TopicStatus};
-use crate::types::Topic;
+use layline::provider_api::{SubscriptionResult, TopicStatus};
+use layline::types::Topic;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -167,11 +167,11 @@ impl TopicSetChange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Exchange, MarketDataType, UnderlyingType};
+    use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
 
     fn topic(exchange: Exchange, market_data_type: MarketDataType) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(
+        layline::testing::topic(
+            layline::testing::instrument(
                 exchange,
                 Currency::Btc,
                 Currency::Usdt,

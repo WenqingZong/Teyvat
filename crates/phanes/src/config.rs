@@ -1,31 +1,25 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{metadata, read_to_string};
-use std::io::Error as IoError;
 use std::iter::once;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use layline::secrets::{SecretFileError, read_secret_file};
+use secrecy::{ExposeSecret, SecretBox};
 use serde::Deserialize;
 use toml::de::Error as TomlError;
 
-use crate::bark::BarkConfig;
 use crate::client_filter::ClientsByIp;
-use crate::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::bark::BarkConfig;
+use layline::noise::{StaticKey, decode_private_key, decode_public_key};
 
 pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
-/// Any of these bits set means group or others can access the file; secrets must be chmod 600.
-const GROUP_AND_OTHERS_PERMISSION_BITS: u32 = 0o077;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PhanesConfigError {
-    #[error("cannot read {path}: {source}")]
-    Read { path: PathBuf, source: IoError },
+    #[error(transparent)]
+    SecretFile(#[from] SecretFileError),
     #[error("invalid config {path}: {source}")]
     Parse { path: PathBuf, source: TomlError },
-    #[error("{0} must not be readable by group or others (chmod 600)")]
-    InsecurePermissions(PathBuf),
     #[error("invalid key in {0}")]
     InvalidKey(String),
     #[error("{address} is listed under both clients {first} and {second}")]
@@ -185,26 +179,13 @@ fn decode_client_public_key(encoded: &str, field: &str) -> Result<StaticKey, Pha
     decode_public_key(encoded).map_err(|_| PhanesConfigError::InvalidKey(field.to_owned()))
 }
 
-fn read_secret_file(path: &Path) -> Result<SecretString, PhanesConfigError> {
-    let read_error = |source| PhanesConfigError::Read {
-        path: path.to_owned(),
-        source,
-    };
-    let mode = metadata(path).map_err(read_error)?.permissions().mode();
-    if mode & GROUP_AND_OTHERS_PERMISSION_BITS != 0 {
-        return Err(PhanesConfigError::InsecurePermissions(path.to_owned()));
-    }
-    Ok(SecretString::from(
-        read_to_string(path).map_err(read_error)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::noise::encode_key;
-    use crate::noise::tests::test_keypair;
+    use layline::noise::encode_key;
+    use layline::testing::test_keypair;
     use std::fs::{Permissions, set_permissions, write};
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::{TempDir, tempdir};
 
     const OWNER_ONLY_MODE: u32 = 0o600;
@@ -507,7 +488,9 @@ allowed_clients = ["Osaka", "Tokyo"]
         .expect("permissions are set");
         assert!(matches!(
             config.load_celestia_private_key(),
-            Err(PhanesConfigError::InsecurePermissions(_))
+            Err(PhanesConfigError::SecretFile(
+                SecretFileError::InsecurePermissions(_)
+            ))
         ));
     }
 
@@ -516,7 +499,7 @@ allowed_clients = ["Osaka", "Tokyo"]
         let fixture = Fixture::new();
         assert!(matches!(
             PhanesConfig::load(&fixture.path("absent.toml")),
-            Err(PhanesConfigError::Read { .. })
+            Err(PhanesConfigError::SecretFile(SecretFileError::Read { .. }))
         ));
     }
 }

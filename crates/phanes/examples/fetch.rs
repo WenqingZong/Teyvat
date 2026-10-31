@@ -4,9 +4,9 @@
 //! cargo run --example fetch -- --url https://phanes.wenqing.dev \
 //!     --client-private-key-file client.key --gnosis-public-key <base64> --key-id binance_demo_trading
 
-use log::{error, info, warn};
 use std::fs::read_to_string;
 use std::path::PathBuf;
+use tracing::{error, info, warn};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -14,9 +14,10 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
-use phanes::gnosis::proto::{GNOSIS_PATH, Initiator, Request, Response};
-use phanes::noise::{decode_private_key, decode_public_key};
-use phanes::utils::init_logger;
+use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};
+use layline::logging::init_tracing;
+use layline::noise::{decode_private_key, decode_public_key};
+use layline::time::get_current_timestamp_nanoseconds;
 
 #[derive(Parser)]
 struct Arguments {
@@ -32,7 +33,7 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logger();
+    let _log_guard = init_tracing();
     let arguments = Arguments::parse();
     let encoded_private_key =
         SecretString::from(read_to_string(&arguments.client_private_key_file)?);
@@ -42,7 +43,7 @@ async fn main() -> Result<()> {
     let (initiator, first_message) = Initiator::write_request(
         &client_private_key,
         &gnosis_public_key,
-        &Request::new(&arguments.key_id),
+        &Request::new(&arguments.key_id, get_current_timestamp_nanoseconds()),
     )?;
     let http_response = Client::new()
         .post(arguments.url.join(GNOSIS_PATH)?)

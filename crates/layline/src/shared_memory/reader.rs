@@ -1,8 +1,8 @@
 use super::MAX_PAYLOAD_LENGTH;
 use super::ring_format::{RING_FILE_LENGTH, read_metadata};
+use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::Subscription;
 use crate::types::{Bbo, MarketData, MarketDataType, Topic, Trade};
-use crate::utils::get_current_timestamp_nanoseconds;
 use anyhow::{Context, Result, ensure};
 use bcast::error::Error::Overrun;
 use bcast::{Reader, RingBuffer};

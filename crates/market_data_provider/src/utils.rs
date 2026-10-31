@@ -1,25 +1,5 @@
+use layline::time::get_current_timestamp_nanoseconds;
 use std::num::NonZeroU64;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-/// Release builds push alerts through Bark and refuse to start without it; debug builds log them instead.
-pub(crate) const RELEASE_BUILD: bool = !cfg!(debug_assertions);
-
-fn now_nanoseconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("System clock before UNIX epoch")
-        .as_nanos() as u64
-}
-
-pub fn get_current_timestamp_nanoseconds() -> NonZeroU64 {
-    NonZeroU64::new(now_nanoseconds()).expect("Failed to convert timestamp")
-}
-
-/// Doubles from `initial` with each attempt in a row, up to `maximum`.
-pub fn exponential_backoff(attempt: u32, initial: Duration, maximum: Duration) -> Duration {
-    let doublings = attempt.saturating_sub(1).min(u32::BITS - 1);
-    initial.saturating_mul(1 << doublings).min(maximum)
-}
 
 /// Wall-clock source, so tests can pin timestamps. Timers use tokio time, which tests pause instead.
 pub(crate) trait Clock {
@@ -77,26 +57,6 @@ pub(crate) mod tests {
         let handle = clock.clone();
         handle.advance(Duration::from_nanos(500));
         assert_eq!(1_500, clock.now().get());
-    }
-
-    #[test]
-    fn backoff_doubles_up_to_the_maximum() {
-        assert_eq!(
-            Duration::from_secs(1),
-            exponential_backoff(1, Duration::from_secs(1), Duration::from_secs(60))
-        );
-        assert_eq!(
-            Duration::from_secs(32),
-            exponential_backoff(6, Duration::from_secs(1), Duration::from_secs(60))
-        );
-        assert_eq!(
-            Duration::from_secs(60),
-            exponential_backoff(7, Duration::from_secs(1), Duration::from_secs(60))
-        );
-        assert_eq!(
-            Duration::from_secs(60),
-            exponential_backoff(u32::MAX, Duration::from_secs(1), Duration::from_secs(60))
-        );
     }
 
     #[test]

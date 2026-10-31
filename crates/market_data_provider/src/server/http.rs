@@ -1,17 +1,18 @@
 use super::coordinator::Coordinator;
 use super::format_topics;
 use crate::exchanges::connected_apis;
-use crate::server::api::{
-    CONNECTED_APIS_PATH, ConnectedApis, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH,
-    SUBSCRIBE_PATH, SUBSCRIBED_PATH, SubscribedResponse, SubscriptionRequest, SubscriptionResponse,
-    UNSUBSCRIBE_PATH,
-};
 use anyhow::{Context, Result};
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Router, serve as serve_http};
-use chrono::Utc;
+use layline::build::build_profile;
+use layline::provider_api::{
+    CONNECTED_APIS_PATH, ConnectedApis, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH,
+    SUBSCRIBE_PATH, SUBSCRIBED_PATH, SubscribedResponse, SubscriptionRequest, SubscriptionResponse,
+    UNSUBSCRIBE_PATH,
+};
+use layline::time::server_time;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -19,9 +20,6 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 type Rejection = (StatusCode, String);
-
-const SERVER_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f UTC";
-const RELEASE_BUILD: bool = !cfg!(debug_assertions);
 
 #[derive(Clone)]
 struct ServerState {
@@ -57,9 +55,9 @@ async fn health() -> &'static str {
 async fn provider_info(State(state): State<ServerState>) -> Json<ProviderInfo> {
     let lease_duration = state.coordinator.lock().await.lease_duration();
     Json(ProviderInfo {
-        server_time: Utc::now().format(SERVER_TIME_FORMAT).to_string(),
+        server_time: server_time(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        build: if RELEASE_BUILD { "release" } else { "debug" }.to_owned(),
+        build: build_profile().to_owned(),
         lease_duration_seconds: lease_duration.as_secs(),
     })
 }

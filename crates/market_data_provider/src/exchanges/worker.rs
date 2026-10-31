@@ -1,7 +1,7 @@
 use super::ExchangeConnector;
-use crate::shared_memory::MarketDataWriter;
-use crate::types::{Exchange, MarketData, Topic};
 use anyhow::Result;
+use layline::shared_memory::MarketDataWriter;
+use layline::types::{Exchange, MarketData, Topic};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -272,9 +272,9 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
 pub(super) mod tests {
     use super::*;
     use crate::exchanges::OkxConnector;
-    use crate::types::ConnectedApi;
-    use crate::types::{Currency, Instrument, MarketDataType, UnderlyingType};
     use anyhow::bail;
+    use layline::types::ConnectedApi;
+    use layline::types::{Currency, Instrument, MarketDataType, UnderlyingType};
     use std::fs::create_dir_all;
     use std::future::pending;
     use tempfile::tempdir;
@@ -312,8 +312,8 @@ pub(super) mod tests {
     }
 
     fn topic(market_data_type: MarketDataType) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(
+        layline::testing::topic(
+            layline::testing::instrument(
                 Exchange::Okx,
                 Currency::Btc,
                 Currency::Usdt,

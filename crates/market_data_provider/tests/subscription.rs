@@ -1,15 +1,15 @@
 use chrono::{NaiveDateTime, TimeDelta, Utc};
-use market_data_provider::config::ProviderConfig;
-use market_data_provider::server::api::{
+use layline::provider_api::{
     CONNECTED_APIS_PATH, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH, SUBSCRIBE_PATH,
     SUBSCRIBED_PATH, SubscribedResponse, Subscription, SubscriptionRequest, SubscriptionResponse,
     TopicStatus, UNSUBSCRIBE_PATH,
 };
-use market_data_provider::server::{run, serve};
-use market_data_provider::shared_memory::MarketDataReader;
-use market_data_provider::types::{
+use layline::shared_memory::MarketDataReader;
+use layline::types::{
     Currency, Exchange, Instrument, MarketData, MarketDataType, Topic, UnderlyingType,
 };
+use market_data_provider::config::ProviderConfig;
+use market_data_provider::server::{run, serve};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::{Permissions, set_permissions, write};

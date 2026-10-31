@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use tokio::fs::read_to_string;
 use tokio::process::Command;
 
+use layline::time::since_unix_epoch;
 use phanes::celestia::proto::{NetworkRate, ProcessSample};
-use phanes::utils::since_unix_epoch;
 
 /// `/proc` reports CPU time in USER_HZ ticks, which Linux fixes at 100 per second.
 const TICKS_PER_SECOND: f64 = 100.0;

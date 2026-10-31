@@ -2,7 +2,6 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 
-// TODO: Phanes has its own copy; lift both into shared code once the provider, strategies and Phanes merge into one repo.
 pub fn init_tracing() -> WorkerGuard {
     let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
     tracing_subscriber::fmt()

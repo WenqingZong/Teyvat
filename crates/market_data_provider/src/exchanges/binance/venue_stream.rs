@@ -4,7 +4,7 @@
 // learnt through an InstrumentManager; `venue_symbol` and `stream_name` then move there.
 
 use super::endpoint::BinanceEndpoint;
-use crate::types::{Instrument, MarketDataType, Topic, UnderlyingType};
+use layline::types::{Instrument, MarketDataType, Topic, UnderlyingType};
 use std::str::from_utf8;
 
 /// Room for the longest symbol plus channel, so per-frame names need no allocation.
@@ -59,7 +59,7 @@ pub(super) fn sbe_stream_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Exchange};
+    use layline::types::{Currency, Exchange};
 
     fn topic(underlying_type: UnderlyingType, market_data_type: MarketDataType) -> Topic {
         Topic {

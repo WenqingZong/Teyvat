@@ -1,6 +1,6 @@
 use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_metadata, write_metadata};
+use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{MarketData, MarketDataType};
-use crate::utils::get_current_timestamp_nanoseconds;
 use anyhow::{Context, Result};
 use bcast::{RingBuffer, Writer};
 use memmap2::{MmapMut, MmapOptions};

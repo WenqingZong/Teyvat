@@ -1,8 +1,8 @@
 use super::ExchangeConnector;
 use super::synthetic::SyntheticFeed;
-use crate::types::{ConnectedApi, Exchange, MarketData, Topic};
 use crate::utils::RealClock;
 use anyhow::Result;
+use layline::types::{ConnectedApi, Exchange, MarketData, Topic};
 use std::collections::HashSet;
 use tracing::{info, trace};
 
@@ -50,10 +50,10 @@ impl ExchangeConnector for OkxConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Instrument, MarketDataType, UnderlyingType};
+    use layline::types::{Currency, Instrument, MarketDataType, UnderlyingType};
 
     fn instrument(underlying_type: UnderlyingType) -> Instrument {
-        crate::testing::instrument(
+        layline::testing::instrument(
             Exchange::Okx,
             Currency::Btc,
             Currency::Usdt,

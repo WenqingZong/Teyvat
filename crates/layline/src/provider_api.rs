@@ -1,4 +1,4 @@
-//! JSON over HTTP. Topics nest as exchange, then instrument, then market data type, spelled as in ring paths:
+//! The market data provider's HTTP contract with strategies: JSON over HTTP. Topics nest as exchange, then instrument, then market data type, spelled as in ring paths:
 //!
 //! ```text
 //! POST /subscribe   {"strategy_name": "dummy_strategy", "demo": false,

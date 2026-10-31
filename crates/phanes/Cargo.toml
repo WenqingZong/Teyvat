@@ -6,27 +6,21 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
-aes.workspace = true
+layline.workspace = true
 anyhow.workspace = true
 axum = { workspace = true, features = ["ws"] }
-base64.workspace = true
-cbc.workspace = true
 clap.workspace = true
-env_logger.workspace = true
 futures.workspace = true
 hex.workspace = true
-jiff.workspace = true
-log.workspace = true
 postcard.workspace = true
-rand.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 snow.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "signal"] }
 toml.workspace = true
+tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]

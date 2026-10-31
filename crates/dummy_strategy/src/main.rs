@@ -6,12 +6,10 @@ use anyhow::Result;
 use clap::Parser;
 use client::subscribe;
 use latency_bench::LatencyBench;
-use market_data_provider::logging::init_tracing;
-use market_data_provider::server::api::DEFAULT_PROVIDER_ADDRESS;
-use market_data_provider::shared_memory::MarketDataReader;
-use market_data_provider::types::{
-    Currency, Exchange, Instrument, MarketDataType, Topic, UnderlyingType,
-};
+use layline::logging::init_tracing;
+use layline::provider_api::DEFAULT_PROVIDER_ADDRESS;
+use layline::shared_memory::MarketDataReader;
+use layline::types::{Currency, Exchange, Instrument, MarketDataType, Topic, UnderlyingType};
 use std::collections::HashSet;
 use std::process::ExitCode;
 use std::time::Duration;

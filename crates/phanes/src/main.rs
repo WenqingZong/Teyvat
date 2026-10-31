@@ -1,4 +1,3 @@
-use log::{error, info, warn};
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::collections::HashSet;
@@ -12,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{error, info, warn};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -24,14 +24,17 @@ use tokio::spawn;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 
+use layline::bark::Notifier;
+use layline::build::RELEASE_BUILD;
+use layline::logging::init_tracing;
+use layline::noise::{encode_key, generate_keypair};
 use phanes::celestia::server::CelestiaState;
 use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter, ClientsByIp};
 use phanes::config::{PhanesConfig, PhanesConfigError};
 use phanes::gnosis::server::{self as gnosis_server, GnosisState};
-use phanes::noise::{encode_key, generate_keypair};
-use phanes::notify::{self, Notification, Notifier};
-use phanes::server::{self, ClientFilters, Service};
-use phanes::utils::{RELEASE_BUILD, init_logger};
+use phanes::notify::{self, Notification};
+use phanes::server::{self, ClientFilters};
+use phanes::service::Service;
 
 const CRASH_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Owner read/write only.
@@ -82,7 +85,7 @@ enum ServiceError {
 }
 
 fn main() -> ExitCode {
-    init_logger();
+    let _log_guard = init_tracing();
     match Cli::parse().command {
         Command::Keygen { private_key_file } => match generate_key_file(&private_key_file) {
             Ok(()) => ExitCode::SUCCESS,
@@ -292,7 +295,12 @@ fn describe_panic_payload(payload: &(dyn Any + Send)) -> String {
 async fn report_crash(notifier: &Notifier, reason: String) -> ExitCode {
     error!("Phanes service died: {reason}");
     let notification = Notification::Crashed { reason };
-    match timeout(CRASH_NOTIFICATION_TIMEOUT, notifier.send(&notification)).await {
+    match timeout(
+        CRASH_NOTIFICATION_TIMEOUT,
+        notifier.send(&notification.to_bark_message()),
+    )
+    .await
+    {
         Ok(Ok(())) => info!("crash notification sent"),
         Ok(Err(error)) => error!("failed to send crash notification: {error}"),
         Err(_) => error!("timed out sending crash notification"),

@@ -8,14 +8,15 @@ use super::websocket::{
     EndpointId, EndpointSet, EndpointState, Header, Heartbeat, Keepalive, TungsteniteClient,
     WebSocketClient,
 };
-use crate::alert::{Notifier, SendAlert};
+use crate::alert::SendAlert;
 use crate::phanes_client::{ApiKeySource, PhanesClient, fetch_api_key_or_panic};
-use crate::types::ConnectedApi;
-use crate::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
 use crate::utils::{Clock, RealClock};
 use anyhow::{Error, Result, anyhow};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use futures::future::OptionFuture;
+use layline::bark::Notifier;
+use layline::types::ConnectedApi;
+use layline::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
 use message::{
     Request, Response, TextFrame, classify_text_frame, event_to_market_data, taker_side,
     to_sequence,
@@ -585,7 +586,7 @@ fn log_stray_response(endpoint: BinanceEndpoint, response: &Response) {
 
 /// Doubles from `FIRST_RETRY_DELAY` with each failure in a row, up to `MAX_RETRY_DELAY`.
 fn retry_delay(failures: u32) -> Duration {
-    crate::utils::exponential_backoff(failures, FIRST_RETRY_DELAY, MAX_RETRY_DELAY)
+    layline::backoff::exponential_backoff(failures, FIRST_RETRY_DELAY, MAX_RETRY_DELAY)
 }
 
 fn group_streams_by_endpoint(
@@ -626,9 +627,9 @@ mod tests {
     };
     use crate::exit_reason::ExitReason;
     use crate::phanes_client::tests::MockApiKeySource;
-    use crate::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
     use crate::utils::tests::MockClock;
     use futures::FutureExt;
+    use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
     use rust_decimal::dec;
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
     use serde_json::{Value, json};
@@ -806,8 +807,8 @@ mod tests {
         underlying_type: UnderlyingType,
         market_data_type: MarketDataType,
     ) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(Exchange::Binance, base, Currency::Usdt, underlying_type),
+        layline::testing::topic(
+            layline::testing::instrument(Exchange::Binance, base, Currency::Usdt, underlying_type),
             market_data_type,
         )
     }

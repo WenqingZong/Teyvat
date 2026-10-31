@@ -1,12 +1,11 @@
 //! The provider's TOML config, read once at startup; see `deploy/market_data_provider.example.toml`.
 
 use crate::DEFAULT_ROOT_DIRECTORY;
-use crate::alert::Notifier;
-use crate::bark::BarkConfig;
 use crate::phanes_client::{PhanesClient, PhanesClientConfig};
-use crate::secrets::read_secret_file;
-use crate::utils::RELEASE_BUILD;
 use anyhow::{Context, Result};
+use layline::bark::{BarkConfig, Notifier};
+use layline::build::RELEASE_BUILD;
+use layline::secrets::read_secret_file;
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};

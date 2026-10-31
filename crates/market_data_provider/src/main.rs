@@ -1,7 +1,7 @@
 use clap::Parser;
+use layline::logging::init_tracing;
 use market_data_provider::config::ProviderConfig;
 use market_data_provider::exit_reason::ExitReason;
-use market_data_provider::logging::init_tracing;
 use market_data_provider::server::run;
 use std::panic::{panic_any, set_hook};
 use std::path::PathBuf;

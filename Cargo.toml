@@ -8,7 +8,7 @@ edition = "2024"
 authors = ["Wenqing Zong"]
 
 [workspace.dependencies]
-market_data_provider = { path = "crates/market_data_provider" }
+layline = { path = "crates/layline" }
 
 aes = "0.9.3"
 anyhow = "1.0.104"
@@ -20,10 +20,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 bcast = { version = "0.0.31", features = ["mmap"] }
 futures = "0.3.32"
-env_logger = "0.11.11"
 hex = "0.4.3"
-jiff = "0.2.38"
-log = "0.4.34"
 memmap2 = "0.9.9"
 postcard = { version = "1.1.3", features = ["use-std"] }
 rand = "0.10.3"

@@ -13,6 +13,8 @@ use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::sync::Arc;
+use tracing::info;
 use url::Url;
 
 type Aes256CbcEncryptor = Encryptor<Aes256>;
@@ -23,7 +25,7 @@ const BARK_SERVER: &str = "https://api.day.app";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarkError {
-    #[error("missing [bark] section in phanes.toml")]
+    #[error("missing [bark] section in the config")]
     MissingConfig,
     #[error("encryption key must be exactly {KEY_LENGTH} bytes, got {0}")]
     InvalidKeyLength(usize),
@@ -38,7 +40,7 @@ pub enum BarkError {
     Rejected { code: StatusCode, message: String },
 }
 
-/// The `[bark]` table of phanes.toml.
+/// The `[bark]` table of the config.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BarkConfig {
@@ -137,6 +139,37 @@ impl BarkNotifier {
             });
         }
         Ok(())
+    }
+}
+
+/// Where pushes go: Bark in release builds, the log in debug builds. Clones share one Bark client.
+#[derive(Clone)]
+pub enum Notifier {
+    Bark(Arc<BarkNotifier>),
+    /// Local development: no Bark credentials needed, every push becomes an `info!` line.
+    Log,
+}
+
+impl Notifier {
+    /// Release builds require the `[bark]` section of the config; debug builds always log.
+    pub fn new(release_build: bool, bark_config: Option<BarkConfig>) -> Result<Self, BarkError> {
+        if !release_build {
+            return Ok(Self::Log);
+        }
+        let bark_config = bark_config.ok_or(BarkError::MissingConfig)?;
+        Ok(Self::Bark(Arc::new(BarkNotifier::new(bark_config)?)))
+    }
+
+    pub async fn send(&self, message: &BarkMessage) -> Result<(), BarkError> {
+        match self {
+            Self::Bark(bark) => bark.send(message).await,
+            Self::Log => {
+                let title = &message.title;
+                let body = message.body.replace('\n', " | ");
+                info!("[push] {title}: {body}");
+                Ok(())
+            }
+        }
     }
 }
 
@@ -247,6 +280,37 @@ mod tests {
     #[test]
     fn response_code_rejects_invalid_status_code() {
         assert!(serde_json::from_str::<BarkResponse>(r#"{"code":42}"#).is_err());
+    }
+
+    #[test]
+    fn debug_build_logs_without_bark_config() {
+        let notifier = Notifier::new(false, None).expect("debug builds never need Bark");
+        assert!(matches!(notifier, Notifier::Log));
+    }
+
+    #[test]
+    fn release_build_requires_bark_config() {
+        assert!(matches!(
+            Notifier::new(true, None),
+            Err(BarkError::MissingConfig)
+        ));
+    }
+
+    #[test]
+    fn release_build_pushes_through_bark() {
+        let bark_config = test_config(BARK_SERVER, TEST_KEY);
+        let notifier = Notifier::new(true, Some(bark_config)).expect("the Bark config is valid");
+        assert!(matches!(notifier, Notifier::Bark(_)));
+    }
+
+    #[tokio::test]
+    async fn log_notifier_always_succeeds() {
+        let message = BarkMessage {
+            title: "title".to_owned(),
+            body: "first line\nsecond line".to_owned(),
+            ..Default::default()
+        };
+        assert!(Notifier::Log.send(&message).await.is_ok());
     }
 
     #[test]

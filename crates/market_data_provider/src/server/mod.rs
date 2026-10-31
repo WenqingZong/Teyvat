@@ -1,13 +1,12 @@
-pub mod api;
 mod coordinator;
 mod http;
 mod registry;
 
 use crate::config::ProviderConfig;
 use crate::exchanges::{ConnectorContext, ExchangeRouter};
-use crate::types::Topic;
 use anyhow::{Context, Result};
 use coordinator::Coordinator;
+use layline::types::Topic;
 use std::fs::create_dir_all;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

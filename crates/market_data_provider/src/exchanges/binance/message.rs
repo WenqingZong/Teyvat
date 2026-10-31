@@ -4,8 +4,8 @@
 //! and falls back to serde_json, so odd input is never misread.
 
 use crate::time::milliseconds_to_nanoseconds;
-use crate::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
 use anyhow::{Context, Result, anyhow};
+use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -294,7 +294,7 @@ pub(super) fn taker_side(buyer_is_maker: bool) -> Side {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Currency, Exchange, Instrument, UnderlyingType};
+    use layline::types::{Currency, Exchange, Instrument, UnderlyingType};
     use rust_decimal::dec;
 
     const RECEIVED_TIME_NANOSECONDS: NonZeroU64 =

@@ -1,5 +1,5 @@
-//! End-to-end encryption shared by every Phanes service. Cloudflare terminates TLS, so each
-//! service encrypts at the application layer with `Noise_KK`: both sides know each other's
+//! End-to-end encryption for every Phanes service and its clients. Cloudflare terminates TLS, so
+//! each service encrypts at the application layer with `Noise_KK`: both sides know each other's
 //! static X25519 public key in advance, and each service uses its own key pair and prologue.
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -124,18 +124,11 @@ pub fn decrypt<State: NoiseState>(
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use crate::testing::test_keypair;
 
     const PROLOGUE: &[u8] = b"test";
-
-    pub(crate) fn test_keypair() -> (SecretBox<StaticKey>, StaticKey) {
-        let keypair = generate_keypair().expect("keypair generation succeeds");
-        (
-            SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.private)),
-            keypair.public.try_into().expect("public key is 32 bytes"),
-        )
-    }
 
     #[test]
     fn handshake_and_transport_round_trip() {
@@ -213,5 +206,6 @@ pub(crate) mod tests {
         assert_eq!(decoded.expose_secret(), private_key.expose_secret());
         let truncated = SecretString::from(encode_key(&private_key.expose_secret()[..31]));
         assert!(decode_private_key(&truncated).is_err());
+        assert!(decode_private_key(&SecretString::from("not base64!")).is_err());
     }
 }

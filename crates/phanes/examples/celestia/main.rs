@@ -5,10 +5,10 @@
 //!     --client-private-key-file celestia_client.key --celestia-public-key <base64> \
 //!     --systemd-unit my_app.service      # or --process-id <pid>, network then reads 0
 
-use log::{info, warn};
 use std::fs::read_to_string;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -20,9 +20,10 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::time::{MissedTickBehavior, interval, sleep};
 use url::Url;
 
+use layline::logging::init_tracing;
+use layline::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::time::since_unix_epoch;
 use phanes::celestia::proto::ProcessSample;
-use phanes::noise::{StaticKey, decode_private_key, decode_public_key};
-use phanes::utils::{init_logger, since_unix_epoch};
 
 use client::{Outbox, build_celestia_url, run_session};
 use sampler::{Sampler, Target};
@@ -53,7 +54,7 @@ struct Arguments {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logger();
+    let _log_guard = init_tracing();
     let arguments = Arguments::parse();
     let target = match (arguments.process_id, arguments.systemd_unit) {
         (Some(process_id), None) => Target::ProcessId(process_id),

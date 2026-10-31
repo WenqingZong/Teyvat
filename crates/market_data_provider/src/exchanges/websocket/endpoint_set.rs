@@ -1,8 +1,8 @@
 //! Venue-neutral state for a connector that owns one websocket per endpoint.
 use super::client::WebSocketClient;
 use super::connection::{Heartbeat, WebSocketConnection};
-use crate::types::Topic;
-use crate::utils::exponential_backoff;
+use layline::backoff::exponential_backoff;
+use layline::types::Topic;
 use std::array::from_fn;
 use std::collections::HashMap;
 use std::fmt::Display;

@@ -1,10 +1,10 @@
 use anyhow::{Result, bail};
-use market_data_provider::server::api::{
+use layline::backoff::exponential_backoff;
+use layline::provider_api::{
     RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest, SubscriptionResponse,
     SubscriptionResult,
 };
-use market_data_provider::types::Topic;
-use market_data_provider::utils::exponential_backoff;
+use layline::types::Topic;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::thread;
@@ -151,9 +151,7 @@ fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, Subsc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use market_data_provider::types::{
-        Currency, Exchange, Instrument, MarketDataType, UnderlyingType,
-    };
+    use layline::types::{Currency, Exchange, Instrument, MarketDataType, UnderlyingType};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;

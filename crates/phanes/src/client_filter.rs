@@ -2,13 +2,13 @@
 //! so the socket peer is always loopback; the client address comes from `CF-Connecting-IP`,
 //! which Cloudflare overwrites (unlike the appendable `X-Forwarded-For`).
 
-use log::{debug, error, warn};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::{debug, error, warn};
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::StatusCode;
@@ -19,7 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::RequestDetails;
-use crate::server::{Language, Service};
+use crate::service::{Language, Service};
 
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
 /// Client name seen by handlers when the filter is not mounted (debug builds).

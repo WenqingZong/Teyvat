@@ -1,4 +1,4 @@
-use market_data_provider::types::{Bbo, MarketData, Trade};
+use layline::types::{Bbo, MarketData, Trade};
 use std::num::NonZeroU64;
 
 pub(crate) trait Strategy {
@@ -17,10 +17,8 @@ pub(crate) trait Strategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use market_data_provider::types::{
-        Currency, Exchange, Instrument, LatencyMetric, Side, UnderlyingType,
-    };
-    use market_data_provider::utils::get_current_timestamp_nanoseconds;
+    use layline::time::get_current_timestamp_nanoseconds;
+    use layline::types::{Currency, Exchange, Instrument, LatencyMetric, Side, UnderlyingType};
     use rust_decimal::Decimal;
 
     #[derive(Default)]

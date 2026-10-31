@@ -1,7 +1,7 @@
 //! Keeps unacknowledged batches in memory and streams them to Phanes.
-use log::{info, warn};
 use std::collections::VecDeque;
 use std::time::Duration;
+use tracing::{info, warn};
 
 use futures::{SinkExt, StreamExt};
 use secrecy::SecretBox;
@@ -12,10 +12,10 @@ use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use url::{ParseError, Url};
 
+use layline::noise::StaticKey;
 use phanes::celestia::proto::{
     Ack, Batch, CELESTIA_PATH, CelestiaError, Initiator, ProcessSample, Session,
 };
-use phanes::noise::StaticKey;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -214,9 +214,9 @@ async fn handshake(
 mod tests {
     use super::*;
     use axum::serve;
+    use layline::noise::generate_keypair;
     use phanes::celestia::proto::NetworkRate;
     use phanes::celestia::server::{CelestiaState, router};
-    use phanes::noise::generate_keypair;
     use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::spawn;

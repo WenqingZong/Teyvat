@@ -1,8 +1,8 @@
 //! Phanes side: accepts Osaka's Celestia WebSocket, logs every sample and acks each batch.
 
-use log::{error, info, warn};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tracing::{error, info, warn};
 
 use axum::Error as AxumError;
 use axum::Router;
@@ -19,10 +19,10 @@ use tokio::time::timeout;
 
 use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Session, respond};
 use crate::client_filter::ClientName;
-use crate::noise::{MAX_NOISE_MESSAGE_LENGTH, StaticKey};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
-use crate::server::Service;
+use crate::service::Service;
+use layline::noise::{MAX_NOISE_MESSAGE_LENGTH, StaticKey};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The client sends a sample every second and pings when idle, so silence means it is gone.
@@ -216,9 +216,9 @@ mod tests {
     use super::*;
     use crate::celestia::proto::Initiator;
     use crate::celestia::proto::tests::sample;
-    use crate::noise::tests::test_keypair;
     use axum::serve;
     use futures::{SinkExt, StreamExt};
+    use layline::testing::test_keypair;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::spawn;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};

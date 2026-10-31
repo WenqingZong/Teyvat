@@ -6,7 +6,7 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
-market_data_provider.workspace = true
+layline.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
