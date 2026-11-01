@@ -1,4 +1,4 @@
-//! The provider's TOML config, read once at startup; see `deploy/market_data_provider.example.toml`.
+//! The provider's TOML config, read once at startup; see `deploy/market_data_provider/market_data_provider.example.toml`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};

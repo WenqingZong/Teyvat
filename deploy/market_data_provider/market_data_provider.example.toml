@@ -1,5 +1,5 @@
 # Copied to /etc/market_data_provider/market_data_provider.toml (chmod 600, it holds the Bark credentials) by
-# `deploy/market_data_provider.sh install`; fill in the placeholders there. For a local run, copy it anywhere
+# `deploy/market_data_provider/market_data_provider.sh install`; fill in the placeholders there. For a local run, copy it anywhere
 # and start `market_data_provider --config <file>`.
 port = 6666                                          # strategies assume 6666 (DEFAULT_PROVIDER_ADDRESS)
 # false serves live data; true serves the venues' demo data. Strategies must ask for the same.

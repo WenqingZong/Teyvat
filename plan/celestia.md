@@ -1,6 +1,6 @@
 # Osaka 监控（Celestia）计划
 
-状态：简化版已实现（Phanes 收数据只打日志；Osaka 端为 `examples/celestia/`，内存缓存）。标 **【待定】** 的条目需要确认后再动手。
+状态：简化版已实现（Phanes 收数据只打日志；Osaka 端为 `examples/celestia/`，内存缓存），已实现部分见 [`architecture/phanes.md`](../architecture/phanes.md)。实施进度见 §8。标 **【待定】** 的条目需要确认后再动手。
 
 ## 1. 目标
 
@@ -37,21 +37,22 @@
 ## 4. 总体架构
 
 ```text
-Osaka（业务程序进程内）                                 RedmiBook
-┌────────────────────────────────┐                  ┌──────────────────────────────────┐
-│ 业务代码 ─record()─► 有界 channel │                  │ phanes 进程 · Celestia 模块         │
-│ /proc 采样器（1 s）─┘             │                  │   Noise 解密 → 校验 → 写入 ClickHouse│
-│        │                       │   WebSocket       │   写成功后回 Ack{sequence}          │
-│        ▼                       │  (Noise 加密帧)    │              │                    │
-│ 每秒打包一批 → 追加到磁盘 spool   │ ──Cloudflare────► │              ▼                    │
-│        │                       │     Tunnel        │ ClickHouse（localhost）              │
-│ 发送任务：读 spool → 发送 → 收 ack │ ◄──── Ack ─────── │              ▲                    │
-│ → 删除已确认的段                  │                  │ Grafana（localhost）               │
-└────────────────────────────────┘                  │              ▲                    │
-                                                    │ cloudflared + Cloudflare Access    │
-                                                    └──────────────┼───────────────────┘
-                                                                   │ HTTPS
-                                                                  手机 / 浏览器
+Osaka (inside the business process)                              RedmiBook
++---------------------------------------------+                  +-------------------------------------+
+| business code --record()--> bounded channel |                  | phanes process, Celestia module     |
+| /proc sampler (1 s) -----------^            |                  |   Noise decrypt -> validate         |
+|        |                                    |  WebSocket       |   -> write to ClickHouse            |
+|        v                                    | (Noise frames)   |   ack only after the write succeeds |
+| pack one batch per second                   | --Cloudflare-->  |               |                     |
+|   -> append to the disk spool               |    Tunnel        |               v                     |
+|        |                                    | <---- Ack -----  | ClickHouse (localhost)              |
+| sender: read spool -> send -> await ack     |                  |               ^                     |
+|   -> delete fully acked segments            |                  | Grafana (localhost)                 |
++---------------------------------------------+                  |               ^                     |
+                                                                 | cloudflared + Cloudflare Access     |
+                                                                 +---------------+---------------------+
+                                                                                 | HTTPS
+                                                                          phone / browser
 ```
 
 ## 5. Osaka 侧：`celestia-client` 库
@@ -121,35 +122,36 @@ Celestia 出任何错（断线、磁盘满、编码失败）都只能**降级**�
 
 ### 6.4 告警（Bark）
 
-复用 `src/notify.rs` 的 `Notifier`（release 走 Bark，debug 打日志）。只推安全事件：
+复用 `layline::bark::Notifier`（release 走 Bark，debug 打日志），推送事件和文案在 `crates/phanes/src/notify.rs`。只推安全事件：
 
 - Noise 握手失败、解密失败：推送"未授权的天空岛监控连接"（节流 10 分钟）。
 - 断线、没数据、补发都不推送。
 - 阈值告警（CPU、内存）：【待定 Q4】
 
-## 7. 代码组织（推荐，【待定 Q3】）
+## 7. 代码组织
 
-本仓库改成 cargo workspace：
+Teyvat 已经是 cargo workspace，共用代码在 `layline`（只有被两个及以上 crate 使用的代码才放进去）。
 
-| crate | 内容 | 使用方 |
+| 位置 | 内容 | 状态 |
 |---|---|---|
-| `proto` | Gnosis 协议（现 `src/proto.rs`）+ Celestia 协议（`Batch`、`Ack`、Noise 参数、prologue） | 两端共用 |
-| `phanes` | 唯一的服务端 binary：Gnosis 模块 + Celestia 模块（接收、写 ClickHouse、告警） | RedmiBook |
-| `celestia-client` | 采集、spool、发送（库） | Osaka 业务程序依赖 |
+| `layline::noise` | Noise 参数、握手、加解密，Gnosis 和 Celestia 共用 | 已有 |
+| `crates/phanes/src/celestia/proto.rs` | Celestia 协议（`ProcessSample`、`Batch`、`Ack`、握手、编解码） | 已有。正式的 `celestia_client` crate 出现后，它有了第二个使用者，按规则移入 `layline` |
+| `crates/phanes`（Celestia 模块） | 接收、写 ClickHouse、去重、告警 | 接收、解密、回 ack、安全事件推送已有；ClickHouse 和去重未做 |
+| `celestia_client`（新 crate） | 采集、spool、发送（库） | 未做；`examples/celestia/` 是内存缓存的简化版 |
 
-Bark 和 `Notifier` 留在 `phanes` crate。
+Bark 和 `Notifier` 在 `layline::bark`。
 
 ## 8. 实施步骤（确认后执行）
 
-1. 改造为 workspace，把 `proto` 抽出来。Gnosis 的行为不变，测试全过。
-2. 在 `proto` 里定义 Celestia 协议（消息类型、握手、编解码），加单元测试。
-3. 在 `phanes` 里加 Celestia 模块：WS + Noise + 写 ClickHouse + ack + 去重，配置加 `[celestia]` 段，密钥复用 `phanes keygen` 生成。
+1. **【已完成】** 改造为 workspace，把共用协议抽出来：Teyvat workspace，Noise 层和 Gnosis 协议在 `layline`。Gnosis 的行为不变，测试全过。
+2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/phanes/src/celestia/proto.rs`。
+3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、配置段 `[celestia_service_config]`、密钥由 `phanes keygen` 生成，均已完成；写 ClickHouse、去重未做。
 4. 写 `celestia-client`：采集（含 systemd `IPAccounting` 进程口径网络）、spool、发送、重连、限速补发。
-5. 写 `examples/`：模拟 Osaka 程序，在本机跑通端到端，包括断网补发的测试。
+5. **【部分完成】** 写 `examples/`：模拟 Osaka 程序（`examples/celestia/`，内存缓存、重连补发）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
 6. 部署：ClickHouse、Grafana、systemd unit，扩展部署脚本，配置 cloudflared 路由和 Cloudflare Access。
 7. Grafana 看板（CPU、内存、网络、内部指标），配置以 JSON 形式入库。
-8. 告警：安全事件推送（已完成）。
-9. 更新 README 和 `CLAUDE.md`。
+8. **【已完成】** 告警：安全事件推送。
+9. 每完成一步，把实现的部分写进 `architecture/phanes.md`，并更新本文和 `deploy/README.md`。
 
 ## 9. 待定问题
 

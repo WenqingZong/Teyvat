@@ -1,32 +1,21 @@
-# Phanes
+# 部署
 
-天理法涅斯, 量化系统总控. 本文中的路径如无特别说明, 均相对于 `crates/phanes/`.
+本目录存放所有部署相关的文件。代码在 `crates/`，二进制在顶层 `teyvat` package 中定义，见 [`architecture/overview.md`](../architecture/overview.md)。
 
-部署在 RedmiBook 上，一个进程同时跑两个服务：
+每个服务一个子目录：
 
-- **Gnosis**（API Key 发放服务，寓意天理发放神之心）：Osaka 上的程序启动时经 Cloudflare Tunnel 来取 key，
-  请求和回复都是 Noise `KK` 密文（Cloudflare 只能看到乱码）；每次发放 / 拒绝 / 服务挂掉都会通过 Bark 推送到手机。
-- **Celestia**（进程监控，寓意天空岛俯瞰提瓦特众生）：Osaka 每秒上报业务进程的 CPU、内存、网络（进程口径），经 WebSocket + Noise `KK` 加密传输。
-  目前 Phanes 收到后只打日志并回 ack，入库和看板见 `plan/`。
-
-两个服务各用一对密钥，任一服务的配置有误，Phanes 都拒绝启动。
-
-release 构建在 `/gnosis` 和 `/celestia` 前加 IP 白名单（`/info` 不过滤）：客户端 IP 取 Cloudflare 写入的 `CF-Connecting-IP` 头，
-不在该服务 `allowed_clients` 里（或头缺失）一律回空 404，并推送"白名单外的降临者被拦截"（10 分钟节流）。
-因此 `listen_address` 必须是回环地址，否则 release 构建拒绝启动。
-
-```
-Osaka ──HTTPS──> Cloudflare ──tunnel──> cloudflared ──> 127.0.0.1:8888 Phanes (RedmiBook)
-      └──────────── Noise_KK 端到端加密，Cloudflare 看不到明文 ────────────┘
-```
-
-| 接口 | 说明 |
+| 目录 | 内容 |
 |---|---|
-| `POST /gnosis` | body 为 Noise 握手消息 1（含加密的 `{key_id, timestamp, nonce}`），返回消息 2（含加密的 key 或拒绝原因）。握手失败返回空 404。 |
-| `GET /celestia` | 升级为 WebSocket。前两帧是 Noise 握手，之后每帧是一个加密的 `Batch`，Phanes 回加密的 `Ack`。握手或解密失败直接断开并推送。 |
-| `GET /info` | 返回 JSON `{status, server_time, version, build}`（`server_time` 为 UTC 时间、精确到毫秒，如 `2026-10-15 13:30:05.123 UTC`），供 Osaka 探活。不做 IP 过滤，任何人可访问。 |
+| `phanes/` | Phanes 的部署脚本 `phanes.sh`、systemd unit `phanes.service`、配置模板 `phanes.example.toml`（RedmiBook） |
+| `market_data_provider/` | 行情服务的部署脚本 `market_data_provider.sh`、systemd unit `market_data_provider.service`、配置模板 `market_data_provider.example.toml`（Osaka） |
+| `clickhouse/` | RedmiBook 上 ClickHouse 的手动安装记录 [`clickhouse.md`](clickhouse/clickhouse.md)（尚未接入代码，见 [`plan/database.md`](../plan/database.md)） |
 
-## 部署后的文件
+所有命令都在 **Teyvat 仓库根目录**执行。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），
+但因为所有二进制都在同一个 package 里，构建时会编译全部 crate。
+
+## Phanes（RedmiBook）
+
+### 部署后的文件
 
 | 路径 | 内容 |
 |---|---|
@@ -34,32 +23,32 @@ Osaka ──HTTPS──> Cloudflare ──tunnel──> cloudflared ──> 127.
 | `/etc/phanes/gnosis.key` / `gnosis.pub` | Gnosis 私钥（600）/ 公钥 |
 | `/etc/phanes/celestia.key` / `celestia.pub` | Celestia 私钥（600）/ 公钥 |
 | `/etc/phanes/phanes.toml` | 配置（600；监听地址、客户端 IP 白名单、Osaka 的两个公钥、允许的 key id、Bark 凭据） |
-| `/etc/phanes/api_keys/<key_id>.txt` | 待发放的 key（600），从 `crates/phanes/api_keys/` 同步 |
+| `/etc/phanes/api_keys/<key_id>.txt` | 待发放的 key（600），从 `api_keys/` 同步 |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
-## RedmiBook 部署
+### RedmiBook 部署
 
 以下命令都在 **Teyvat 仓库根目录**、以**普通用户**执行（脚本内部按需 sudo）。
 
-### 1. 准备
+#### 1. 准备
 
 ```bash
 sudo apt install -y build-essential pkg-config cmake curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust 可跳过
 ```
 
-把要发放的 key 放进 `crates/phanes/api_keys/<key_id>.txt`（已 gitignore，不会提交）。
+把要发放的 key 放进 `api_keys/<key_id>.txt`（已 gitignore，不会提交）。
 
-### 2. 安装
+#### 2. 安装
 
 ```bash
-crates/phanes/deploy/phanes.sh install
+deploy/phanes/phanes.sh install
 ```
 
 首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、同步 `api_keys/`（为空则报错退出）、生成配置模板、安装 systemd unit，
 然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给 Osaka，也可随时 `cat /etc/phanes/*.pub`）。
 
-### 3. 填配置
+#### 3. 填配置
 
 `/etc/phanes/phanes.toml`：
 
@@ -69,9 +58,9 @@ crates/phanes/deploy/phanes.sh install
 - `celestia_service_config.public_key` 填 Osaka 的 Celestia 公钥。
 - `[bark]` 的 `device_key`，以及 `encryption_key`（32 位，Bark App 里设为 AES-256-CBC）。
 
-再跑一次 `crates/phanes/deploy/phanes.sh install`，这次会启动服务并检查 `/info`，手机应收到"天理降临"。
+再跑一次 `deploy/phanes/phanes.sh install`，这次会启动服务并检查 `/info`，手机应收到"天理降临"。
 
-### 4. Cloudflare Tunnel
+#### 4. Cloudflare Tunnel
 
 给 Phanes 一个单独的子域名 `phanes.wenqing.dev`，指向 `http://127.0.0.1:8888`（与 `phanes.toml` 的 `listen_address` 一致）：
 
@@ -88,29 +77,29 @@ crates/phanes/deploy/phanes.sh install
 再在 Cloudflare 面板给该主机名加 WAF 自定义规则（Security → WAF → Custom rules）：
 表达式 `(http.host eq "phanes.wenqing.dev" and not ip.src in {<Osaka IPv4> <Osaka IPv6>})`，动作 Block。非白名单流量到不了隧道，与 Phanes 的白名单互为两层。
 
-### 5. 让笔记本保持在线
+#### 5. 让笔记本保持在线
 
 Osaka 每次重启都要取 key，RedmiBook 必须在线：
 
 - 合盖不休眠：`/etc/systemd/logind.conf` 设 `HandleLidSwitch=ignore`、`HandleLidSwitchExternalPower=ignore`，`sudo systemctl restart systemd-logind`。
 - 时钟同步（请求时间戳窗口 ±60s）：`timedatectl status` 应为 `synchronized: yes`，否则 `sudo timedatectl set-ntp true`。
 
-### 日常操作
+#### 日常操作
 
 | 场景 | 命令 |
 |---|---|
-| 代码更新后重新部署 | `git pull && crates/phanes/deploy/phanes.sh install`（保留密钥和配置） |
-| 新增 / 修改 key | 改 `crates/phanes/api_keys/`，必要时改 `allowed_key_ids`，再 `crates/phanes/deploy/phanes.sh install` |
+| 代码更新后重新部署 | `git pull && deploy/phanes/phanes.sh install`（保留密钥和配置） |
+| 新增 / 修改 key | 改 `api_keys/`，必要时改 `allowed_key_ids`，再 `deploy/phanes/phanes.sh install` |
 | 看日志 | `journalctl --namespace=phanes -u phanes -f`（Phanes 使用独立的 journal namespace） |
-| 彻底删除 | `crates/phanes/deploy/phanes.sh uninstall` |
-| 从零重装 | `crates/phanes/deploy/phanes.sh reinstall`（**会生成新 Gnosis 和 Celestia 密钥**，Osaka 要换公钥，`phanes.toml` 要重填） |
+| 彻底删除 | `deploy/phanes/phanes.sh uninstall` |
+| 从零重装 | `deploy/phanes/phanes.sh reinstall`（**会生成新 Gnosis 和 Celestia 密钥**，Osaka 要换公钥，`phanes.toml` 要重填） |
 
 `uninstall` 删除上表"部署后的文件"里的所有东西以及 Phanes 的 journal 日志；cloudflared 的 hostname 映射保留。
 `uninstall` / `reinstall` 会先确认，加 `--yes` 跳过。
 
-## Osaka 配置
+### Osaka 配置
 
-### 1. 生成客户端密钥（只需 openssl）
+#### 1. 生成客户端密钥（只需 openssl）
 
 Gnosis 和 Celestia 各一对：
 
@@ -128,27 +117,11 @@ done
 > Ubuntu 新版默认的 sudo-rs 会对 Oracle Cloud Agent 的 sudoers 文件刷一堆解析警告，不影响执行；
 > 嫌吵可 `sudo update-alternatives --config sudo` 选回 `sudo.ws`。
 
-### 2. RedmiBook 公钥
+#### 2. RedmiBook 公钥
 
 把 RedmiBook 的 `/etc/phanes/gnosis.pub`、`/etc/phanes/celestia.pub` 内容配给 Osaka 上的程序。
 
-### 3. 客户端代码
-
-Gnosis 协议的两端都在 `layline::gnosis`，Osaka 上的 crate（如 `market_data_provider`）依赖 workspace 里的 `layline`，参考 Teyvat 根目录的 [`examples/fetch.rs`](../../examples/fetch.rs)：
-
-```toml
-layline.workspace = true
-```
-
-```rust
-let request = Request::new("binance_demo_trading", get_current_timestamp_nanoseconds());
-let (initiator, first_message) =
-    Initiator::write_request(&client_private_key, &gnosis_public_key, &request)?;
-// POST first_message 到 https://phanes.wenqing.dev/gnosis
-let response = initiator.read_response(&second_message)?;   // Response::Granted / Response::Denied
-```
-
-## 端到端验证（在 Osaka 上）
+### 端到端验证（在 Osaka 上）
 
 ```bash
 curl https://phanes.wenqing.dev/info        # → {"status":"ok",...}
@@ -177,10 +150,10 @@ scp target/release/examples/fetch osaka:~/
 | 空 404，手机收到"检测到未授权降临者" | Noise 握手失败：检查两边公钥是否配对、是否填反 |
 | `Denied: timestamp outside allowed clock skew` | 两台机器时钟差超过 60s，检查 NTP |
 
-### 进程监控（简化版）
+#### 进程监控（简化版）
 
-Teyvat 根目录的 `examples/celestia/` 模拟 Osaka 端（`client.rs` 发送与补发、`sampler.rs` 采样）：每秒采样一个进程，发给 Phanes。
-没收到 ack 的数据在内存里最多缓存 1 小时，断线后指数退避重连（1s → 60s）并补发。Osaka 正式版只需 `phanes::celestia::proto` 和 `layline::noise`（正式客户端出现时，`celestia::proto` 将移入 `layline`）。
+`examples/celestia/` 模拟 Osaka 端（`client.rs` 发送与补发、`sampler.rs` 采样）：每秒采样一个进程，发给 Phanes。
+没收到 ack 的数据在内存里最多缓存 1 小时，断线后指数退避重连（1s → 60s）并补发。协议和实现见 [`architecture/phanes.md`](../architecture/phanes.md)。
 
 ```bash
 cargo build --release --example celestia
@@ -203,16 +176,35 @@ RedmiBook 的日志里每秒一行 `Osaka #<sequence>: time .. ms, cpu ..%, memo
 
 目前的简化：缓存在内存里，Osaka 端进程重启会丢掉未确认的数据；网络数据靠每秒调一次 `systemctl show`；Phanes 端只打日志、不去重。
 
-## 开发
+## 行情服务 MarketDataProvider（Osaka）
 
-在 Teyvat 仓库根目录：
+### 安装
+
+在 Teyvat 仓库根目录、以策略进程所用的用户执行；脚本内部按需 sudo。
 
 ```bash
-cargo fmt --all --check && cargo clippy --workspace --all-targets && cargo test --workspace
+deploy/market_data_provider/market_data_provider.sh install
 ```
 
-debug 构建（`cargo run --bin phanes -- serve --config <phanes.toml>`）不需要 `[bark]`，所有推送改为打 `info` 日志，也不挂 IP 白名单
-（`examples/` 直连、没有 `CF-Connecting-IP`），日志里的客户端名字显示为 `unfiltered`，方便本机开发；
-release 构建（部署用）缺少 `[bark]` 会报错并拒绝启动。`phanes.toml` 含凭据，必须 `chmod 600`，否则拒绝启动。
+首次运行会：编译 release 二进制、安装 systemd unit、创建 `/etc/market_data_provider/`（含 Gnosis 客户端密钥对，
+以及从 `deploy/market_data_provider/market_data_provider.example.toml` 复制的配置），然后停下，列出
+`/etc/market_data_provider/market_data_provider.toml` 里待填的占位符：
 
-测试 Bark 推送：`cargo run --example bark_push -- <phanes.toml> "message"`。
+- `[phanes]` 的 `url` 和 `gnosis_public_key`（即 Phanes 主机上 `/etc/phanes/gnosis.pub` 的内容）；
+- `[bark]` 凭据（release 构建缺少它会拒绝启动）；
+- `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情。
+
+在 Phanes 主机上，把安装时打印的公钥填进 `/etc/phanes/phanes.toml` 的 `[gnosis_service_config] public_key`，
+确认 `allowed_key_ids` 包含 `binance_sbe_real`（实盘）或 `binance_sbe_demo`（demo），然后重启 Phanes。
+再跑一次 `deploy/market_data_provider/market_data_provider.sh install`：这次会启动服务并检查 `/health`。
+
+| 场景 | 命令 |
+|---|---|
+| 代码更新后重新部署 | `git pull && deploy/market_data_provider/market_data_provider.sh install`（保留密钥和配置） |
+| 看日志 | `journalctl --namespace=market_data_provider -u market_data_provider -f` |
+| 状态 | `systemctl status market_data_provider`、`curl localhost:6666/subscribed` |
+| 彻底删除 | `deploy/market_data_provider/market_data_provider.sh uninstall`（先停掉策略：它会删除 ring 文件） |
+| 从零重装 | `deploy/market_data_provider/market_data_provider.sh reinstall`（**会生成新的 Gnosis 客户端密钥**，Phanes 要换公钥） |
+
+安装时会为该用户开启 linger：否则 systemd-logind 会在该用户最后一个 SSH 会话结束时删掉其 `/dev/shm` 下的 ring 文件，
+而策略还在读它们。

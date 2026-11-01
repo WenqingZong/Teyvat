@@ -17,10 +17,18 @@ All other code lives in library crates under `crates/`:
 
 | Crate | Role |
 |---|---|
-| `phanes` | Control center: Gnosis releases API keys, Celestia receives process metrics. See `crates/phanes/CLAUDE.md`. |
-| `market_data_provider` | Connects to exchanges and publishes market data to strategies over shared memory. See `crates/market_data_provider/CLAUDE.md`. |
+| `phanes` | Control center: Gnosis releases API keys, Celestia receives process metrics. |
+| `market_data_provider` | Connects to exchanges and publishes market data to strategies over shared memory. |
 | `dummy_strategy` | Development stand-in strategy and latency bench; reads market data through `layline`. |
 | `layline` | LayLine (地脉): the code every other crate shares. |
+
+Crates hold code only. Everything else lives at the top level:
+
+| Directory | Contents |
+|---|---|
+| `architecture/` | How the **implemented** system works: `overview.md` (machines, crates, layline, shared conventions), one file per component (`phanes.md`, `market_data_provider.md`, `dummy_strategy.md`). Read the relevant file before changing a component, and update it in the same change. |
+| `plan/` | Features **not yet implemented** and open design questions (`celestia.md`, `database.md`, `market_data_provider.md`, `todo.md`). Items marked 【待定】 need the user's decision first. When something is implemented, move its description to `architecture/` and mark it done here. |
+| `deploy/` | One subdirectory per service (`phanes/`, `market_data_provider/`, `clickhouse/`) with its deploy script, systemd unit and example config, plus the deployment guide `deploy/README.md`. Scripts run from the repository root. `api_keys/` (gitignored) at the root holds the keys Phanes serves. |
 
 Because one package holds every binary, building any one of them (e.g. a deploy's `cargo build --release -p teyvat --bin phanes`) compiles every crate.
 
@@ -30,12 +38,7 @@ Private strategies will later join as a git submodule outside `crates/` (e.g. `s
 
 ## What goes in layline
 
-Only code that two or more crates use today; code one crate uses stays in that crate until a second one needs it. layline is one crate without feature flags. Its top-level modules:
-
-- Market data contract: `types` (one type per file), `shared_memory` (ring format, `MarketDataReader`, `MarketDataWriter`), `provider_api` (the provider's HTTP contract with strategies).
-- Phanes protocols: `noise` (Noise_KK layer), `gnosis` (both halves of the API key protocol, so the server and its clients cannot drift apart).
-- Service plumbing: `bark` (encrypted push and `Notifier`), `secrets` (chmod 600 secret files), `logging` (`init_tracing`), `build` (`RELEASE_BUILD`, `build_profile`), `time` (wall clock, `/info` time format), `backoff`.
-- `testing`: fixtures and checks for the tests of every crate (`test_keypair`, `instrument`, `topic`, `bbo`, `assert_acyclic_modules`, ...). It is public because other crates' tests need it (`#[cfg(test)]` only applies to layline's own tests), so nothing but convention keeps production code from calling it.
+Only code that two or more crates use today; code one crate uses stays in that crate until a second one needs it. layline is one crate without feature flags. Its modules are listed in `architecture/overview.md`. `layline::testing` (test fixtures and checks) is public because other crates' tests need it, so nothing but convention keeps production code from calling it.
 
 ## Commands
 
@@ -49,6 +52,8 @@ cargo test --workspace                        # unit, integration and example te
 cargo test -p <crate> <name> -- --nocapture   # one test
 cargo test --workspace --test module_dependencies --test import_groups   # module cycle and import grouping checks
 cargo llvm-cov --workspace --summary-only     # line coverage; CI requires 90%
+cargo bench -p market_data_provider           # criterion latency benches
+deploy/phanes/phanes.sh install               # deploy; see deploy/README.md
 ```
 
 CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle and import grouping checks, tests and coverage with `RUSTFLAGS=-Dwarnings`. Dependabot opens dependency PRs daily.
@@ -70,4 +75,4 @@ CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle and impo
 - **Config:** each service reads all its config from one TOML file, never from environment variables.
 - **Clock source:** wall-clock timestamps come from `layline::time::get_current_timestamp_nanoseconds()` (`SystemTime`, `CLOCK_REALTIME`, a `NonZeroU64`), which every crate shares; hot paths use it as a plain integer and never format dates.
 - **Commits:** Conventional Commits.
-- **Docs:** `CLAUDE.md` files are in English; `README.md` files are in Chinese.
+- **Docs:** `CLAUDE.md` is in English; `README.md`, `architecture/`, `plan/` and `deploy/README.md` are in Chinese. Crates contain no docs; only this file is CLAUDE.md.

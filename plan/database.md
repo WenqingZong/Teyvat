@@ -1,6 +1,6 @@
 # 数据库计划
 
-状态：规划中，未写代码。标 **【待定】** 的条目需要确认后再动手。
+状态：规划中，未写代码。ClickHouse 已在 RedmiBook 上手动安装，见 [`deploy/clickhouse/clickhouse.md`](../deploy/clickhouse/clickhouse.md)。标 **【待定】** 的条目需要确认后再动手。
 
 ## 1. 数据范围
 

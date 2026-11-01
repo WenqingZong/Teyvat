@@ -19,10 +19,18 @@ cargo build --release --bins --examples
 
 | Crate | 说明 |
 |---|---|
-| [`phanes`](crates/phanes/README.md) | 总控的实现 |
-| [`market_data_provider`](crates/market_data_provider/README.md) | 行情服务的实现 |
+| `phanes` | 总控的实现 |
+| `market_data_provider` | 行情服务的实现 |
 | `dummy_strategy` | 占位策略的实现 |
 | `layline` | 地脉，蕴含一切信息：各 crate 共用的代码（行情类型、共享内存、Phanes 协议、Bark 推送、日志、测试 fixture 等）。只有被两个及以上 crate 用到的代码才放进来 |
+
+## 文档
+
+| 目录 | 内容 |
+|---|---|
+| [`architecture/`](architecture/README.md) | 已实现功能的说明：系统总览、Phanes、行情服务、占位策略 |
+| [`plan/`](plan/README.md) | 尚未实现的功能和设计讨论 |
+| [`deploy/`](deploy/README.md) | 部署脚本、systemd unit、配置模板和部署指南 |
 
 ## 目录结构
 
@@ -32,11 +40,15 @@ Teyvat/
 ├── Cargo.lock
 ├── src/bin/          # 生产二进制
 ├── examples/         # 测试工具
-└── crates/
-    ├── layline/
-    ├── phanes/                 # 含 deploy/、plan/
-    ├── market_data_provider/   # 含 deploy/、benches/
-    └── dummy_strategy/
+├── crates/           # 只放代码
+│   ├── layline/
+│   ├── phanes/
+│   ├── market_data_provider/   # 含 benches/
+│   └── dummy_strategy/
+├── architecture/     # 已实现功能的文档
+├── plan/             # 尚未实现的功能
+├── deploy/           # 部署脚本、unit、配置模板、部署指南
+└── api_keys/         # Phanes 发放的 key（gitignore，部署前自己放）
 ```
 
 私有策略将来以 git submodule 的形式放在 `crates/` 之外，并列入 workspace 的 `exclude`，使用自己的 `Cargo.lock`。
@@ -53,7 +65,7 @@ cargo test --workspace
 cargo llvm-cov --workspace --summary-only   # CI 要求行覆盖率 ≥ 90%
 ```
 
-每个 crate 都有 `tests/module_dependencies.rs`，禁止顶层模块之间循环 import。编码规范见 [`CLAUDE.md`](CLAUDE.md)。
+每个 crate 都有 `tests/module_dependencies.rs`（禁止顶层模块之间循环 import）和 `tests/import_groups.rs`（import 按标准库、第三方、本仓库分组）。编码规范见 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 许可证
 

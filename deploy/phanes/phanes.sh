@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Deploy / redeploy / remove Phanes (the Control Center for Quant Trading Bot) on RedmiBook.
 #
-#   crates/phanes/deploy/phanes.sh install      build and (re)deploy; keeps existing keys and config
-#   crates/phanes/deploy/phanes.sh uninstall    remove everything phanes put on this machine
-#   crates/phanes/deploy/phanes.sh reinstall    uninstall, then install (new Gnosis and Celestia keys!)
+#   deploy/phanes/phanes.sh install      build and (re)deploy; keeps existing keys and config
+#   deploy/phanes/phanes.sh uninstall    remove everything phanes put on this machine
+#   deploy/phanes/phanes.sh reinstall    uninstall, then install (new Gnosis and Celestia keys!)
 #
 # Add --yes to skip the confirmation prompt of uninstall / reinstall.
 # Run as your normal user from anywhere; sudo is used where needed.
@@ -19,11 +19,8 @@ readonly CELESTIA_PRIVATE_KEY=$CONFIG_DIRECTORY/celestia.key
 readonly CELESTIA_PUBLIC_KEY=$CONFIG_DIRECTORY/celestia.pub
 readonly CONFIG_FILE=$CONFIG_DIRECTORY/phanes.toml
 readonly UNIT_FILE=/etc/systemd/system/phanes.service
-# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root defines the binary and holds target/.
-CRATE_DIRECTORY=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-readonly CRATE_DIRECTORY
-WORKSPACE_ROOT=$(cd "$CRATE_DIRECTORY/../.." && pwd)
-readonly WORKSPACE_ROOT
+REPOSITORY_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+readonly REPOSITORY_ROOT
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -36,13 +33,13 @@ confirm() {
 }
 
 install_phanes() {
-    cd "$CRATE_DIRECTORY"
+    cd "$REPOSITORY_ROOT"
     command -v cargo >/dev/null || die "cargo not found; install Rust via rustup first"
-    compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in crates/phanes; nothing to serve"
+    compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in the repository; nothing to serve"
 
     log "building release binary"
     cargo build --release -p teyvat --bin phanes
-    sudo install -m 755 "$WORKSPACE_ROOT/target/release/phanes" "$BINARY"
+    sudo install -m 755 target/release/phanes "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"
     sudo mkdir -p "$API_KEYS_DIRECTORY"
@@ -55,10 +52,10 @@ install_phanes() {
     log "syncing api_keys/*.txt into $API_KEYS_DIRECTORY"
     install -m 600 api_keys/*.txt "$API_KEYS_DIRECTORY/"
 
-    [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes.example.toml "$CONFIG_FILE"
+    [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes/phanes.example.toml "$CONFIG_FILE"
 
     log "installing systemd unit"
-    sed "s/<your user>/$USER/" deploy/phanes.service | sudo tee "$UNIT_FILE" >/dev/null
+    sed "s/<your user>/$USER/" deploy/phanes/phanes.service | sudo tee "$UNIT_FILE" >/dev/null
     sudo systemctl daemon-reload
     sudo systemctl enable --quiet phanes
 
@@ -67,9 +64,9 @@ install_phanes() {
     grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
     grep -q '<Osaka IP' "$CONFIG_FILE" && missing+=("Osaka's IPv4 in [clients.Osaka] of $CONFIG_FILE, and its IPv6 (or delete that optional line)")
     grep -q '^\[clients\.' "$CONFIG_FILE" && grep -q '^allowed_clients' "$CONFIG_FILE" && ! grep -q '^name *=' "$CONFIG_FILE" \
-        || missing+=("[clients.<name>] tables and allowed_clients in $CONFIG_FILE (see deploy/phanes.example.toml)")
+        || missing+=("[clients.<name>] tables and allowed_clients in $CONFIG_FILE (see deploy/phanes/phanes.example.toml)")
     grep -q '^celestia_private_key_file' "$CONFIG_FILE" && grep -q '^\[celestia_service_config\]' "$CONFIG_FILE" \
-        || missing+=("celestia_private_key_file and [celestia_service_config] in $CONFIG_FILE (see deploy/phanes.example.toml)")
+        || missing+=("celestia_private_key_file and [celestia_service_config] in $CONFIG_FILE (see deploy/phanes/phanes.example.toml)")
     if ((${#missing[@]} > 0)); then
         warn "not starting yet; fill in:"
         printf '     - %s\n' "${missing[@]}" >&2
