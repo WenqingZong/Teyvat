@@ -1,6 +1,5 @@
 //! Client of Phanes Gnosis, which releases API keys over an end-to-end encrypted HTTP round trip.
 
-use std::panic::panic_any;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,12 +8,13 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, StatusCode};
 use secrecy::{SecretBox, SecretString};
 use serde::Deserialize;
-use tracing::{error, info};
+use tracing::info;
 use url::Url;
 
-use crate::alert::SendAlert;
+use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::utils::{Clock, RealClock};
+use layline::api_keys::{ApiKey, ApiKeyId, parse_api_key};
 use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};
 use layline::noise::{StaticKey, decode_private_key, decode_public_key};
 use layline::secrets::read_secret_file;
@@ -34,32 +34,35 @@ pub(crate) struct PhanesClientConfig {
 
 /// Where API keys come from; the connector asks only when a topic needs one.
 pub(crate) trait ApiKeySource {
-    async fn fetch_api_key(&self, key_id: &str) -> Result<SecretString>;
+    /// The whole key file, a JSON object; `fetch_api_key_or_panic` parses it.
+    async fn fetch_api_key(&self, key_id: ApiKeyId) -> Result<SecretString>;
 }
 
-/// Failing to get an API key is an unrecoverable startup error: alerts the phone, then panics with
+/// Fetches the live or demo key of `KeyType`, whose type picks the key id. Failing to get or parse
+/// it is an unrecoverable startup error: alerts the phone, then panics with
 /// `ExitReason::ApiKeyUnavailable`, which the binary's panic hook turns into the exit code.
-pub(crate) async fn fetch_api_key_or_panic(
+pub(crate) async fn fetch_api_key_or_panic<KeyType: ApiKey>(
     source: &impl ApiKeySource,
     alert: &impl SendAlert,
-    key_id: &str,
-) -> SecretString {
-    match source.fetch_api_key(key_id).await {
+    demo: bool,
+) -> KeyType {
+    let key_id = KeyType::key_id(demo);
+    let api_key_result = source
+        .fetch_api_key(key_id)
+        .await
+        .and_then(|key_file| Ok(parse_api_key(&key_file)?));
+    match api_key_result {
         Ok(api_key) => {
             info!("fetched API key {key_id} from Phanes");
             api_key
         }
-        Err(error) => {
-            let reason = format!("failed to fetch API key {key_id} from Phanes: {error:#}");
-            error!("{reason}");
-            alert
-                .send_alert(
-                    &format!("Market Data Provider Cannot Query API key {key_id}"),
-                    &reason,
-                )
-                .await;
-            panic_any(ExitReason::ApiKeyUnavailable);
-        }
+        Err(error) => match alert_and_panic(
+            alert,
+            &format!("Market Data Provider Cannot Query API key {key_id}"),
+            &format!("cannot get API key {key_id} from Phanes: {error:#}"),
+            ExitReason::ApiKeyUnavailable,
+        )
+        .await {},
     }
 }
 
@@ -112,7 +115,7 @@ impl PhanesClient {
 }
 
 impl<Http: GnosisHttp, TimeSource: Clock> ApiKeySource for PhanesClient<Http, TimeSource> {
-    async fn fetch_api_key(&self, key_id: &str) -> Result<SecretString> {
+    async fn fetch_api_key(&self, key_id: ApiKeyId) -> Result<SecretString> {
         let (initiator, first_message) = Initiator::write_request(
             &self.gnosis_private_key,
             &self.gnosis_public_key,
@@ -136,19 +139,19 @@ impl<Http: GnosisHttp, TimeSource: Clock> ApiKeySource for PhanesClient<Http, Ti
 pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::fmt::Debug;
     use std::fs::{Permissions, set_permissions, write};
     use std::num::NonZeroU64;
     use std::os::unix::fs::PermissionsExt;
-    use std::panic::AssertUnwindSafe;
     use std::path::Path;
 
-    use futures::FutureExt;
     use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::alert::tests::RecordingAlert;
+    use crate::alert::tests::{RecordingAlert, expect_alert_and_panic};
     use crate::utils::tests::MockClock;
+    use layline::api_keys::{BinanceApiKey, BinanceSbeApiKey};
     use layline::gnosis::Responder;
     use layline::noise::encode_key;
     use layline::testing::test_keypair;
@@ -156,9 +159,14 @@ pub(crate) mod tests {
     const PHANES_URL: &str = "https://phanes.example";
     const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;
-    const GRANTED_KEY_ID: &str = "granted_key";
+    /// The live SBE key, granted.
+    const GRANTED_KEY_ID: ApiKeyId = ApiKeyId::BinanceSbeReal;
     const GRANTED_SECRET: &str = "dummy-granted-secret";
-    const DENIED_KEY_ID: &str = "denied_key";
+    /// The live trading key, never granted.
+    const DENIED_KEY_ID: ApiKeyId = ApiKeyId::BinanceReal;
+    /// The demo SBE key, granted with fields that are not those of `BinanceSbeApiKey`.
+    const MISNAMED_KEY_ID: ApiKeyId = ApiKeyId::BinanceSbeDemo;
+    const MISNAMED_KEY_FILE: &str = r#"{"secret_key": "dummy-misnamed-secret"}"#;
     const DENIAL_REASON: &str = "key not allowed";
     /// 2026-10-24 00:00:00 UTC.
     const NOW_NANOSECONDS: NonZeroU64 =
@@ -182,18 +190,18 @@ pub(crate) mod tests {
     /// Grants the keys in `grants`, denies the rest, and records every key id asked for.
     #[derive(Default)]
     pub(crate) struct MockApiKeySource {
-        pub(crate) grants: HashMap<String, String>,
+        pub(crate) grants: HashMap<ApiKeyId, String>,
         pub(crate) offline: bool,
-        pub(crate) requested_key_ids: RefCell<Vec<String>>,
+        pub(crate) requested_key_ids: RefCell<Vec<ApiKeyId>>,
     }
 
     impl ApiKeySource for MockApiKeySource {
-        async fn fetch_api_key(&self, key_id: &str) -> Result<SecretString> {
-            self.requested_key_ids.borrow_mut().push(key_id.to_owned());
+        async fn fetch_api_key(&self, key_id: ApiKeyId) -> Result<SecretString> {
+            self.requested_key_ids.borrow_mut().push(key_id);
             if self.offline {
                 bail!("Phanes is unreachable");
             }
-            match self.grants.get(key_id) {
+            match self.grants.get(&key_id) {
                 Some(secret) => Ok(SecretString::from(secret.as_str())),
                 None => bail!("Phanes denied it: {DENIAL_REASON}"),
             }
@@ -213,7 +221,7 @@ pub(crate) mod tests {
     struct GnosisHttpMock {
         gnosis_private_key: SecretBox<StaticKey>,
         client_public_key: StaticKey,
-        grants: HashMap<String, String>,
+        grants: HashMap<ApiKeyId, String>,
         behaviour: PhanesBehaviour,
         requests: RefCell<Vec<Request>>,
     }
@@ -266,7 +274,7 @@ pub(crate) mod tests {
             let phanes = GnosisHttpMock {
                 gnosis_private_key,
                 client_public_key,
-                grants: HashMap::from([(GRANTED_KEY_ID.to_owned(), GRANTED_SECRET.to_owned())]),
+                grants: HashMap::from([(GRANTED_KEY_ID, GRANTED_SECRET.to_owned())]),
                 behaviour: PhanesBehaviour::Normal,
                 requests: RefCell::new(Vec::new()),
             };
@@ -284,17 +292,14 @@ pub(crate) mod tests {
             self.client.http.behaviour = behaviour;
         }
 
-        fn expect_phanes_received(&self, key_ids: &[&str]) -> Vec<Request> {
+        fn expect_phanes_received(&self, key_ids: &[ApiKeyId]) -> Vec<Request> {
             let requests = self.client.http.requests.borrow().clone();
-            let received: Vec<&str> = requests
-                .iter()
-                .map(|request| request.key_id.as_str())
-                .collect();
+            let received: Vec<ApiKeyId> = requests.iter().map(|request| request.key_id).collect();
             assert_eq!(key_ids, received);
             requests
         }
 
-        async fn expect_error(&self, key_id: &str, expected: &str) {
+        async fn expect_error(&self, key_id: ApiKeyId, expected: &str) {
             let error = self
                 .client
                 .fetch_api_key(key_id)
@@ -348,36 +353,62 @@ pub(crate) mod tests {
         fixture.expect_error(GRANTED_KEY_ID, "noise").await;
     }
 
-    #[tokio::test]
-    async fn fetch_or_panic_returns_key_without_alerting() {
-        let key_source = MockApiKeySource {
-            grants: HashMap::from([(GRANTED_KEY_ID.to_owned(), GRANTED_SECRET.to_owned())]),
+    fn key_source_granting_test_keys() -> MockApiKeySource {
+        MockApiKeySource {
+            grants: HashMap::from([
+                (
+                    GRANTED_KEY_ID,
+                    format!(r#"{{"api_key": "{GRANTED_SECRET}"}}"#),
+                ),
+                (MISNAMED_KEY_ID, MISNAMED_KEY_FILE.to_owned()),
+            ]),
             ..MockApiKeySource::default()
-        };
+        }
+    }
+
+    /// Fetches the live or demo key of `KeyType`, expects it to panic, and returns the one alert.
+    async fn expect_fetch_or_panic_to_alert<KeyType: ApiKey + Debug>(demo: bool) -> String {
+        let key_source = key_source_granting_test_keys();
         let alert = RecordingAlert::default();
-        let api_key = fetch_api_key_or_panic(&key_source, &alert, GRANTED_KEY_ID).await;
-        assert_eq!(GRANTED_SECRET, api_key.expose_secret());
+        let recorded = expect_alert_and_panic(
+            fetch_api_key_or_panic::<KeyType>(&key_source, &alert, demo),
+            &alert,
+            ExitReason::ApiKeyUnavailable,
+        )
+        .await;
+        let key_id = KeyType::key_id(demo);
+        assert!(
+            recorded.starts_with(&format!(
+                "Market Data Provider Cannot Query API key {key_id}"
+            )),
+            "{recorded}"
+        );
+        recorded
+    }
+
+    #[tokio::test]
+    async fn fetch_or_panic_returns_the_parsed_key_without_alerting() {
+        let alert = RecordingAlert::default();
+        let api_key: BinanceSbeApiKey =
+            fetch_api_key_or_panic(&key_source_granting_test_keys(), &alert, false).await;
+        assert_eq!(GRANTED_SECRET, api_key.api_key().expose_secret());
         assert!(alert.alerts().is_empty());
     }
 
     #[tokio::test]
     async fn fetch_or_panic_alerts_the_key_id_then_panics_with_its_exit_reason() {
-        let key_source = MockApiKeySource::default();
-        let alert = RecordingAlert::default();
-        let payload = AssertUnwindSafe(fetch_api_key_or_panic(&key_source, &alert, DENIED_KEY_ID))
-            .catch_unwind()
-            .await
-            .expect_err("a denied key is expected to panic");
-        assert_eq!(
-            Some(&ExitReason::ApiKeyUnavailable),
-            payload.downcast_ref::<ExitReason>()
-        );
-        let alerts = alert.alerts();
-        assert_eq!(1, alerts.len());
-        assert!(alerts[0].starts_with(&format!(
-            "Market Data Provider Cannot Query API key {DENIED_KEY_ID}"
-        )));
-        assert!(alerts[0].contains(DENIAL_REASON));
+        assert_eq!(DENIED_KEY_ID, BinanceApiKey::key_id(false));
+        let alert = expect_fetch_or_panic_to_alert::<BinanceApiKey>(false).await;
+        assert!(alert.contains(DENIAL_REASON), "{alert}");
+    }
+
+    #[tokio::test]
+    async fn key_with_other_fields_alerts_its_field_names_but_never_its_values() {
+        assert_eq!(MISNAMED_KEY_ID, BinanceSbeApiKey::key_id(true));
+        let alert = expect_fetch_or_panic_to_alert::<BinanceSbeApiKey>(true).await;
+        assert!(alert.contains("expected BinanceSbeApiKey"), "{alert}");
+        assert!(alert.contains("[secret_key]"), "{alert}");
+        assert!(!alert.contains("dummy-misnamed-secret"), "{alert}");
     }
 
     /// Writes a chmod 600 private key and returns the `[phanes]` table that points at it.

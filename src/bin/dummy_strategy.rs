@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use tracing::error;
 
 use dummy_strategy::client::subscribe;
 use dummy_strategy::latency_bench::LatencyBench;
@@ -37,7 +38,7 @@ fn main() -> ExitCode {
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            tracing::error!("fatal: {error:?}"); // {:?} 保留完整 context 链
+            error!("fatal: {error:?}"); // {:?} 保留完整 context 链
             ExitCode::FAILURE
         }
     }

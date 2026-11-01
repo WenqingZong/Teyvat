@@ -28,7 +28,7 @@ Crates hold code only. Everything else lives at the top level:
 |---|---|
 | `architecture/` | How the **implemented** system works: `overview.md` (machines, crates, layline, shared conventions), one file per component (`phanes.md`, `market_data_provider.md`, `dummy_strategy.md`). Read the relevant file before changing a component, and update it in the same change. |
 | `plan/` | Features **not yet implemented** and open design questions (`celestia.md`, `database.md`, `market_data_provider.md`, `todo.md`). Items marked 【待定】 need the user's decision first. When something is implemented, move its description to `architecture/` and mark it done here. |
-| `deploy/` | One subdirectory per service (`phanes/`, `market_data_provider/`, `clickhouse/`) with its deploy script, systemd unit and example config, plus the deployment guide `deploy/README.md`. Scripts run from the repository root. `api_keys/` (gitignored) at the root holds the keys Phanes serves. |
+| `deploy/` | One subdirectory per service (`phanes/`, `market_data_provider/`, `clickhouse/`) with its deploy script, systemd unit and example config, plus the deployment guide `deploy/README.md`. Scripts run from the repository root. `gnoses/` at the root holds the `<key_id>.json` key files Phanes serves; git holds dummy values that show each file's fields, replaced by real ones only in the deploying checkout. |
 
 Because one package holds every binary, building any one of them (e.g. a deploy's `cargo build --release -p teyvat --bin phanes`) compiles every crate.
 
@@ -71,7 +71,7 @@ CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle and impo
 - **No magic numbers:** define named constants.
 - **Types:** no generic parameters for show (such as `impl Into<String>`) when they buy nothing; keep parameters of the same kind the same type; prefer semantic types (`Url`, `SecretString`, `StatusCode`), even when that needs a hand-written serde adapter.
 - **Errors:** `thiserror` enums for errors callers match on; `anyhow::Result` for any other error; never `Box<dyn Error>`.
-- **Secrets:** never log a secret. Hold secrets in memory with `secrecy` (`SecretString`, `SecretBox<T>`), not `zeroize::Zeroizing`. Config files with credentials and private key files must be chmod 600 (`layline::secrets::read_secret_file` refuses anything else). No secret, real key or credential ever enters git, logs or examples; `api_keys/`, `phanes.toml` and `market_data_provider.toml` are gitignored.
+- **Secrets:** never log a secret. Hold secrets in memory with `secrecy` (`SecretString`, `SecretBox<T>`), not `zeroize::Zeroizing`. Config files with credentials and private key files must be chmod 600 (`layline::secrets::read_secret_file` refuses anything else). No secret, real key or credential ever enters git, logs or examples; `gnoses/` in git holds only dummy values. Every key Phanes releases is an `ApiKeyId` in `layline::api_keys`, and each id holds one `deny_unknown_fields` key type; clients fetch by type, Phanes checks each allowed file against its type at startup, and parse errors never quote a value.
 - **Config:** each service reads all its config from one TOML file, never from environment variables.
 - **Clock source:** wall-clock timestamps come from `layline::time::get_current_timestamp_nanoseconds()` (`SystemTime`, `CLOCK_REALTIME`, a `NonZeroU64`), which every crate shares; hot paths use it as a plain integer and never format dates.
 - **Commits:** Conventional Commits.

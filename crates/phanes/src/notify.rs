@@ -13,6 +13,7 @@ use tracing::error;
 
 use crate::request_details::RequestDetails;
 use crate::service::{Language, Service};
+use layline::api_keys::ApiKeyId;
 use layline::bark::{BarkMessage, Notifier};
 
 const GROUP: &str = "phanes";
@@ -28,13 +29,13 @@ pub enum Notification {
     },
     Granted {
         client: String,
-        key_id: String,
+        key_id: ApiKeyId,
     },
     /// Gnosis only: an allowed, authenticated client was refused a key, e.g. not in its ACL,
     /// stale timestamp, replayed nonce or missing key file. See `DenialReason`.
     Denied {
         client: String,
-        key_id: Option<String>,
+        key_id: Option<ApiKeyId>,
         reason: String,
     },
     /// Passed the IP allow list (or none is mounted, in debug builds) but failed the Noise
@@ -75,7 +76,7 @@ impl Notification {
                 key_id,
                 reason,
             } => {
-                let key_id = key_id.as_deref().unwrap_or("(无法解析)");
+                let key_id = key_id.map_or_else(|| "(无法解析)".to_owned(), |id| id.to_string());
                 (
                     "神之心请求被驳回".to_owned(),
                     format!("魔神: {client}\n神之心: {key_id}\n驳回原因: {reason}"),
@@ -181,14 +182,14 @@ mod tests {
     fn denied_message_contains_all_fields() {
         let message = Notification::Denied {
             client: "osaka".into(),
-            key_id: Some("binance_demo_trading".into()),
+            key_id: Some(ApiKeyId::BinanceDemo),
             reason: "key not allowed".into(),
         }
         .to_bark_message();
         assert_eq!(message.title, "神之心请求被驳回");
         assert_eq!(message.sound, ALARM_SOUND);
         assert!(message.body.contains("osaka"));
-        assert!(message.body.contains("binance_demo_trading"));
+        assert!(message.body.contains("binance_demo"));
         assert!(message.body.contains("key not allowed"));
     }
 
@@ -207,13 +208,13 @@ mod tests {
     fn granted_message_contains_client_and_key() {
         let message = Notification::Granted {
             client: "osaka".into(),
-            key_id: "binance_demo_trading".into(),
+            key_id: ApiKeyId::BinanceDemo,
         }
         .to_bark_message();
         assert_eq!(message.title, "神之心已发放");
         assert_eq!(message.group, GROUP);
         assert!(message.body.contains("osaka"));
-        assert!(message.body.contains("binance_demo_trading"));
+        assert!(message.body.contains("binance_demo"));
     }
 
     #[test]

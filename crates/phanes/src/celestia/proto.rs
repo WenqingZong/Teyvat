@@ -136,6 +136,7 @@ impl Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use layline::api_keys::ApiKeyId;
     use layline::gnosis::{Initiator as GnosisInitiator, Request};
     use layline::testing::test_keypair;
     use layline::time::get_current_timestamp_nanoseconds;
@@ -220,7 +221,7 @@ pub(crate) mod tests {
         let (_, gnosis_message) = GnosisInitiator::write_request(
             &client_private_key,
             &celestia_public_key,
-            &Request::new("key", get_current_timestamp_nanoseconds()),
+            &Request::new(ApiKeyId::BinanceDemo, get_current_timestamp_nanoseconds()),
         )
         .expect("gnosis request is written");
         assert!(respond(&celestia_private_key, &client_public_key, &gnosis_message).is_err());

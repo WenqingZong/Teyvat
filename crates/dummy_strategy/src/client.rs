@@ -10,7 +10,7 @@ use ureq::Agent;
 use layline::backoff::exponential_backoff;
 use layline::provider_api::{
     RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest, SubscriptionResponse,
-    SubscriptionResult,
+    SubscriptionResult, group_by_reason,
 };
 use layline::types::Topic;
 
@@ -56,7 +56,7 @@ fn subscribe_with_resubscribe_interval(
         },
         resubscribe_interval,
     };
-    let subscriptions = into_subscriptions(session.post_with_retry(SUBSCRIBE_PATH))?;
+    let subscriptions = extract_successful_subscriptions(session.post_with_retry(SUBSCRIBE_PATH))?;
     let renewed_subscriptions = subscriptions.clone();
     thread::Builder::new()
         .name("provider-session".to_owned())
@@ -111,20 +111,40 @@ impl ProviderSession {
     }
 }
 
-fn into_subscriptions(results: HashMap<Topic, SubscriptionResult>) -> Result<Vec<Subscription>> {
+fn extract_successful_subscriptions(
+    results: HashMap<Topic, SubscriptionResult>,
+) -> Result<Vec<Subscription>> {
     let mut subscriptions = Vec::with_capacity(results.len());
-    let mut rejections = Vec::new();
+    let mut rejections = HashMap::new();
     for (topic, subscription_result) in results {
         match subscription_result {
             Ok(path) => subscriptions.push(Subscription { topic, path }),
-            Err(reason) => rejections.push(format!("{topic}: {reason}")),
+            Err(reason) => {
+                rejections.insert(topic, reason);
+            }
         }
     }
     if !rejections.is_empty() {
-        rejections.sort();
-        bail!("provider rejected {}", rejections.join("; "));
+        bail!(describe_rejections(&rejections));
     }
     Ok(subscriptions)
+}
+
+/// One line per reason, then its topics one per line, indented under it:
+///
+/// ```text
+/// provider rejected 2 topics:
+///   SpotSbe: Binance refused the request
+///     Binance/BTC-USDT-SPOT/BBO
+///     Binance/BTC-USDT-SPOT/TRADE
+/// ```
+fn describe_rejections(rejections: &HashMap<Topic, String>) -> String {
+    let mut lines = vec![format!("provider rejected {} topics:", rejections.len())];
+    for (reason, topics) in group_by_reason(rejections) {
+        lines.push(format!("  {reason}"));
+        lines.extend(topics.iter().map(|topic| format!("    {topic}")));
+    }
+    lines.join("\n")
 }
 
 fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, SubscriptionResult>) {
@@ -299,6 +319,36 @@ mod tests {
         provider
             .join()
             .expect("provider thread is expected to not panic");
+    }
+
+    #[test]
+    fn rejections_are_listed_one_line_each_under_their_reason() {
+        let spot_trade = topic();
+        let spot_bbo = Topic {
+            market_data_type: MarketDataType::Bbo,
+            ..spot_trade
+        };
+        let perpetual_trade = Topic {
+            instrument: Instrument {
+                underlying_type: UnderlyingType::Perpetual,
+                ..spot_trade.instrument
+            },
+            ..spot_trade
+        };
+        let description = describe_rejections(&HashMap::from([
+            (spot_trade, "SpotSbe: refused".to_owned()),
+            (perpetual_trade, "FuturesPublic: timed out".to_owned()),
+            (spot_bbo, "SpotSbe: refused".to_owned()),
+        ]));
+        assert_eq!(
+            "provider rejected 3 topics:\n  \
+             FuturesPublic: timed out\n    \
+             Binance/ETH-USDT-PERP/TRADE\n  \
+             SpotSbe: refused\n    \
+             Binance/ETH-USDT-SPOT/BBO\n    \
+             Binance/ETH-USDT-SPOT/TRADE",
+            description
+        );
     }
 
     #[test]

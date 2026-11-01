@@ -50,6 +50,19 @@ pub struct SubscriptionResponse {
 /// The ring path to read, or why the topic was refused.
 pub type SubscriptionResult = Result<PathBuf, String>;
 
+/// Refused topics grouped by reason, reasons sorted and topics sorted by name, so a cause shared by
+/// many topics is reported once.
+pub fn group_by_reason(refusals: &HashMap<Topic, String>) -> BTreeMap<&str, Vec<Topic>> {
+    let mut groups: BTreeMap<&str, Vec<Topic>> = BTreeMap::new();
+    for (topic, reason) in refusals {
+        groups.entry(reason).or_default().push(*topic);
+    }
+    for topics in groups.values_mut() {
+        topics.sort_by_cached_key(Topic::to_string);
+    }
+    groups
+}
+
 /// Body of `/subscribed`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SubscribedResponse {
@@ -216,6 +229,34 @@ mod tests {
 
     fn to_json<Message: Serialize>(message: &Message) -> Value {
         serde_json::to_value(message).expect("serialization is expected to not fail")
+    }
+
+    #[test]
+    fn refusals_are_grouped_by_reason_and_sorted() {
+        let spot_bbo = topic(Exchange::Binance, UnderlyingType::Spot, MarketDataType::Bbo);
+        let spot_trade = topic(
+            Exchange::Binance,
+            UnderlyingType::Spot,
+            MarketDataType::Trade,
+        );
+        let okx_bbo = topic(
+            Exchange::Okx,
+            UnderlyingType::Perpetual,
+            MarketDataType::Bbo,
+        );
+        let refusals = HashMap::from([
+            (spot_trade, "venue down".to_owned()),
+            (okx_bbo, "worker stopped".to_owned()),
+            (spot_bbo, "venue down".to_owned()),
+        ]);
+        let groups = group_by_reason(&refusals);
+        assert_eq!(
+            BTreeMap::from([
+                ("venue down", vec![spot_bbo, spot_trade]),
+                ("worker stopped", vec![okx_bbo]),
+            ]),
+            groups
+        );
     }
 
     #[test]

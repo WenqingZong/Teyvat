@@ -1,7 +1,9 @@
-//! Phanes side of Gnosis: authenticates the client and releases API keys from disk.
+//! Phanes side of Gnosis: authenticates the client and releases API key files from disk.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::fs::read_to_string as read_file_to_string;
+use std::io::Error as IoError;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,7 +13,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::post;
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use secrecy::{SecretBox, SecretString};
 use tokio::fs::read_to_string;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
@@ -20,13 +22,13 @@ use crate::client_filter::ClientName;
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
+use layline::api_keys::{ApiKeyFormatError, ApiKeyId};
 use layline::gnosis::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
 use layline::noise::StaticKey;
 use layline::time::since_unix_epoch;
 
 /// Noise message 1 carries a small JSON payload; anything bigger is not a real client.
 const MAX_REQUEST_BODY_BYTES: usize = 4096;
-const MAX_KEY_ID_LENGTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DenialReason {
@@ -38,19 +40,48 @@ pub enum DenialReason {
     MalformedNonce,
     #[error("replayed nonce")]
     Replay,
-    #[error("invalid key id")]
-    InvalidKeyId,
     #[error("key id not allowed for this client")]
     NotAllowed,
     #[error("key not found on server")]
     KeyNotFound,
 }
 
+/// Why an allowed key's file fails the startup check. Never quotes the file content.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyFileError {
+    #[error("cannot read key file {}: {source}", path.display())]
+    Unreadable { path: PathBuf, source: IoError },
+    #[error("key file {} does not match its key id: {source}", path.display())]
+    Mismatched {
+        path: PathBuf,
+        source: ApiKeyFormatError,
+    },
+}
+
+/// `<gnoses_directory>/<key_id>.json`.
+pub fn api_key_file_path(gnoses_directory: &Path, key_id: ApiKeyId) -> PathBuf {
+    gnoses_directory.join(key_id.file_name())
+}
+
+/// Startup check of an allowed key's file: it exists and holds the fields of `key_id`'s type.
+pub fn check_api_key_file(gnoses_directory: &Path, key_id: ApiKeyId) -> Result<(), KeyFileError> {
+    let path = api_key_file_path(gnoses_directory, key_id);
+    let key_file = SecretString::from(read_file_to_string(&path).map_err(|source| {
+        KeyFileError::Unreadable {
+            path: path.clone(),
+            source,
+        }
+    })?);
+    key_id
+        .check_key_file(&key_file)
+        .map_err(|source| KeyFileError::Mismatched { path, source })
+}
+
 pub struct GnosisState {
     pub gnosis_private_key: SecretBox<StaticKey>,
     pub client_public_key: StaticKey,
-    pub allowed_key_ids: HashSet<String>,
-    pub api_keys_directory: PathBuf,
+    pub allowed_key_ids: HashSet<ApiKeyId>,
+    pub gnoses_directory: PathBuf,
     pub max_clock_skew_seconds: u64,
     pub notifications: UnboundedSender<Notification>,
     /// nonce -> unix second after which the nonce's timestamp is out of window anyway.
@@ -62,8 +93,8 @@ impl GnosisState {
     pub fn new(
         gnosis_private_key: SecretBox<StaticKey>,
         client_public_key: StaticKey,
-        allowed_key_ids: HashSet<String>,
-        api_keys_directory: PathBuf,
+        allowed_key_ids: HashSet<ApiKeyId>,
+        gnoses_directory: PathBuf,
         max_clock_skew_seconds: u64,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
@@ -71,7 +102,7 @@ impl GnosisState {
             gnosis_private_key,
             client_public_key,
             allowed_key_ids,
-            api_keys_directory,
+            gnoses_directory,
             max_clock_skew_seconds,
             notifications,
             seen_nonces: Mutex::default(),
@@ -108,26 +139,16 @@ impl GnosisState {
         }
         self.check_and_record_nonce(&request.nonce, request.timestamp, now)?;
 
-        if !is_valid_key_id(&request.key_id) {
-            return Err(DenialReason::InvalidKeyId);
-        }
         if !self.allowed_key_ids.contains(&request.key_id) {
             return Err(DenialReason::NotAllowed);
         }
 
-        let key_id = &request.key_id;
-        let path = self.api_keys_directory.join(format!("{key_id}.txt"));
-        let printable_path = path.display();
-        let contents = SecretString::from(read_to_string(&path).await.map_err(|error| {
-            error!("cannot read key file {printable_path}: {error}");
+        let path = api_key_file_path(&self.gnoses_directory, request.key_id);
+        let key_file = read_to_string(&path).await.map_err(|error| {
+            error!("cannot read key file {}: {error}", path.display());
             DenialReason::KeyNotFound
-        })?);
-        let secret = contents.expose_secret().trim();
-        if secret.is_empty() {
-            error!("key file {printable_path} is empty");
-            return Err(DenialReason::KeyNotFound);
-        }
-        Ok(SecretString::from(secret))
+        })?;
+        Ok(SecretString::from(key_file))
     }
 
     fn check_and_record_nonce(
@@ -155,14 +176,6 @@ impl GnosisState {
         );
         Ok(())
     }
-}
-
-pub fn is_valid_key_id(key_id: &str) -> bool {
-    !key_id.is_empty()
-        && key_id.len() <= MAX_KEY_ID_LENGTH
-        && key_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 pub fn router(state: Arc<GnosisState>) -> Router {
@@ -257,6 +270,8 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request as HttpRequest};
+    use secrecy::ExposeSecret;
+    use serde_json::{from_slice, json};
     use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tower::ServiceExt;
@@ -264,51 +279,46 @@ mod tests {
     use super::*;
     use crate::client_filter::UNFILTERED_CLIENT_NAME;
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
-    use layline::gnosis::Initiator;
+    use layline::gnosis::{GNOSIS_PROLOGUE, Initiator};
+    use layline::noise::{build_handshake, decrypt, encrypt};
     use layline::testing::test_keypair;
     use layline::time::get_current_timestamp_nanoseconds;
 
-    const KEY_ID: &str = "binance_demo";
-    const SECRET: &str = "世界为之焕然一新";
+    const KEY_ID: ApiKeyId = ApiKeyId::BinanceDemo;
+    /// Served byte for byte, whitespace included.
+    const KEY_FILE: &str = "{\n    \"api_key\": \"天上永恒的王座到来\",\n    \"secret_key\": \"世界为之焕然一新\"\n}\n";
     /// Has a key file but is not in the allow list.
-    const NOT_ALLOWED_KEY_ID: &str = "other_key";
-    const NOT_ALLOWED_SECRET: &str = "never released";
+    const NOT_ALLOWED_KEY_ID: ApiKeyId = ApiKeyId::BinanceReal;
+    const NOT_ALLOWED_KEY_FILE: &str = r#"{"api_key": "never", "secret_key": "released"}"#;
     /// In the allow list but has no key file.
-    const MISSING_KEY_ID: &str = "missing_key";
+    const MISSING_KEY_ID: ApiKeyId = ApiKeyId::BinanceSbeDemo;
 
     struct Harness {
         app: Router,
         client_private_key: SecretBox<StaticKey>,
         gnosis_public_key: StaticKey,
         notifications: UnboundedReceiver<Notification>,
-        _api_keys_directory: TempDir,
+        _gnoses_directory: TempDir,
     }
 
     fn harness() -> Harness {
         let (gnosis_private_key, gnosis_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let api_keys_directory = tempdir().expect("temporary directory is created");
-        write(
-            api_keys_directory.path().join(format!("{KEY_ID}.txt")),
-            format!("{SECRET}\n"),
-        )
-        .expect("key file is written");
-        write(
-            api_keys_directory
-                .path()
-                .join(format!("{NOT_ALLOWED_KEY_ID}.txt")),
-            NOT_ALLOWED_SECRET,
-        )
-        .expect("key file is written");
+        let gnoses_directory = tempdir().expect("temporary directory is created");
+        for (key_id, key_file) in [
+            (KEY_ID, KEY_FILE),
+            (NOT_ALLOWED_KEY_ID, NOT_ALLOWED_KEY_FILE),
+        ] {
+            write(api_key_file_path(gnoses_directory.path(), key_id), key_file)
+                .expect("key file is written");
+        }
 
         let (sender, notifications) = unbounded_channel();
         let state = GnosisState::new(
             gnosis_private_key,
             client_public_key,
-            [KEY_ID.to_owned(), MISSING_KEY_ID.to_owned()]
-                .into_iter()
-                .collect(),
-            api_keys_directory.path().to_owned(),
+            HashSet::from([KEY_ID, MISSING_KEY_ID]),
+            gnoses_directory.path().to_owned(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             sender,
         );
@@ -317,7 +327,7 @@ mod tests {
             client_private_key,
             gnosis_public_key,
             notifications,
-            _api_keys_directory: api_keys_directory,
+            _gnoses_directory: gnoses_directory,
         }
     }
 
@@ -376,14 +386,14 @@ mod tests {
             .gnosis(&Request::new(KEY_ID, get_current_timestamp_nanoseconds()))
             .await
         {
-            Response::Granted { secret } => assert_eq!(secret.expose_secret(), SECRET),
+            Response::Granted { secret } => assert_eq!(secret.expose_secret(), KEY_FILE),
             Response::Denied { reason } => panic!("unexpected denial: {reason}"),
         }
         assert_eq!(
             harness.next_notification(),
             Notification::Granted {
                 client: UNFILTERED_CLIENT_NAME.into(),
-                key_id: KEY_ID.into()
+                key_id: KEY_ID
             }
         );
     }
@@ -404,7 +414,7 @@ mod tests {
             harness.next_notification(),
             Notification::Denied {
                 client: UNFILTERED_CLIENT_NAME.into(),
-                key_id: Some(NOT_ALLOWED_KEY_ID.into()),
+                key_id: Some(NOT_ALLOWED_KEY_ID),
                 reason: DenialReason::NotAllowed.to_string(),
             }
         );
@@ -424,17 +434,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_check_wants_the_fields_of_the_key_id_and_never_quotes_the_file() {
+        let directory = tempdir().expect("temporary directory is created");
+        let path = api_key_file_path(directory.path(), KEY_ID);
+        assert_eq!(directory.path().join("binance_demo.json"), path);
+        assert!(matches!(
+            check_api_key_file(directory.path(), KEY_ID),
+            Err(KeyFileError::Unreadable { .. })
+        ));
+
+        const PLAIN_TEXT: &str = "secret written as plain text";
+        const SBE_KEY_FILE: &str = r#"{"api_key": "only the SBE field"}"#;
+        for mismatched in [PLAIN_TEXT, "{}", SBE_KEY_FILE] {
+            write(&path, mismatched).expect("key file is written");
+            let error = check_api_key_file(directory.path(), KEY_ID)
+                .expect_err("the file lacks the fields of a Binance trading key");
+            assert!(matches!(error, KeyFileError::Mismatched { .. }));
+            let message = error.to_string();
+            assert!(message.contains("binance_demo.json"), "{message}");
+            assert!(!message.contains(mismatched), "{message}");
+        }
+
+        write(&path, KEY_FILE).expect("key file is written");
+        check_api_key_file(directory.path(), KEY_ID).expect("the fields match");
+    }
+
+    /// `Request` cannot hold an unknown id, so this writes the payload by hand.
     #[tokio::test]
-    async fn denies_path_traversal_key_id() {
-        let harness = harness();
-        assert_denied(
-            harness
-                .gnosis(&Request::new(
-                    "../binance_demo_trading",
-                    get_current_timestamp_nanoseconds(),
-                ))
-                .await,
-            "invalid key id",
+    async fn unknown_key_id_is_a_malformed_request() {
+        let mut harness = harness();
+        let mut state = build_handshake(
+            GNOSIS_PROLOGUE,
+            &harness.client_private_key,
+            &harness.gnosis_public_key,
+            true,
+        )
+        .expect("client builds handshake");
+        let payload = json!({
+            "key_id": "../binance_demo",
+            "timestamp": since_unix_epoch().as_secs(),
+            "nonce": "00".repeat(NONCE_LENGTH),
+        });
+        let first_message =
+            encrypt(&mut state, payload.to_string().as_bytes()).expect("client encrypts");
+        let (status, body) = post(&harness.app, first_message).await;
+        assert_eq!(status, StatusCode::OK);
+        let response: Response = from_slice(
+            decrypt(&mut state, &body)
+                .expect("client decrypts response")
+                .expose_secret(),
+        )
+        .expect("response parses");
+        assert_denied(response, "malformed request payload");
+        assert_eq!(
+            harness.next_notification(),
+            Notification::Denied {
+                client: UNFILTERED_CLIENT_NAME.into(),
+                key_id: None,
+                reason: DenialReason::MalformedRequest.to_string(),
+            }
         );
     }
 
@@ -496,14 +555,5 @@ mod tests {
         assert_eq!(request.head.uri.path(), GNOSIS_PATH);
         assert_eq!(request.payload.as_ref(), first_messages[0].as_slice());
         assert!(harness.notifications.try_recv().is_err());
-    }
-
-    #[test]
-    fn key_id_validation() {
-        assert!(is_valid_key_id("binance_demo-trading2"));
-        assert!(!is_valid_key_id(""));
-        assert!(!is_valid_key_id("a/b"));
-        assert!(!is_valid_key_id("a.txt"));
-        assert!(!is_valid_key_id(&"a".repeat(MAX_KEY_ID_LENGTH + 1)));
     }
 }

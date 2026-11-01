@@ -23,11 +23,11 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - Osaka ↔ RedmiBook 的通讯**端到端加密**：请求和回复都是密文。Cloudflare 会终止 TLS、能看到 HTTP 明文，因此必须在应用层加密，不能依赖 TLS。
 - 双方已各自持有对方的 SSH 公钥（ed25519）。
 - 两端都用 Rust（tokio）。
-- 暂不考虑 RedmiBook 本机的安全：API Key 以明文存放在仓库根目录的 `api_keys/*.txt`（如 `api_keys/binance_demo_trading.txt`，dummy key）。`api_keys/` 已 gitignore，**任何密钥都不得进入 git、日志或示例代码**。
+- 暂不考虑 RedmiBook 本机的安全：API Key 以明文 JSON 存放在仓库根目录的 `gnoses/<key_id>.json`。`gnoses/` 提交进 git 的是 dummy 值，用来告诉部署者每个 key 文件有哪些字段；部署前换成真实值，**任何真实密钥都不得进入 git、日志或示例代码**。
 
 ## 已定方案
 
-- **Gnosis 协议**：Noise `Noise_KK_25519_ChaChaPoly_BLAKE2s`（`snow` crate），prologue `gnosis`，一次 HTTP POST 完成握手加请求/回复。消息 1 的载荷是 `{key_id, timestamp, nonce}`，消息 2 的载荷是 API Key。虽然业务上是"取" key，但用 POST 而不是 GET：握手消息只能放在 body 里（GET 的 body 没有标准语义，Cloudflare 等中间层可能丢弃；放进 URL 又会让密文进入各级日志）；请求有副作用、不幂等（nonce 记入防重放表，每次都触发 Bark 推送）；GET 的响应还可能被 CDN 缓存。
+- **Gnosis 协议**：Noise `Noise_KK_25519_ChaChaPoly_BLAKE2s`（`snow` crate），prologue `gnosis`，一次 HTTP POST 完成握手加请求/回复。消息 1 的载荷是 `{key_id, timestamp, nonce}`，消息 2 的载荷是整个 key 文件（一个 JSON 对象）。虽然业务上是"取" key，但用 POST 而不是 GET：握手消息只能放在 body 里（GET 的 body 没有标准语义，Cloudflare 等中间层可能丢弃；放进 URL 又会让密文进入各级日志）；请求有副作用、不幂等（nonce 记入防重放表，每次都触发 Bark 推送）；GET 的响应还可能被 CDN 缓存。
 - **Celestia 协议**：Noise 参数相同，prologue `celestia`，`GET /celestia` 升级为 WebSocket。前两帧是握手（空载荷），之后每帧是一个 postcard 编码的密文：Osaka → Phanes 为 `Batch{sequence, samples}`，Phanes → Osaka 为 `Ack{sequence}`。一条连接一次握手，不需要时间窗口和 nonce。虽然数据是客户端发给 Phanes，但必须用 GET：WebSocket 标准（RFC 6455）规定升级握手只能是带 `Upgrade: websocket` 头的 GET；升级之后不再有 HTTP 方法，双方的数据都走同一条连接上的帧。
 - **密钥**：每个服务在两端各有一对专用的 X25519 密钥（不复用 SSH 密钥，服务之间也不复用），公钥经现有的 SSH 通道交换。
 - **Gnosis 和 Celestia 缺一不可**：任一服务的配置缺失或有误（密钥无效、权限不是 600），Phanes 都拒绝启动。
@@ -42,7 +42,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 
 - 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）都在 `layline::gnosis`，这里只有服务端。Celestia 协议目前在本 crate 之外没有客户端，所以 `celestia/proto.rs` 留在这里；等第二个 crate 需要它时再移进 layline。
 - `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`build_handshake(prologue, ..)`、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
-- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 时间窗口 → nonce 防重放 → key_id 格式 → ACL → 读文件。握手失败回空 404（推送 10 分钟节流）；认证之后的拒绝回加密的 `Denied{reason}`。
+- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 时间窗口 → nonce 防重放 → ACL → 读文件 `<gnoses_directory>/<key_id>.json`，原样发出。key id 是 `layline::api_keys::ApiKeyId` 枚举：请求里的未知 key id 解析失败，按畸形请求拒绝；`phanes.toml` 的 `allowed_key_ids` 写了未知 key id 则配置解析失败。启动时 `check_api_key_file` 逐个检查 `allowed_key_ids` 的文件：文件存在，且能解析成该 key id 对应的类型（`ApiKeyId::check_key_file`），否则拒绝启动。握手失败回空 404（推送 10 分钟节流）；认证之后的拒绝回加密的 `Denied{reason}`。
 - `src/celestia/`：`proto.rs`（`ProcessSample`/`Batch`/`Ack`、`Initiator`/`respond`/`Session`）；`server.rs`（`GET /celestia`：握手 → 解密 → 打日志 → 回 ack；握手或解密失败断开并节流推送；90 秒没有消息就断开）。
 - `src/service.rs`：`Service` 枚举（Gnosis / Celestia）和 `Language`；`to_string(Language)` 给出英文日志名或中文推送名。它是叶子模块，服务可以引用自己的名字而不必 import `server`，避免循环依赖。
 - `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`（`ClientFilters` 为 `None` 时不挂白名单；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build）。

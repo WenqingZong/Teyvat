@@ -6,7 +6,8 @@
 //! ```
 //!
 //! A request that fails the handshake gets an empty 404; an authenticated client gets an
-//! encrypted `Response` either way.
+//! encrypted `Response` either way. A granted secret is the whole key file, which the client
+//! parses with `api_keys::parse_api_key`.
 
 use std::num::NonZeroU64;
 
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Error as JsonError, from_slice, to_vec};
 use snow::{Error as NoiseError, HandshakeState};
 
+use crate::api_keys::ApiKeyId;
 use crate::noise::{SecretBuffer, StaticKey, build_handshake, decrypt, encrypt};
 
 /// Mixed into the handshake hash so messages can't be reused by another service.
@@ -27,7 +29,8 @@ const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
-    pub key_id: String,
+    /// An id Phanes does not know fails to parse, so the request is refused as malformed.
+    pub key_id: ApiKeyId,
     /// Unix seconds on the client.
     pub timestamp: u64,
     /// Random per-request value, hex-encoded `NONCE_LENGTH` bytes.
@@ -120,11 +123,11 @@ impl Initiator {
 
 impl Request {
     /// A request for `key_id` stamped with `now`, in Unix nanoseconds, and a fresh nonce.
-    pub fn new(key_id: &str, now: NonZeroU64) -> Self {
+    pub fn new(key_id: ApiKeyId, now: NonZeroU64) -> Self {
         let mut nonce = [0u8; NONCE_LENGTH];
         fill(&mut nonce);
         Self {
-            key_id: key_id.to_owned(),
+            key_id,
             timestamp: now.get() / NANOSECONDS_PER_SECOND,
             nonce: encode_hex(nonce),
         }
@@ -143,7 +146,7 @@ mod tests {
     fn round_trip() {
         let (gnosis_private_key, gnosis_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let request = Request::new("binance_demo_trading", NOW);
+        let request = Request::new(ApiKeyId::BinanceDemo, NOW);
 
         let (initiator, first_message) =
             Initiator::write_request(&client_private_key, &gnosis_public_key, &request)
@@ -176,10 +179,15 @@ mod tests {
         let (_, first_message) = Initiator::write_request(
             &client_private_key,
             &gnosis_public_key,
-            &Request::new("needle_key_id", NOW),
+            &Request::new(ApiKeyId::BinanceSbeReal, NOW),
         )
         .expect("client writes request");
-        assert!(!first_message.windows(6).any(|window| window == b"needle"));
+        let key_id = b"binance_sbe_real";
+        assert!(
+            !first_message
+                .windows(key_id.len())
+                .any(|window| window == key_id)
+        );
     }
 
     #[test]
@@ -190,7 +198,7 @@ mod tests {
         let (_, first_message) = Initiator::write_request(
             &impostor_private_key,
             &gnosis_public_key,
-            &Request::new("key", NOW),
+            &Request::new(ApiKeyId::BinanceDemo, NOW),
         )
         .expect("impostor writes request");
         assert!(
@@ -207,7 +215,7 @@ mod tests {
         let (initiator, first_message) = Initiator::write_request(
             &client_private_key,
             &gnosis_public_key,
-            &Request::new("key", NOW),
+            &Request::new(ApiKeyId::BinanceDemo, NOW),
         )
         .expect("client writes request");
         assert!(

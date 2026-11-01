@@ -23,7 +23,7 @@
 | `/etc/phanes/gnosis.key` / `gnosis.pub` | Gnosis 私钥（600）/ 公钥 |
 | `/etc/phanes/celestia.key` / `celestia.pub` | Celestia 私钥（600）/ 公钥 |
 | `/etc/phanes/phanes.toml` | 配置（600；监听地址、客户端 IP 白名单、Osaka 的两个公钥、允许的 key id、Bark 凭据） |
-| `/etc/phanes/api_keys/<key_id>.txt` | 待发放的 key（600），从 `api_keys/` 同步 |
+| `/etc/phanes/gnoses/<key_id>.json` | 待发放的 key 文件（600），从 `gnoses/` 同步 |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
 ### RedmiBook 部署
@@ -37,7 +37,7 @@ sudo apt install -y build-essential pkg-config cmake curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust 可跳过
 ```
 
-把要发放的 key 放进 `api_keys/<key_id>.txt`（已 gitignore，不会提交）。
+`gnoses/<key_id>.json` 是要发放的 key 文件，仓库里提交的是 dummy 值，字段名就是程序要读的字段（如 SBE 只要 `api_key`，交易 key 要 `api_key` 和 `secret_key`）。部署前把其中的 dummy 值换成真实的 key，**换过之后不要提交**。
 
 #### 2. 安装
 
@@ -45,7 +45,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust �
 deploy/phanes/phanes.sh install
 ```
 
-首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、同步 `api_keys/`（为空则报错退出）、生成配置模板、安装 systemd unit，
+首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、同步 `gnoses/`（为空则报错退出）、生成配置模板、安装 systemd unit，
 然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给 Osaka，也可随时 `cat /etc/phanes/*.pub`）。
 
 #### 3. 填配置
@@ -54,7 +54,7 @@ deploy/phanes/phanes.sh install
 
 - `[clients.Osaka]` 填 Osaka 的公网 IP：`ipv4` 必填，`ipv6` 可选（Osaka 有 IPv6，访问 Cloudflare 时可能走 IPv6，记得填上）。
   各服务的 `allowed_clients` 引用这里的名字；引用不存在的名字、IP 无效或同一 IP 出现在两个名字下，Phanes 拒绝启动。
-- `gnosis_service_config.public_key` 填 Osaka 的 Gnosis 公钥（见下文 Osaka 第 1 步）；`allowed_key_ids` 列出允许 Osaka 取的 key。
+- `gnosis_service_config.public_key` 填 Osaka 的 Gnosis 公钥（见下文 Osaka 第 1 步）；`allowed_key_ids` 列出允许 Osaka 取的 key，只能是 `layline::api_keys::ApiKeyId` 里的 id（`binance_real`、`binance_demo`、`binance_sbe_real`、`binance_sbe_demo`），写错则 Phanes 拒绝启动；每个允许的 key 文件必须存在且字段与 `gnoses/` 模板一致。
 - `celestia_service_config.public_key` 填 Osaka 的 Celestia 公钥。
 - `[bark]` 的 `device_key`，以及 `encryption_key`（32 位，Bark App 里设为 AES-256-CBC）。
 
@@ -89,7 +89,8 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 | 场景 | 命令 |
 |---|---|
 | 代码更新后重新部署 | `git pull && deploy/phanes/phanes.sh install`（保留密钥和配置） |
-| 新增 / 修改 key | 改 `api_keys/`，必要时改 `allowed_key_ids`，再 `deploy/phanes/phanes.sh install` |
+| 修改 key | 改 `gnoses/`，必要时改 `allowed_key_ids`，再 `deploy/phanes/phanes.sh install` |
+| 新增一种 key | 先在 `layline::api_keys` 加 id 和类型，在 `gnoses/` 加模板，再重新部署 Phanes 和用到它的服务 |
 | 看日志 | `journalctl --namespace=phanes -u phanes -f`（Phanes 使用独立的 journal namespace） |
 | 彻底删除 | `deploy/phanes/phanes.sh uninstall` |
 | 从零重装 | `deploy/phanes/phanes.sh reinstall`（**会生成新 Gnosis 和 Celestia 密钥**，Osaka 要换公钥，`phanes.toml` 要重填） |

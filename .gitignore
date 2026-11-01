@@ -25,12 +25,5 @@ rustc-ice-*.txt
 # Any temp file during development
 tmp/
 
-# Secrets: never commit. Real configs hold Bark credentials; deploy/*/*.example.toml are the templates.
-api_keys/
-phanes.toml
-market_data_provider.toml
-*.key
-*.env
-
 # Windows download markers (from copying files in via WSL)
 *:Zone.Identifier

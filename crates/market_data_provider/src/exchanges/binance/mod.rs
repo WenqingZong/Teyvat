@@ -22,10 +22,12 @@ use super::websocket::{
     EndpointId, EndpointSet, EndpointState, Header, Heartbeat, Keepalive, TungsteniteClient,
     WebSocketClient,
 };
-use crate::alert::SendAlert;
+use crate::alert::{SendAlert, alert_and_panic};
+use crate::exit_reason::ExitReason;
 use crate::phanes_client::{ApiKeySource, PhanesClient, fetch_api_key_or_panic};
 use crate::utils::{Clock, RealClock};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
+use layline::api_keys::BinanceSbeApiKey;
 use layline::bark::Notifier;
 use layline::types::ConnectedApi;
 use layline::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
@@ -52,9 +54,6 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 const RESTORE_FAILURES_BEFORE_ALERT: u32 = 5;
-/// Phanes key ids of the SBE market data keys, which need no permission at all.
-const LIVE_SBE_API_KEY_ID: &str = "binance_sbe_real";
-const DEMO_SBE_API_KEY_ID: &str = "binance_sbe_demo";
 const SUBSCRIBE: &str = "SUBSCRIBE";
 const UNSUBSCRIBE: &str = "UNSUBSCRIBE";
 
@@ -79,8 +78,8 @@ pub(crate) struct BinanceConnector<
     clock: TimeSource,
     /// Indexed by `BinanceEndpoint::index`, so the per-message path neither hashes nor allocates.
     endpoint_set: BinanceEndpointSet<WebSocket>,
-    /// Fetched on first need, by Phanes key id.
-    api_keys: HashMap<&'static str, SecretString>,
+    /// The SBE API key, fetched on first need.
+    sbe_api_key: Option<SecretString>,
     /// Parsed but not yet handed out; one SBE frame can carry several trades.
     pending: VecDeque<MarketData>,
     next_request_id: u64,
@@ -113,6 +112,7 @@ where
     const CONNECTED_APIS: &'static [ConnectedApi] = endpoint::CONNECTED_APIS;
 
     /// Fails the whole batch if any endpoint fails, unsubscribing what the batch already subscribed.
+    /// An endpoint that cannot be connected to stops the provider instead: see `connect_or_panic`.
     async fn subscribe(&mut self, topics: &HashSet<Topic>) -> Result<()> {
         let streams_by_endpoint = group_streams_by_endpoint(topics);
         info!("subscribing {}", describe_streams(&streams_by_endpoint));
@@ -126,7 +126,7 @@ where
                             warn!("failed to roll back {endpoint}: {error:#}");
                         }
                     }
-                    return Err(error.context(format!("{endpoint} subscription failed")));
+                    return Err(error.context(endpoint.to_string()));
                 }
             }
         }
@@ -140,8 +140,7 @@ where
         for (endpoint, streams) in streams_by_endpoint {
             let keys: Vec<String> = streams.into_keys().collect();
             if let Err(error) = self.unsubscribe_streams(endpoint, &keys).await {
-                first_error_option
-                    .get_or_insert(error.context(format!("{endpoint} unsubscription failed")));
+                first_error_option.get_or_insert(error.context(endpoint.to_string()));
             }
         }
         first_error_option.map_or(Ok(()), Err)
@@ -218,7 +217,7 @@ where
             alert,
             clock,
             endpoint_set: endpoints,
-            api_keys: HashMap::new(),
+            sbe_api_key: None,
             pending: VecDeque::new(),
             next_request_id: 1,
         }
@@ -252,7 +251,10 @@ where
         } else {
             added_keys.clone()
         };
-        match self.connect_and_request(endpoint, SUBSCRIBE, &keys).await {
+        if !self.endpoint_state_mut(endpoint).connection.is_connected() {
+            self.connect_or_panic(endpoint).await;
+        }
+        match self.request(endpoint, SUBSCRIBE, &keys).await {
             Ok(()) => {
                 self.endpoint_set.clear_restore(endpoint);
                 Ok(added_keys)
@@ -361,12 +363,12 @@ where
     }
 
     async fn connect(&mut self, endpoint: BinanceEndpoint) -> Result<()> {
-        let header_option = match api_key_id(endpoint, self.demo) {
-            Some(key_id) => Some(Header {
+        let header_option = match endpoint {
+            BinanceEndpoint::SpotSbe => Some(Header {
                 name: API_KEY_HEADER,
-                value: self.api_key(key_id).await,
+                value: self.sbe_api_key().await,
             }),
-            None => None,
+            BinanceEndpoint::FuturesPublic => None,
         };
         let url = endpoint.url(self.demo);
         self.endpoint_state_mut(endpoint)
@@ -375,14 +377,30 @@ where
             .await
     }
 
-    /// Asks Phanes only when a stream really needs the key, once per key; alerts and panics if that fails.
-    async fn api_key(&mut self, key_id: &'static str) -> SecretString {
-        if let Some(api_key) = self.api_keys.get(key_id) {
+    /// A subscription that cannot connect means a wrong URL, key or network, which no retry fixes:
+    /// alerts the phone, then panics with `ExitReason::ExchangeUnreachable`, which the binary's panic
+    /// hook turns into the exit code. Restoring a connection that worked before retries instead.
+    async fn connect_or_panic(&mut self, endpoint: BinanceEndpoint) {
+        if let Err(error) = self.connect(endpoint).await {
+            match alert_and_panic(
+                &self.alert,
+                &format!("Market Data Provider Cannot Connect to Binance {endpoint}"),
+                &format!("cannot connect to Binance {endpoint}: {error:#}"),
+                ExitReason::ExchangeUnreachable,
+            )
+            .await {}
+        }
+    }
+
+    /// Asks Phanes only when an SBE stream really needs the key, once; alerts and panics if that fails.
+    async fn sbe_api_key(&mut self) -> SecretString {
+        if let Some(api_key) = &self.sbe_api_key {
             return api_key.clone();
         }
-        let api_key = fetch_api_key_or_panic(&self.key_source, &self.alert, key_id).await;
-        self.api_keys.insert(key_id, api_key.clone());
-        api_key
+        let sbe_api_key: BinanceSbeApiKey =
+            fetch_api_key_or_panic(&self.key_source, &self.alert, self.demo).await;
+        self.sbe_api_key = Some(sbe_api_key.api_key());
+        sbe_api_key.api_key()
     }
 
     /// Sends one request and waits for its answer; events arriving meanwhile are queued as usual.
@@ -561,15 +579,6 @@ where
     }
 }
 
-/// The Phanes key id of the API key `endpoint` needs, if any.
-fn api_key_id(endpoint: BinanceEndpoint, demo: bool) -> Option<&'static str> {
-    match (endpoint, demo) {
-        (BinanceEndpoint::SpotSbe, false) => Some(LIVE_SBE_API_KEY_ID),
-        (BinanceEndpoint::SpotSbe, true) => Some(DEMO_SBE_API_KEY_ID),
-        (BinanceEndpoint::FuturesPublic, _) => None,
-    }
-}
-
 /// The next frame of one endpoint, stamped as soon as it is read.
 async fn read<WebSocket: WebSocketClient>(
     endpoint_state: &mut EndpointState<WebSocket>,
@@ -621,11 +630,10 @@ fn describe_streams(
 
 #[cfg(test)]
 mod tests {
-    use std::panic::AssertUnwindSafe;
     use std::sync::Arc;
 
-    use futures::FutureExt;
     use rust_decimal::dec;
+    use secrecy::ExposeSecret;
     use serde_json::{Value, json};
     use strum::IntoEnumIterator;
     use tokio::time::timeout;
@@ -634,7 +642,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::{Bytes, Utf8Bytes};
 
     use super::*;
-    use crate::alert::tests::RecordingAlert;
+    use crate::alert::tests::{RecordingAlert, expect_alert_and_panic};
     use crate::exchanges::tests::test_connector_context;
     use crate::exchanges::websocket::tests::{
         MockVenue, MockVenueConnection, MockWebSocketClient, Responder, mock_websocket,
@@ -642,10 +650,15 @@ mod tests {
     use crate::exit_reason::ExitReason;
     use crate::phanes_client::tests::MockApiKeySource;
     use crate::utils::tests::MockClock;
+    use layline::api_keys::{ApiKey, ApiKeyId, parse_api_key};
     use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
 
     const SBE_API_KEY: &str = "dummy-sbe-api-key";
+    /// Laid out like `gnoses/binance_sbe_{real,demo}.json`; Phanes grants the file as is.
+    const SBE_KEY_FILE: &str = r#"{
+    "api_key": "dummy-sbe-api-key"
+}"#;
     /// 2026-10-24 00:00:00 UTC.
     const NOW_NANOSECONDS: NonZeroU64 =
         NonZeroU64::new(1_792_800_000_000_000_000).expect("not zero");
@@ -667,7 +680,7 @@ mod tests {
         fn new(demo: bool) -> Self {
             let mut venues = HashMap::new();
             let key_source = MockApiKeySource {
-                grants: HashMap::from([(sbe_key_id(demo).to_owned(), SBE_API_KEY.to_owned())]),
+                grants: HashMap::from([(sbe_key_id(demo), SBE_KEY_FILE.to_owned())]),
                 ..MockApiKeySource::default()
             };
             let alert = RecordingAlert::default();
@@ -748,7 +761,7 @@ mod tests {
             self.expect_connection(BinanceEndpoint::FuturesPublic, None)
         }
 
-        fn expect_phanes_asked_for(&self, key_ids: &[&str]) {
+        fn expect_phanes_asked_for(&self, key_ids: &[ApiKeyId]) {
             let requested = self.connector.key_source.requested_key_ids.borrow();
             assert_eq!(key_ids, requested.as_slice());
         }
@@ -802,8 +815,8 @@ mod tests {
         assert_eq!(expected, params);
     }
 
-    fn sbe_key_id(demo: bool) -> &'static str {
-        api_key_id(BinanceEndpoint::SpotSbe, demo).expect("SBE needs an API key")
+    fn sbe_key_id(demo: bool) -> ApiKeyId {
+        BinanceSbeApiKey::key_id(demo)
     }
 
     fn topic(
@@ -959,18 +972,14 @@ mod tests {
         let mut fixture = BinanceFixture::new(false);
         fixture.connector.key_source.offline = true;
         let topics = HashSet::from([spot_bbo()]);
-        let payload = AssertUnwindSafe(fixture.connector.subscribe(&topics))
-            .catch_unwind()
-            .await
-            .expect_err("failing to get the key is expected to panic");
-        assert_eq!(
-            Some(&ExitReason::ApiKeyUnavailable),
-            payload.downcast_ref::<ExitReason>()
-        );
-        let alerts = fixture.alert.alerts();
-        assert_eq!(1, alerts.len());
-        assert!(alerts[0].contains(sbe_key_id(false)));
-        assert!(alerts[0].contains("Phanes is unreachable"));
+        let alert = expect_alert_and_panic(
+            fixture.connector.subscribe(&topics),
+            &fixture.alert,
+            ExitReason::ApiKeyUnavailable,
+        )
+        .await;
+        assert!(alert.contains(&sbe_key_id(false).to_string()), "{alert}");
+        assert!(alert.contains("Phanes is unreachable"), "{alert}");
         fixture.expect_no_new_connection();
     }
 
@@ -999,25 +1008,23 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn refused_endpoint_fails_the_batch_and_closes_what_it_opened() {
+    async fn refused_connection_alerts_and_panics() {
         let mut fixture = BinanceFixture::new(false);
         fixture
             .venue(BinanceEndpoint::FuturesPublic)
             .refuse_connections();
-        let error = fixture
-            .connector
-            .subscribe(&HashSet::from([spot_bbo(), perpetual_bbo()]))
-            .await
-            .expect_err("a refused endpoint is expected to fail the batch");
-        assert!(format!("{error:#}").contains("refused"), "{error:#}");
-        fixture.expect_connected_endpoints(&[]);
-        let mut opened = fixture.expect_spot();
-        expect_request(&mut opened, SUBSCRIBE, &["btcusdt@bestBidAsk"]);
-        assert_eq!(normal_close(), opened.expect_received());
-        fixture.expect_no_new_connection();
-
-        fixture.subscribe(&[spot_bbo()]).await;
-        fixture.expect_spot();
+        let topics = HashSet::from([spot_bbo(), perpetual_bbo()]);
+        let alert = expect_alert_and_panic(
+            fixture.connector.subscribe(&topics),
+            &fixture.alert,
+            ExitReason::ExchangeUnreachable,
+        )
+        .await;
+        assert!(
+            alert.starts_with("Market Data Provider Cannot Connect to Binance FuturesPublic"),
+            "{alert}"
+        );
+        assert!(alert.contains("refused"), "{alert}");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1326,12 +1333,10 @@ mod tests {
     }
 
     #[test]
-    fn only_sbe_needs_an_api_key_per_environment() {
-        assert_eq!(Some(LIVE_SBE_API_KEY_ID), sbe_key_id(false).into());
-        assert_eq!(Some(DEMO_SBE_API_KEY_ID), sbe_key_id(true).into());
-        for demo in [false, true] {
-            assert_eq!(None, api_key_id(BinanceEndpoint::FuturesPublic, demo));
-        }
+    fn sbe_key_file_holds_only_the_api_key() {
+        let sbe_api_key: BinanceSbeApiKey =
+            parse_api_key(&SecretString::from(SBE_KEY_FILE)).expect("the SBE key file parses");
+        assert_eq!(SBE_API_KEY, sbe_api_key.api_key().expose_secret());
     }
 
     #[tokio::test(start_paused = true)]

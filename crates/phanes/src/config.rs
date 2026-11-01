@@ -8,6 +8,7 @@ use serde::Deserialize;
 use toml::de::Error as TomlError;
 
 use crate::client_filter::ClientsByIp;
+use layline::api_keys::ApiKeyId;
 use layline::bark::BarkConfig;
 use layline::noise::{StaticKey, decode_private_key, decode_public_key};
 use layline::secrets::{SecretFileError, read_secret_file};
@@ -40,8 +41,8 @@ pub struct PhanesConfig {
     pub listen_address: SocketAddr,
     pub gnosis_private_key_file: PathBuf,
     pub celestia_private_key_file: PathBuf,
-    /// `<api_keys_directory>/<key_id>.txt` holds the secret for `key_id`.
-    pub api_keys_directory: PathBuf,
+    /// `<gnoses_directory>/<key_id>.json` holds the key file of `key_id`.
+    pub gnoses_directory: PathBuf,
     #[serde(default = "default_max_clock_skew_seconds")]
     pub max_clock_skew_seconds: u64,
     /// Client name → the addresses Cloudflare may report for it.
@@ -69,7 +70,8 @@ impl ClientAddresses {
 #[serde(deny_unknown_fields)]
 pub struct GnosisServiceConfig {
     pub public_key: String,
-    pub allowed_key_ids: Vec<String>,
+    /// An id Phanes does not know fails to parse, so the config is refused.
+    pub allowed_key_ids: Vec<ApiKeyId>,
     pub allowed_clients: Vec<String>,
 }
 
@@ -229,7 +231,7 @@ mod tests {
 listen_address = "127.0.0.1:8888"
 gnosis_private_key_file = "{}"
 celestia_private_key_file = "{}"
-api_keys_directory = "{}"
+gnoses_directory = "{}"
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"
@@ -430,6 +432,19 @@ allowed_clients = ["Osaka", "Tokyo"]
         let text = valid_config(&fixture).replace(
             &format!("[clients.Tokyo]\nipv4 = \"{TOKYO_IPV4}\"\n"),
             &format!("[clients]\nTokyo = [\"{TOKYO_IPV4}\"]\n"),
+        );
+        assert!(matches!(
+            fixture.load(&text),
+            Err(PhanesConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_key_id_is_rejected() {
+        let fixture = Fixture::new();
+        let text = valid_config(&fixture).replace(
+            "allowed_key_ids = [\"binance_demo\"]",
+            "allowed_key_ids = [\"binance_demo_trading\"]",
         );
         assert!(matches!(
             fixture.load(&text),
