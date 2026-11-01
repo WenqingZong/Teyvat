@@ -119,10 +119,10 @@ impl Coordinator {
 
         let orphaned = self.registry.remove_holder(strategy_name, &change.dropped);
         self.release(orphaned).await;
-        for (reason, topic_names) in group_by_reason(&failures) {
+        for (reason, topics) in group_by_reason(&failures) {
             warn!(
-                "{strategy_name} was refused [{}]: {reason}",
-                topic_names.join(", ")
+                "{strategy_name} was refused {}: {reason}",
+                format_topics(&topics)
             );
         }
         requested

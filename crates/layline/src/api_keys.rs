@@ -33,15 +33,14 @@ impl ApiKeyId {
         format!("{self}.{API_KEY_FILE_EXTENSION}")
     }
 
-    /// Parses `key_file` as the type this id holds, then drops it.
-    // Claude TODO: the name key_file is misleading, readers may think it's the file path. Here, you should rename the parameter as key_file_content.
-    pub fn check_key_file(self, key_file: &SecretString) -> Result<(), ApiKeyFormatError> {
+    /// Parses `key_file_content` as the type this id holds, then drops it.
+    pub fn check_key_file(self, key_file_content: &SecretString) -> Result<(), ApiKeyFormatError> {
         match self {
             Self::BinanceReal | Self::BinanceDemo => {
-                parse_api_key::<BinanceApiKey>(key_file).map(drop)
+                parse_api_key::<BinanceApiKey>(key_file_content).map(drop)
             }
             Self::BinanceSbeReal | Self::BinanceSbeDemo => {
-                parse_api_key::<BinanceSbeApiKey>(key_file).map(drop)
+                parse_api_key::<BinanceSbeApiKey>(key_file_content).map(drop)
             }
         }
     }
@@ -56,9 +55,18 @@ pub trait ApiKey: DeserializeOwned {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinanceApiKey {
-    // Claude TODO: These files should not be public, you should provide pub fn to retrive them instead. The pub fn still return a SecretString, and it's the callers job to use expose_secret() on it. 
-    pub api_key: SecretString,
-    pub secret_key: SecretString,
+    api_key: SecretString,
+    secret_key: SecretString,
+}
+
+impl BinanceApiKey {
+    pub fn api_key(&self) -> SecretString {
+        self.api_key.clone()
+    }
+
+    pub fn secret_key(&self) -> SecretString {
+        self.secret_key.clone()
+    }
 }
 
 impl ApiKey for BinanceApiKey {
@@ -76,8 +84,13 @@ impl ApiKey for BinanceApiKey {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinanceSbeApiKey {
-    // Claude TODO: Same as above, api_key should not be pub, provide a pub fn to get it. The pub fn should also returns SecretString and it's the caller's job to call expose_secret() on it. 
-    pub api_key: SecretString,
+    api_key: SecretString,
+}
+
+impl BinanceSbeApiKey {
+    pub fn api_key(&self) -> SecretString {
+        self.api_key.clone()
+    }
 }
 
 impl ApiKey for BinanceSbeApiKey {
@@ -99,15 +112,13 @@ pub struct ApiKeyFormatError {
     found: String,
 }
 
-// Claude TODO: Same review as above, rename key_file as key_file_content.
 pub fn parse_api_key<KeyType: ApiKey>(
-    key_file: &SecretString,
+    key_file_content: &SecretString,
 ) -> Result<KeyType, ApiKeyFormatError> {
-    // Claude TODO: Add this to memory: variable/parameter name should be descriptive enough and should not have any misunderstading. Here, you named this variable json, but it's type is actually a str, so a more proper name is json_str.
-    let json = key_file.expose_secret();
-    from_str(json).map_err(|error| {
+    let json_str = key_file_content.expose_secret();
+    from_str(json_str).map_err(|error| {
         let position = format!("line {} column {}", error.line(), error.column());
-        let found = match from_str::<BTreeMap<String, IgnoredAny>>(json) {
+        let found = match from_str::<BTreeMap<String, IgnoredAny>>(json_str) {
             Ok(fields) => {
                 let names: Vec<&str> = fields.keys().map(String::as_str).collect();
                 format!("has fields [{}] (error at {position})", names.join(", "))
@@ -198,8 +209,8 @@ mod tests {
     fn key_file_parses_into_its_type() {
         let api_key: BinanceApiKey =
             parse_api_key(&SecretString::from(BINANCE_KEY_FILE)).expect("the fields match");
-        assert_eq!("public", api_key.api_key.expose_secret());
-        assert_eq!("private", api_key.secret_key.expose_secret());
+        assert_eq!("public", api_key.api_key().expose_secret());
+        assert_eq!("private", api_key.secret_key().expose_secret());
     }
 
     #[test]

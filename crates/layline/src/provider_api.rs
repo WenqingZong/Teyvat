@@ -50,15 +50,15 @@ pub struct SubscriptionResponse {
 /// The ring path to read, or why the topic was refused.
 pub type SubscriptionResult = Result<PathBuf, String>;
 
-/// Refused topics grouped by reason, both sorted, so a cause shared by many topics is reported once.
-// Claude TODO: Here, the return type should by BTreeMap<&str, Vec<Topic>>, in this way, the code provides more sematic meaning to readers. And later, we rely on Topic's conversion to String ability to report it to log. 
-pub fn group_by_reason(refusals: &HashMap<Topic, String>) -> BTreeMap<&str, Vec<String>> {
-    let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+/// Refused topics grouped by reason, reasons sorted and topics sorted by name, so a cause shared by
+/// many topics is reported once.
+pub fn group_by_reason(refusals: &HashMap<Topic, String>) -> BTreeMap<&str, Vec<Topic>> {
+    let mut groups: BTreeMap<&str, Vec<Topic>> = BTreeMap::new();
     for (topic, reason) in refusals {
-        groups.entry(reason).or_default().push(topic.to_string());
+        groups.entry(reason).or_default().push(*topic);
     }
-    for names in groups.values_mut() {
-        names.sort();
+    for topics in groups.values_mut() {
+        topics.sort_by_cached_key(Topic::to_string);
     }
     groups
 }
@@ -252,14 +252,8 @@ mod tests {
         let groups = group_by_reason(&refusals);
         assert_eq!(
             BTreeMap::from([
-                (
-                    "venue down",
-                    vec![
-                        "Binance/BTC-USDT-SPOT/BBO".to_owned(),
-                        "Binance/BTC-USDT-SPOT/TRADE".to_owned()
-                    ]
-                ),
-                ("worker stopped", vec!["OKX/BTC-USDT-PERP/BBO".to_owned()]),
+                ("venue down", vec![spot_bbo, spot_trade]),
+                ("worker stopped", vec![okx_bbo]),
             ]),
             groups
         );

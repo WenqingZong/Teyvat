@@ -58,14 +58,14 @@ pub enum KeyFileError {
     },
 }
 
-/// `<api_keys_directory>/<key_id>.json`.
-pub fn api_key_file_path(api_keys_directory: &Path, key_id: ApiKeyId) -> PathBuf {
-    api_keys_directory.join(key_id.file_name())
+/// `<gnoses_directory>/<key_id>.json`.
+pub fn api_key_file_path(gnoses_directory: &Path, key_id: ApiKeyId) -> PathBuf {
+    gnoses_directory.join(key_id.file_name())
 }
 
 /// Startup check of an allowed key's file: it exists and holds the fields of `key_id`'s type.
-pub fn check_api_key_file(api_keys_directory: &Path, key_id: ApiKeyId) -> Result<(), KeyFileError> {
-    let path = api_key_file_path(api_keys_directory, key_id);
+pub fn check_api_key_file(gnoses_directory: &Path, key_id: ApiKeyId) -> Result<(), KeyFileError> {
+    let path = api_key_file_path(gnoses_directory, key_id);
     let key_file = SecretString::from(read_file_to_string(&path).map_err(|source| {
         KeyFileError::Unreadable {
             path: path.clone(),
@@ -81,7 +81,7 @@ pub struct GnosisState {
     pub gnosis_private_key: SecretBox<StaticKey>,
     pub client_public_key: StaticKey,
     pub allowed_key_ids: HashSet<ApiKeyId>,
-    pub api_keys_directory: PathBuf,
+    pub gnoses_directory: PathBuf,
     pub max_clock_skew_seconds: u64,
     pub notifications: UnboundedSender<Notification>,
     /// nonce -> unix second after which the nonce's timestamp is out of window anyway.
@@ -94,7 +94,7 @@ impl GnosisState {
         gnosis_private_key: SecretBox<StaticKey>,
         client_public_key: StaticKey,
         allowed_key_ids: HashSet<ApiKeyId>,
-        api_keys_directory: PathBuf,
+        gnoses_directory: PathBuf,
         max_clock_skew_seconds: u64,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
@@ -102,7 +102,7 @@ impl GnosisState {
             gnosis_private_key,
             client_public_key,
             allowed_key_ids,
-            api_keys_directory,
+            gnoses_directory,
             max_clock_skew_seconds,
             notifications,
             seen_nonces: Mutex::default(),
@@ -143,7 +143,7 @@ impl GnosisState {
             return Err(DenialReason::NotAllowed);
         }
 
-        let path = api_key_file_path(&self.api_keys_directory, request.key_id);
+        let path = api_key_file_path(&self.gnoses_directory, request.key_id);
         let key_file = read_to_string(&path).await.map_err(|error| {
             error!("cannot read key file {}: {error}", path.display());
             DenialReason::KeyNotFound
@@ -298,22 +298,19 @@ mod tests {
         client_private_key: SecretBox<StaticKey>,
         gnosis_public_key: StaticKey,
         notifications: UnboundedReceiver<Notification>,
-        _api_keys_directory: TempDir,
+        _gnoses_directory: TempDir,
     }
 
     fn harness() -> Harness {
         let (gnosis_private_key, gnosis_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let api_keys_directory = tempdir().expect("temporary directory is created");
+        let gnoses_directory = tempdir().expect("temporary directory is created");
         for (key_id, key_file) in [
             (KEY_ID, KEY_FILE),
             (NOT_ALLOWED_KEY_ID, NOT_ALLOWED_KEY_FILE),
         ] {
-            write(
-                api_key_file_path(api_keys_directory.path(), key_id),
-                key_file,
-            )
-            .expect("key file is written");
+            write(api_key_file_path(gnoses_directory.path(), key_id), key_file)
+                .expect("key file is written");
         }
 
         let (sender, notifications) = unbounded_channel();
@@ -321,7 +318,7 @@ mod tests {
             gnosis_private_key,
             client_public_key,
             HashSet::from([KEY_ID, MISSING_KEY_ID]),
-            api_keys_directory.path().to_owned(),
+            gnoses_directory.path().to_owned(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             sender,
         );
@@ -330,7 +327,7 @@ mod tests {
             client_private_key,
             gnosis_public_key,
             notifications,
-            _api_keys_directory: api_keys_directory,
+            _gnoses_directory: gnoses_directory,
         }
     }
 

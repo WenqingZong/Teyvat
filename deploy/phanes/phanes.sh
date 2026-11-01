@@ -12,7 +12,7 @@ set -euo pipefail
 
 readonly BINARY=/usr/local/bin/phanes
 readonly CONFIG_DIRECTORY=/etc/phanes
-readonly API_KEYS_DIRECTORY=$CONFIG_DIRECTORY/api_keys
+readonly GNOSES_DIRECTORY=$CONFIG_DIRECTORY/gnoses
 readonly GNOSIS_PRIVATE_KEY=$CONFIG_DIRECTORY/gnosis.key
 readonly GNOSIS_PUBLIC_KEY=$CONFIG_DIRECTORY/gnosis.pub
 readonly CELESTIA_PRIVATE_KEY=$CONFIG_DIRECTORY/celestia.key
@@ -42,15 +42,15 @@ install_phanes() {
     sudo install -m 755 target/release/phanes "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"
-    sudo mkdir -p "$API_KEYS_DIRECTORY"
+    sudo mkdir -p "$GNOSES_DIRECTORY"
     sudo chown -R "$USER:" "$CONFIG_DIRECTORY"
-    chmod 700 "$CONFIG_DIRECTORY" "$API_KEYS_DIRECTORY"
+    chmod 700 "$CONFIG_DIRECTORY" "$GNOSES_DIRECTORY"
 
     generate_key_pair Gnosis "$GNOSIS_PRIVATE_KEY" "$GNOSIS_PUBLIC_KEY"
     generate_key_pair celestia "$CELESTIA_PRIVATE_KEY" "$CELESTIA_PUBLIC_KEY"
 
-    log "syncing gnoses/*.json into $API_KEYS_DIRECTORY"
-    install -m 600 gnoses/*.json "$API_KEYS_DIRECTORY/"
+    log "syncing gnoses/*.json into $GNOSES_DIRECTORY"
+    install -m 600 gnoses/*.json "$GNOSES_DIRECTORY/"
 
     [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes/phanes.example.toml "$CONFIG_FILE"
 

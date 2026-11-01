@@ -399,8 +399,8 @@ where
         }
         let sbe_api_key: BinanceSbeApiKey =
             fetch_api_key_or_panic(&self.key_source, &self.alert, self.demo).await;
-        self.sbe_api_key = Some(sbe_api_key.api_key.clone());
-        sbe_api_key.api_key
+        self.sbe_api_key = Some(sbe_api_key.api_key());
+        sbe_api_key.api_key()
     }
 
     /// Sends one request and waits for its answer; events arriving meanwhile are queued as usual.
@@ -1336,7 +1336,7 @@ mod tests {
     fn sbe_key_file_holds_only_the_api_key() {
         let sbe_api_key: BinanceSbeApiKey =
             parse_api_key(&SecretString::from(SBE_KEY_FILE)).expect("the SBE key file parses");
-        assert_eq!(SBE_API_KEY, sbe_api_key.api_key.expose_secret());
+        assert_eq!(SBE_API_KEY, sbe_api_key.api_key().expose_secret());
     }
 
     #[tokio::test(start_paused = true)]

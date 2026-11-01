@@ -56,7 +56,7 @@ fn subscribe_with_resubscribe_interval(
         },
         resubscribe_interval,
     };
-    let subscriptions = into_subscriptions(session.post_with_retry(SUBSCRIBE_PATH))?;
+    let subscriptions = extract_successful_subscriptions(session.post_with_retry(SUBSCRIBE_PATH))?;
     let renewed_subscriptions = subscriptions.clone();
     thread::Builder::new()
         .name("provider-session".to_owned())
@@ -111,8 +111,9 @@ impl ProviderSession {
     }
 }
 
-// Claude TODO: 这个方法的名字太迷惑了, 应该叫extract_succesful_subscriptions.
-fn into_subscriptions(results: HashMap<Topic, SubscriptionResult>) -> Result<Vec<Subscription>> {
+fn extract_successful_subscriptions(
+    results: HashMap<Topic, SubscriptionResult>,
+) -> Result<Vec<Subscription>> {
     let mut subscriptions = Vec::with_capacity(results.len());
     let mut rejections = HashMap::new();
     for (topic, subscription_result) in results {
@@ -139,9 +140,9 @@ fn into_subscriptions(results: HashMap<Topic, SubscriptionResult>) -> Result<Vec
 /// ```
 fn describe_rejections(rejections: &HashMap<Topic, String>) -> String {
     let mut lines = vec![format!("provider rejected {} topics:", rejections.len())];
-    for (reason, topic_names) in group_by_reason(rejections) {
+    for (reason, topics) in group_by_reason(rejections) {
         lines.push(format!("  {reason}"));
-        lines.extend(topic_names.iter().map(|name| format!("    {name}")));
+        lines.extend(topics.iter().map(|topic| format!("    {topic}")));
     }
     lines.join("\n")
 }

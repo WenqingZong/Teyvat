@@ -3,7 +3,8 @@
 pub enum ExitReason {
     /// An exchange worker could not get its API key from Phanes; raised as a panic payload from the worker thread.
     ApiKeyUnavailable = 1,
-    // Claude TODO: Leave a todo here, this fatal error should be config error, and server stopped with an error should be classified to unexpected panic. And, unexpected panic is the fall back exit reason, it should always be the last. Do not modify this time, just leave a todo, we need to keep diff size reasonabel so human can read it. 
+    // TODO: FatalError should mean a config error only, and a server that stopped with an error
+    // belongs to UnexpectedPanic. UnexpectedPanic is the fallback, so it should be the last variant.
     /// The config is invalid, the port is taken, or the server stopped with an error.
     FatalError = 2,
     UnexpectedPanic = 3,

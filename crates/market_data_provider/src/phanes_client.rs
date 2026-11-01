@@ -391,7 +391,7 @@ pub(crate) mod tests {
         let alert = RecordingAlert::default();
         let api_key: BinanceSbeApiKey =
             fetch_api_key_or_panic(&key_source_granting_test_keys(), &alert, false).await;
-        assert_eq!(GRANTED_SECRET, api_key.api_key.expose_secret());
+        assert_eq!(GRANTED_SECRET, api_key.api_key().expose_secret());
         assert!(alert.alerts().is_empty());
     }
 

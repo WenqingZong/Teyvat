@@ -2,8 +2,7 @@
 listen_address = "127.0.0.1:8888"                    # cloudflared ingress; release builds require loopback
 gnosis_private_key_file = "/etc/phanes/gnosis.key"   # from `phanes keygen`, chmod 600
 celestia_private_key_file = "/etc/phanes/celestia.key"
-# Claude TODO: Please rename this field to gnoses_directory, and value should be /etc/phanes/gnoses
-api_keys_directory = "/etc/phanes/api_keys"          # <key_id>.json per key, synced from gnoses/
+gnoses_directory = "/etc/phanes/gnoses"              # <key_id>.json per key, synced from gnoses/
 max_clock_skew_seconds = 60
 
 # One table per client: the addresses Cloudflare reports in CF-Connecting-IP.

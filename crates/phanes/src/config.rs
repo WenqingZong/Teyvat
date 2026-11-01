@@ -41,8 +41,8 @@ pub struct PhanesConfig {
     pub listen_address: SocketAddr,
     pub gnosis_private_key_file: PathBuf,
     pub celestia_private_key_file: PathBuf,
-    /// `<api_keys_directory>/<key_id>.json` holds the key file of `key_id`.
-    pub api_keys_directory: PathBuf,
+    /// `<gnoses_directory>/<key_id>.json` holds the key file of `key_id`.
+    pub gnoses_directory: PathBuf,
     #[serde(default = "default_max_clock_skew_seconds")]
     pub max_clock_skew_seconds: u64,
     /// Client name → the addresses Cloudflare may report for it.
@@ -231,7 +231,7 @@ mod tests {
 listen_address = "127.0.0.1:8888"
 gnosis_private_key_file = "{}"
 celestia_private_key_file = "{}"
-api_keys_directory = "{}"
+gnoses_directory = "{}"
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"

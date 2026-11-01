@@ -193,7 +193,7 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
         .copied()
         .collect();
     for key_id in &allowed_key_ids {
-        gnosis_server::check_api_key_file(&config.api_keys_directory, *key_id)?;
+        gnosis_server::check_api_key_file(&config.gnoses_directory, *key_id)?;
     }
 
     let listener = TcpListener::bind(config.listen_address)
@@ -210,7 +210,7 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
         gnosis_private_key,
         gnosis_client_public_key,
         allowed_key_ids,
-        config.api_keys_directory.clone(),
+        config.gnoses_directory.clone(),
         config.max_clock_skew_seconds,
         notification_sender.clone(),
     );

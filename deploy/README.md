@@ -23,7 +23,7 @@
 | `/etc/phanes/gnosis.key` / `gnosis.pub` | Gnosis 私钥（600）/ 公钥 |
 | `/etc/phanes/celestia.key` / `celestia.pub` | Celestia 私钥（600）/ 公钥 |
 | `/etc/phanes/phanes.toml` | 配置（600；监听地址、客户端 IP 白名单、Osaka 的两个公钥、允许的 key id、Bark 凭据） |
-| `/etc/phanes/api_keys/<key_id>.json` | 待发放的 key 文件（600），从 `gnoses/` 同步 |
+| `/etc/phanes/gnoses/<key_id>.json` | 待发放的 key 文件（600），从 `gnoses/` 同步 |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
 ### RedmiBook 部署

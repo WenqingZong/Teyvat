@@ -42,7 +42,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 
 - 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）都在 `layline::gnosis`，这里只有服务端。Celestia 协议目前在本 crate 之外没有客户端，所以 `celestia/proto.rs` 留在这里；等第二个 crate 需要它时再移进 layline。
 - `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`build_handshake(prologue, ..)`、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
-- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 时间窗口 → nonce 防重放 → ACL → 读文件 `<api_keys_directory>/<key_id>.json`，原样发出。key id 是 `layline::api_keys::ApiKeyId` 枚举：请求里的未知 key id 解析失败，按畸形请求拒绝；`phanes.toml` 的 `allowed_key_ids` 写了未知 key id 则配置解析失败。启动时 `check_api_key_file` 逐个检查 `allowed_key_ids` 的文件：文件存在，且能解析成该 key id 对应的类型（`ApiKeyId::check_key_file`），否则拒绝启动。握手失败回空 404（推送 10 分钟节流）；认证之后的拒绝回加密的 `Denied{reason}`。
+- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 时间窗口 → nonce 防重放 → ACL → 读文件 `<gnoses_directory>/<key_id>.json`，原样发出。key id 是 `layline::api_keys::ApiKeyId` 枚举：请求里的未知 key id 解析失败，按畸形请求拒绝；`phanes.toml` 的 `allowed_key_ids` 写了未知 key id 则配置解析失败。启动时 `check_api_key_file` 逐个检查 `allowed_key_ids` 的文件：文件存在，且能解析成该 key id 对应的类型（`ApiKeyId::check_key_file`），否则拒绝启动。握手失败回空 404（推送 10 分钟节流）；认证之后的拒绝回加密的 `Denied{reason}`。
 - `src/celestia/`：`proto.rs`（`ProcessSample`/`Batch`/`Ack`、`Initiator`/`respond`/`Session`）；`server.rs`（`GET /celestia`：握手 → 解密 → 打日志 → 回 ack；握手或解密失败断开并节流推送；90 秒没有消息就断开）。
 - `src/service.rs`：`Service` 枚举（Gnosis / Celestia）和 `Language`；`to_string(Language)` 给出英文日志名或中文推送名。它是叶子模块，服务可以引用自己的名字而不必 import `server`，避免循环依赖。
 - `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`（`ClientFilters` 为 `None` 时不挂白名单；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build）。
