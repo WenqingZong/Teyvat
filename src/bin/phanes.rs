@@ -24,6 +24,7 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
+use layline::api_keys::ApiKeyId;
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;
 use layline::logging::init_tracing;
@@ -31,7 +32,7 @@ use layline::noise::{encode_key, generate_keypair};
 use phanes::celestia::server::CelestiaState;
 use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter, ClientsByIp};
 use phanes::config::{PhanesConfig, PhanesConfigError};
-use phanes::gnosis::server::{self as gnosis_server, GnosisState};
+use phanes::gnosis::server::{self as gnosis_server, GnosisState, KeyFileError};
 use phanes::notify::{self, Notification};
 use phanes::server::{self, ClientFilters};
 use phanes::service::Service;
@@ -67,8 +68,8 @@ enum Command {
 enum ServiceError {
     #[error(transparent)]
     Config(#[from] PhanesConfigError),
-    #[error("invalid key id {0:?} in gnosis_service_config.allowed_key_ids")]
-    InvalidAllowedKeyId(String),
+    #[error(transparent)]
+    KeyFile(#[from] KeyFileError),
     #[error(
         "listen_address {0} is not loopback: LAN devices could bypass Cloudflare and forge {CLIENT_IP_HEADER}"
     )]
@@ -185,17 +186,14 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
         ));
     }
 
-    let mut allowed_key_ids = HashSet::new();
-    for key_id in &config.gnosis_service_config.allowed_key_ids {
-        if !gnosis_server::is_valid_key_id(key_id) {
-            return Err(ServiceError::InvalidAllowedKeyId(key_id.clone()));
-        }
-        let key_file = config.api_keys_directory.join(format!("{key_id}.txt"));
-        if !key_file.is_file() {
-            let printable_path = key_file.display();
-            warn!("allowed key {key_id} has no file at {printable_path}");
-        }
-        allowed_key_ids.insert(key_id.clone());
+    let allowed_key_ids: HashSet<ApiKeyId> = config
+        .gnosis_service_config
+        .allowed_key_ids
+        .iter()
+        .copied()
+        .collect();
+    for key_id in &allowed_key_ids {
+        gnosis_server::check_api_key_file(&config.api_keys_directory, *key_id)?;
     }
 
     let listener = TcpListener::bind(config.listen_address)

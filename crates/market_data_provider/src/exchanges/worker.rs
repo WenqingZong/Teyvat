@@ -208,7 +208,7 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
         if let Err(error) = self.connector.subscribe(&new_topics).await {
             let reason = format!("{error:#}");
             for topic in new_topics {
-                failures.insert(topic, format!("exchange subscription failed: {reason}"));
+                failures.insert(topic, reason.clone());
             }
             return failures;
         }
@@ -240,7 +240,7 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
                 }
             }
             Err(error) => {
-                let reason = format!("exchange unsubscription failed: {error:#}");
+                let reason = format!("{error:#}");
                 for topic in removed {
                     failures.insert(topic, reason.clone());
                 }

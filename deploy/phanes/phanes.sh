@@ -35,7 +35,7 @@ confirm() {
 install_phanes() {
     cd "$REPOSITORY_ROOT"
     command -v cargo >/dev/null || die "cargo not found; install Rust via rustup first"
-    compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in the repository; nothing to serve"
+    compgen -G "gnoses/*.json" >/dev/null || die "no gnoses/*.json in the repository; nothing to serve"
 
     log "building release binary"
     cargo build --release -p teyvat --bin phanes
@@ -49,8 +49,8 @@ install_phanes() {
     generate_key_pair Gnosis "$GNOSIS_PRIVATE_KEY" "$GNOSIS_PUBLIC_KEY"
     generate_key_pair celestia "$CELESTIA_PRIVATE_KEY" "$CELESTIA_PUBLIC_KEY"
 
-    log "syncing api_keys/*.txt into $API_KEYS_DIRECTORY"
-    install -m 600 api_keys/*.txt "$API_KEYS_DIRECTORY/"
+    log "syncing gnoses/*.json into $API_KEYS_DIRECTORY"
+    install -m 600 gnoses/*.json "$API_KEYS_DIRECTORY/"
 
     [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes/phanes.example.toml "$CONFIG_FILE"
 

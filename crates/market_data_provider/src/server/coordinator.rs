@@ -6,7 +6,7 @@ use tracing::{info, warn};
 use super::format_topics;
 use super::registry::SubscriptionRegistry;
 use crate::exchanges::ExchangeRouter;
-use layline::provider_api::{SubscriptionResult, TopicStatus};
+use layline::provider_api::{SubscriptionResult, TopicStatus, group_by_reason};
 use layline::types::Topic;
 
 /// Owns all subscription state; the server serialises calls through one lock.
@@ -119,8 +119,11 @@ impl Coordinator {
 
         let orphaned = self.registry.remove_holder(strategy_name, &change.dropped);
         self.release(orphaned).await;
-        for (topic, reason) in &failures {
-            warn!("{strategy_name} was refused {topic}: {reason}");
+        for (reason, topic_names) in group_by_reason(&failures) {
+            warn!(
+                "{strategy_name} was refused [{}]: {reason}",
+                topic_names.join(", ")
+            );
         }
         requested
             .iter()

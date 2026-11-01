@@ -1818,6 +1818,7 @@ dependencies = [
  "postcard",
  "secrecy",
  "serde",
+ "serde_json",
  "snow",
  "tempfile",
  "thiserror",

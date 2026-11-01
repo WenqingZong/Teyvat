@@ -50,6 +50,19 @@ pub struct SubscriptionResponse {
 /// The ring path to read, or why the topic was refused.
 pub type SubscriptionResult = Result<PathBuf, String>;
 
+/// Refused topics grouped by reason, both sorted, so a cause shared by many topics is reported once.
+// Claude TODO: Here, the return type should by BTreeMap<&str, Vec<Topic>>, in this way, the code provides more sematic meaning to readers. And later, we rely on Topic's conversion to String ability to report it to log. 
+pub fn group_by_reason(refusals: &HashMap<Topic, String>) -> BTreeMap<&str, Vec<String>> {
+    let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (topic, reason) in refusals {
+        groups.entry(reason).or_default().push(topic.to_string());
+    }
+    for names in groups.values_mut() {
+        names.sort();
+    }
+    groups
+}
+
 /// Body of `/subscribed`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SubscribedResponse {
@@ -216,6 +229,40 @@ mod tests {
 
     fn to_json<Message: Serialize>(message: &Message) -> Value {
         serde_json::to_value(message).expect("serialization is expected to not fail")
+    }
+
+    #[test]
+    fn refusals_are_grouped_by_reason_and_sorted() {
+        let spot_bbo = topic(Exchange::Binance, UnderlyingType::Spot, MarketDataType::Bbo);
+        let spot_trade = topic(
+            Exchange::Binance,
+            UnderlyingType::Spot,
+            MarketDataType::Trade,
+        );
+        let okx_bbo = topic(
+            Exchange::Okx,
+            UnderlyingType::Perpetual,
+            MarketDataType::Bbo,
+        );
+        let refusals = HashMap::from([
+            (spot_trade, "venue down".to_owned()),
+            (okx_bbo, "worker stopped".to_owned()),
+            (spot_bbo, "venue down".to_owned()),
+        ]);
+        let groups = group_by_reason(&refusals);
+        assert_eq!(
+            BTreeMap::from([
+                (
+                    "venue down",
+                    vec![
+                        "Binance/BTC-USDT-SPOT/BBO".to_owned(),
+                        "Binance/BTC-USDT-SPOT/TRADE".to_owned()
+                    ]
+                ),
+                ("worker stopped", vec!["OKX/BTC-USDT-PERP/BBO".to_owned()]),
+            ]),
+            groups
+        );
     }
 
     #[test]

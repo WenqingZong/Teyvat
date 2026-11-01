@@ -10,6 +10,9 @@ pub fn init_tracing() -> WorkerGuard {
         )
         .with_writer(writer)
         .with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.6f".to_owned()))
+        // File and line locate the event; the module path in front of them would only repeat it.
+        // Claude TODO: Just out of curiosity, is false the default for target? If so, then we can delete this with_target(false), if not, then just delete this review comment and leave the code unchanged. 
+        .with_target(false)
         .with_file(true)
         .with_line_number(true)
         .init();
