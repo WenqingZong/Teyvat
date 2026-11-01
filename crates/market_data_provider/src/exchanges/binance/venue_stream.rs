@@ -3,9 +3,10 @@
 // TODO: an InstrumentManager (not implemented yet) should own how each venue spells an instrument,
 // learnt through an InstrumentManager; `venue_symbol` and `stream_name` then move there.
 
+use std::str::from_utf8;
+
 use super::endpoint::BinanceEndpoint;
 use layline::types::{Instrument, MarketDataType, Topic, UnderlyingType};
-use std::str::from_utf8;
 
 /// Room for the longest symbol plus channel, so per-frame names need no allocation.
 pub(super) const STREAM_NAME_CAPACITY: usize = 64;

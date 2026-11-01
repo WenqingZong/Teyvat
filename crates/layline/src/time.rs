@@ -1,9 +1,10 @@
 //! Wall-clock readings shared by every service. Hot paths take `get_current_timestamp_nanoseconds`, a plain
 //! integer; nothing on them formats dates.
 
-use chrono::Utc;
 use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use chrono::Utc;
 
 /// UTC, e.g. `2026-10-15 13:30:05.123 UTC`. Only humans read it, through `GET /info`.
 const SERVER_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f UTC";
@@ -25,8 +26,9 @@ pub fn server_time() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::{NaiveDateTime, TimeDelta};
+
+    use super::*;
 
     /// Generous bound between formatting the time and checking it.
     const MAX_SERVER_TIME_DRIFT: TimeDelta = TimeDelta::seconds(5);

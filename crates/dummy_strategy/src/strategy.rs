@@ -1,7 +1,8 @@
-use layline::types::{Bbo, MarketData, Trade};
 use std::num::NonZeroU64;
 
-pub(crate) trait Strategy {
+use layline::types::{Bbo, MarketData, Trade};
+
+pub trait Strategy {
     fn on_bbo(&mut self, bbo: &Bbo, received_at_nanoseconds: NonZeroU64);
 
     fn on_trade(&mut self, trade: &Trade, received_at_nanoseconds: NonZeroU64);
@@ -16,10 +17,11 @@ pub(crate) trait Strategy {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use super::*;
     use layline::time::get_current_timestamp_nanoseconds;
     use layline::types::{Currency, Exchange, Instrument, LatencyMetric, Side, UnderlyingType};
-    use rust_decimal::Decimal;
 
     #[derive(Default)]
     struct Recorder {

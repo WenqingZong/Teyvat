@@ -1,14 +1,16 @@
 //! Venue-neutral state for a connector that owns one websocket per endpoint.
-use super::client::WebSocketClient;
-use super::connection::{Heartbeat, WebSocketConnection};
-use layline::backoff::exponential_backoff;
-use layline::types::Topic;
 use std::array::from_fn;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::Duration;
+
 use tokio::time::Instant;
+
+use super::client::WebSocketClient;
+use super::connection::{Heartbeat, WebSocketConnection};
+use layline::backoff::exponential_backoff;
+use layline::types::Topic;
 
 /// A venue's websocket endpoint enum.
 pub(crate) trait EndpointId: Copy + Eq + Ord + Display {

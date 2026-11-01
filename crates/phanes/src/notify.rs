@@ -7,9 +7,9 @@ use std::mem::take;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::error;
 
 use tokio::sync::mpsc::UnboundedReceiver;
+use tracing::error;
 
 use crate::request_details::RequestDetails;
 use crate::service::{Language, Service};
@@ -167,9 +167,10 @@ pub async fn run_dispatcher(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
     use crate::request_details::tests::{PATH, request_head};
-    use std::net::Ipv4Addr;
 
     /// Arbitrary documentation address (RFC 5737) with no business meaning.
     const BLOCKED_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));

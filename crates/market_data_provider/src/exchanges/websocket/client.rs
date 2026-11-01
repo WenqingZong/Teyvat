@@ -81,13 +81,14 @@ impl WebSocketClient for TungsteniteClient {
 /// Only the tungstenite plumbing needs a real socket; everything above it is tested against a mock venue.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::net::TcpListener;
     use tokio::spawn;
     use tokio::sync::oneshot;
     use tokio_tungstenite::accept_hdr_async;
     use tokio_tungstenite::tungstenite::Utf8Bytes;
     use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+    use super::*;
 
     const HEADER_NAME: &str = "X-MBX-APIKEY";
 

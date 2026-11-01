@@ -1,15 +1,17 @@
 //! Fixtures and checks for the tests of every crate, so each test does not spell out the same
 //! instrument. Production code never calls these.
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{read_dir, read_to_string};
+use std::path::{Path, PathBuf};
+
+use secrecy::SecretBox;
+
 use crate::noise::{StaticKey, generate_keypair};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{
     Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Subscription, Topic, Trade,
     UnderlyingType,
 };
-use secrecy::SecretBox;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{read_dir, read_to_string};
-use std::path::{Path, PathBuf};
 
 pub fn instrument(
     exchange: Exchange,
@@ -197,11 +199,196 @@ fn visit(
     visited.insert(module.to_owned());
 }
 
+/// Standard library crates: the first import group.
+const STANDARD_LIBRARY_CRATES: [&str; 3] = ["alloc", "core", "std"];
+/// Manifest tables whose keys name the crates a package depends on.
+const DEPENDENCY_TABLES: [&str; 3] = [
+    "[dependencies]",
+    "[dev-dependencies]",
+    "[build-dependencies]",
+];
+/// Directories of a package whose sources `assert_grouped_imports` checks.
+const SOURCE_DIRECTORIES: [&str; 4] = ["src", "tests", "benches", "examples"];
+
+/// The three import groups, in the order they must appear.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ImportGroup {
+    StandardLibrary,
+    ThirdParty,
+    /// `crate`, `self`, `super`, workspace crates and child modules: code in this repository.
+    Repository,
+}
+
+/// Panics unless the `use` items of the package at `manifest_directory` come in blank-line
+/// separated groups, in this order: the standard library (`std`, `core`, `alloc`), third-party
+/// crates (dependencies in its `Cargo.toml` that are not workspace members), and code in this
+/// repository (`crate`, `self`, `super`, workspace crates, child modules). Each group appears at
+/// most once per run of `use` items; rustfmt sorts within each group. Checks `src`, `tests`,
+/// `benches` and `examples`.
+pub fn assert_grouped_imports(manifest_directory: &Path) {
+    let manifest = read_to_string(manifest_directory.join("Cargo.toml"))
+        .expect("the package manifest is expected to be readable");
+    let workspace_crates = workspace_crate_names(manifest_directory);
+    let third_party_crates: BTreeSet<String> = dependency_names(&manifest)
+        .into_iter()
+        .filter(|name| !workspace_crates.contains(name))
+        .collect();
+    let mut files = Vec::new();
+    for directory in SOURCE_DIRECTORIES {
+        let path = manifest_directory.join(directory);
+        if path.is_dir() {
+            rust_files(&path, &mut files);
+        }
+    }
+    let mut violations = Vec::new();
+    for path in files {
+        let text = read_to_string(&path).expect("source file is expected to be readable");
+        for line_number in import_group_violations(&text, &third_party_crates) {
+            violations.push(format!("{}:{line_number}", path.display()));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "imports must be grouped as std, third-party, this repository, separated by blank lines:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// Package names of the workspace root and of every crate under its `crates/`.
+fn workspace_crate_names(manifest_directory: &Path) -> BTreeSet<String> {
+    let root = manifest_directory
+        .ancestors()
+        .find(|directory| {
+            read_to_string(directory.join("Cargo.toml"))
+                .is_ok_and(|text| text.lines().any(|line| line.trim() == "[workspace]"))
+        })
+        .expect("the package is expected to be in a workspace");
+    let mut manifests = vec![root.join("Cargo.toml")];
+    for entry in read_dir(root.join("crates")).expect("crates/ is expected to be readable") {
+        let path = entry
+            .expect("directory entry is expected to be readable")
+            .path();
+        manifests.push(path.join("Cargo.toml"));
+    }
+    manifests
+        .iter()
+        .filter_map(|manifest| read_to_string(manifest).ok())
+        .filter_map(|text| package_name(&text))
+        .collect()
+}
+
+/// The `name` of a manifest's `[package]` table, spelled as Rust paths spell it.
+fn package_name(manifest: &str) -> Option<String> {
+    manifest
+        .lines()
+        .skip_while(|line| line.trim() != "[package]")
+        .skip(1)
+        .take_while(|line| !line.trim_start().starts_with('['))
+        .find_map(|line| line.trim().strip_prefix("name = "))
+        .map(|name| name.trim_matches('"').replace('-', "_"))
+}
+
+/// Every crate a manifest's dependency tables name, spelled as Rust paths spell it.
+fn dependency_names(manifest: &str) -> Vec<String> {
+    let mut in_dependency_table = false;
+    let mut names = Vec::new();
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_dependency_table = DEPENDENCY_TABLES.contains(&line);
+            continue;
+        }
+        if !in_dependency_table || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(key) = line.split(['.', '=', ' ']).next() {
+            names.push(key.replace('-', "_"));
+        }
+    }
+    names
+}
+
+/// 1-based line numbers of the `use` items that break the grouping.
+fn import_group_violations(text: &str, third_party_crates: &BTreeSet<String>) -> Vec<usize> {
+    let mut violations = Vec::new();
+    let mut run_groups: Vec<ImportGroup> = Vec::new();
+    let mut blank_since_last_import = false;
+    let mut inside_import = false;
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if inside_import {
+            inside_import = !line.ends_with(';');
+            continue;
+        }
+        if line.is_empty() {
+            blank_since_last_import = true;
+            continue;
+        }
+        if line.starts_with("//") || line.starts_with("#[") {
+            continue;
+        }
+        let Some(path) = import_path(line) else {
+            run_groups.clear();
+            blank_since_last_import = false;
+            continue;
+        };
+        let group = classify_import(path, third_party_crates);
+        if let Some(&last_group) = run_groups.last() {
+            let in_order = if blank_since_last_import {
+                group > last_group
+            } else {
+                group == last_group
+            };
+            if !in_order {
+                violations.push(index + 1);
+            }
+        }
+        if blank_since_last_import || run_groups.is_empty() {
+            run_groups.push(group);
+        }
+        blank_since_last_import = false;
+        inside_import = !line.ends_with(';');
+    }
+    violations
+}
+
+/// The path after `use`, for a `use` item with or without visibility; `None` for any other line.
+fn import_path(line: &str) -> Option<&str> {
+    let item = match line.strip_prefix("pub") {
+        Some(after_pub) => {
+            let after_visibility = match after_pub.strip_prefix('(') {
+                Some(restriction) => &restriction[restriction.find(')')? + 1..],
+                None => after_pub,
+            };
+            after_visibility.strip_prefix(' ')?
+        }
+        None => line,
+    };
+    item.strip_prefix("use ")
+}
+
+fn classify_import(path: &str, third_party_crates: &BTreeSet<String>) -> ImportGroup {
+    let root = path
+        .trim_start_matches("::")
+        .split([':', ';', '{', ' '])
+        .next()
+        .unwrap_or_default();
+    if STANDARD_LIBRARY_CRATES.contains(&root) {
+        ImportGroup::StandardLibrary
+    } else if third_party_crates.contains(root) {
+        ImportGroup::ThirdParty
+    } else {
+        ImportGroup::Repository
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::{create_dir_all, write};
+
     use tempfile::tempdir;
+
+    use super::*;
 
     fn write_crate(files: &[(&str, &str)]) -> tempfile::TempDir {
         let directory = tempdir().expect("temp dir is created");
@@ -246,5 +433,55 @@ mod tests {
             ("b.rs", "pub use crate::a::Other;\npub struct Thing;\n"),
         ]);
         assert_acyclic_modules(directory.path());
+    }
+
+    fn third_party() -> BTreeSet<String> {
+        ["serde", "tokio"].into_iter().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn three_groups_in_order_pass() {
+        let text = "use std::path::Path;\n\nuse serde::Serialize;\nuse tokio::spawn;\n\nuse crate::types::Topic;\nuse layline::bark::{\n    BarkMessage,\n};\n";
+        assert!(import_group_violations(text, &third_party()).is_empty());
+    }
+
+    #[test]
+    fn mixed_group_fails() {
+        let text = "use serde::Serialize;\nuse std::path::Path;\n";
+        assert_eq!(vec![2], import_group_violations(text, &third_party()));
+    }
+
+    #[test]
+    fn groups_out_of_order_fail() {
+        let text = "use crate::types::Topic;\n\nuse std::path::Path;\n";
+        assert_eq!(vec![3], import_group_violations(text, &third_party()));
+    }
+
+    #[test]
+    fn split_group_fails() {
+        let text = "use std::path::Path;\n\nuse std::sync::Arc;\n";
+        assert_eq!(vec![3], import_group_violations(text, &third_party()));
+    }
+
+    #[test]
+    fn other_items_start_a_new_run() {
+        let text = "use crate::types::Topic;\n\nmod tests {\n    use super::*;\n    use std::path::Path;\n}\n";
+        assert_eq!(vec![5], import_group_violations(text, &third_party()));
+    }
+
+    #[test]
+    fn visibility_and_child_modules_count() {
+        let text = "pub use std::path::Path;\n\npub(crate) use bbo::Bbo;\n";
+        assert!(import_group_violations(text, &third_party()).is_empty());
+    }
+
+    #[test]
+    fn manifest_tables_name_dependencies() {
+        let manifest = "[package]\nname = \"market-data\"\n\n[dependencies]\nlayline.workspace = true\ntokio = { workspace = true }\n\n[dev-dependencies]\ntempfile = \"3\"\n\n[lints]\nworkspace = true\n";
+        assert_eq!(Some("market_data".to_owned()), package_name(manifest));
+        assert_eq!(
+            vec!["layline", "tokio", "tempfile"],
+            dependency_names(manifest)
+        );
     }
 }

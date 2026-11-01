@@ -8,7 +8,6 @@
 use std::fs::read_to_string;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -18,14 +17,14 @@ use tokio::spawn;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::time::{MissedTickBehavior, interval, sleep};
+use tracing::{info, warn};
 use url::Url;
 
+use client::{Outbox, build_celestia_url, run_session};
 use layline::logging::init_tracing;
 use layline::noise::{StaticKey, decode_private_key, decode_public_key};
 use layline::time::since_unix_epoch;
 use phanes::celestia::proto::ProcessSample;
-
-use client::{Outbox, build_celestia_url, run_session};
 use sampler::{Sampler, Target};
 
 mod client;

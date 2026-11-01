@@ -1,8 +1,9 @@
 //! Hardcoded facts about the Binance APIs this connector calls: what each is, where, and its docs.
 //! `/connected_apis` serves them so an agent can watch the venue's changelogs; no logic belongs here.
 
-use layline::types::ConnectedApi;
 use strum::{Display, EnumCount, EnumIter, FromRepr};
+
+use layline::types::ConnectedApi;
 
 /// One websocket connection each, opened in declaration order.
 #[derive(
@@ -62,8 +63,9 @@ pub(super) const CONNECTED_APIS: &[ConnectedApi] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use strum::IntoEnumIterator;
+
+    use super::*;
 
     #[test]
     fn index_follows_declaration_order() {

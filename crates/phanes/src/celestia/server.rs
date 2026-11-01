@@ -2,7 +2,6 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{error, info, warn};
 
 use axum::Error as AxumError;
 use axum::Router;
@@ -16,6 +15,7 @@ use secrecy::SecretBox;
 use snow::Error as NoiseError;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
+use tracing::{error, info, warn};
 
 use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Session, respond};
 use crate::client_filter::ClientName;
@@ -213,17 +213,18 @@ async fn receive(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::celestia::proto::Initiator;
-    use crate::celestia::proto::tests::sample;
     use axum::serve;
     use futures::{SinkExt, StreamExt};
-    use layline::testing::test_keypair;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::spawn;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tokio_tungstenite::tungstenite::Message as ClientMessage;
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+
+    use super::*;
+    use crate::celestia::proto::Initiator;
+    use crate::celestia::proto::tests::sample;
+    use layline::testing::test_keypair;
 
     /// Long enough for the server task to push after the socket closes.
     const NOTIFICATION_WAIT: Duration = Duration::from_millis(500);

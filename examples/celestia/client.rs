@@ -1,7 +1,6 @@
 //! Keeps unacknowledged batches in memory and streams them to Phanes.
 use std::collections::VecDeque;
 use std::time::Duration;
-use tracing::{info, warn};
 
 use futures::{SinkExt, StreamExt};
 use secrecy::SecretBox;
@@ -10,6 +9,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::time::{MissedTickBehavior, interval, timeout};
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tracing::{info, warn};
 use url::{ParseError, Url};
 
 use layline::noise::StaticKey;
@@ -212,15 +212,17 @@ async fn handshake(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use axum::serve;
-    use layline::noise::generate_keypair;
-    use phanes::celestia::proto::NetworkRate;
-    use phanes::celestia::server::{CelestiaState, router};
     use std::sync::Arc;
+
+    use axum::serve;
     use tokio::net::TcpListener;
     use tokio::spawn;
     use tokio::sync::mpsc::{channel, unbounded_channel};
+
+    use super::*;
+    use layline::noise::generate_keypair;
+    use phanes::celestia::proto::NetworkRate;
+    use phanes::celestia::server::{CelestiaState, router};
 
     fn keypair() -> (SecretBox<StaticKey>, StaticKey) {
         let keypair = generate_keypair().expect("keypair generation succeeds");

@@ -1,5 +1,6 @@
-use rkyv::{Archive, Deserialize, Serialize};
 use std::num::NonZeroU64;
+
+use rkyv::{Archive, Deserialize, Serialize};
 
 /// Provider-side timestamps; `exchange_time_nanoseconds` stays outside because the venue supplies it.
 #[derive(Archive, Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

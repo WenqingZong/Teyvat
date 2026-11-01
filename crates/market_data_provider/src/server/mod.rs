@@ -2,18 +2,20 @@ mod coordinator;
 mod http;
 mod registry;
 
-use crate::config::ProviderConfig;
-use crate::exchanges::{ConnectorContext, ExchangeRouter};
-use anyhow::{Context, Result};
-use coordinator::Coordinator;
-use layline::types::Topic;
 use std::fs::create_dir_all;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::time::interval;
+
+use crate::config::ProviderConfig;
+use crate::exchanges::{ConnectorContext, ExchangeRouter};
+use coordinator::Coordinator;
+use layline::types::Topic;
 
 const LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 

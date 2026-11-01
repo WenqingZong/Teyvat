@@ -27,9 +27,11 @@
 //!        +--------------------------+------------------+---------------------+---------+----------
 //!        a frame starts at producer position % RING_CAPACITY
 //! ```
-use crate::types::MarketDataType;
-use bcast::{HEADER_SIZE, METADATA_BUFFER_SIZE};
 use std::ops::Range;
+
+use bcast::{HEADER_SIZE, METADATA_BUFFER_SIZE};
+
+use crate::types::MarketDataType;
 
 pub(super) const RING_CAPACITY: usize = 1 << 16;
 

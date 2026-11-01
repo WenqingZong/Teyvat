@@ -1,15 +1,5 @@
 //! Latency of the market data path, bottom up: codec, publish, reader fan-out, cross-thread delivery.
 //! Run with `cargo bench -p market_data_provider`.
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use layline::provider_api::Subscription;
-use layline::shared_memory::{MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter};
-use layline::time::get_current_timestamp_nanoseconds;
-use layline::types::{
-    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side, Topic,
-    Trade, UnderlyingType,
-};
-use rkyv::rancor::Error as RkyvError;
-use rust_decimal::dec;
 use std::hint::{black_box, spin_loop};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -18,7 +8,19 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
+
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use rkyv::rancor::Error as RkyvError;
+use rust_decimal::dec;
 use tempfile::{TempDir, tempdir, tempdir_in};
+
+use layline::provider_api::Subscription;
+use layline::shared_memory::{MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter};
+use layline::time::get_current_timestamp_nanoseconds;
+use layline::types::{
+    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side, Topic,
+    Trade, UnderlyingType,
+};
 
 const SHARED_MEMORY_DIRECTORY: &str = "/dev/shm";
 const FAN_OUT_TOPIC_COUNTS: [usize; 3] = [1, 8, 64];

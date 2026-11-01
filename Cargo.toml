@@ -2,23 +2,89 @@
 members = ["crates/*"]
 resolver = "3"
 
+# Every binary of the system, production services and test tools alike, is defined here, so one
+# command builds them all: `cargo build --release --bins --examples`.
+[package]
+name = "teyvat"
+description = "Every binary of the Teyvat trading system: the production services and their test tools"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+dummy_strategy.workspace = true
+layline.workspace = true
+market_data_provider.workspace = true
+phanes.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+
+[dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+futures.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["process"] }
+tokio-tungstenite.workspace = true
+url.workspace = true
+
+[[bin]]
+name = "dummy_strategy"
+path = "src/bin/dummy_strategy.rs"
+
+[[bin]]
+name = "market_data_provider"
+path = "src/bin/market_data_provider.rs"
+
+[[bin]]
+name = "phanes"
+path = "src/bin/phanes.rs"
+
+# Fetches one API key from Gnosis, as Osaka does.
+[[example]]
+name = "fetch"
+path = "examples/fetch.rs"
+
+# Sends one Bark push with the credentials of a phanes.toml.
+[[example]]
+name = "bark_push"
+path = "examples/bark_push.rs"
+
+# Osaka-side process monitor simulator; its client and sampler modules carry their own tests.
+[[example]]
+name = "celestia"
+path = "examples/celestia/main.rs"
+test = true
+
+[lints]
+workspace = true
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["Wenqing Zong"]
 
 [workspace.dependencies]
+dummy_strategy = { path = "crates/dummy_strategy" }
 layline = { path = "crates/layline" }
+market_data_provider = { path = "crates/market_data_provider" }
+phanes = { path = "crates/phanes" }
 
 aes = "0.9.3"
 anyhow = "1.0.104"
 axum = "0.8.9"
 base64 = "0.23.1"
+bcast = { version = "0.0.31", features = ["mmap"] }
 cbc = { version = "0.2.1", features = ["alloc", "block-padding"] }
 chrono = "0.4.42"
 clap = { version = "4.6.7", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
-bcast = { version = "0.0.31", features = ["mmap"] }
 futures = "0.3.32"
 hex = "0.4.3"
 memmap2 = "0.9.9"
@@ -45,7 +111,7 @@ ureq = { version = "3.4.2", default-features = false, features = ["json"] }
 url = { version = "2.5.8", features = ["serde"] }
 
 [workspace.lints.clippy]
-unwrap_used = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
 dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+unwrap_used = "deny"

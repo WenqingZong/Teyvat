@@ -1,7 +1,9 @@
-use crate::types::{Currency, Exchange, UnderlyingType};
+use std::fmt::{Display, Formatter, Result as FormatResult};
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter, Result as FormatResult};
+
+use crate::types::{Currency, Exchange, UnderlyingType};
 
 #[derive(
     Archive,

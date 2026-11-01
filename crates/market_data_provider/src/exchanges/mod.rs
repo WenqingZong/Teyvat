@@ -6,17 +6,18 @@ mod synthetic;
 mod websocket;
 mod worker;
 
-use binance::BinanceConnector;
-use okx::OkxConnector;
-pub(crate) use router::ExchangeRouter;
+use std::collections::HashSet;
+
+use anyhow::Result;
+use strum::IntoEnumIterator;
 
 use crate::phanes_client::PhanesClient;
-use anyhow::Result;
+use binance::BinanceConnector;
 use layline::bark::Notifier;
 use layline::types::{ConnectedApi, ConnectedApis};
 use layline::types::{Exchange, MarketData, Topic};
-use std::collections::HashSet;
-use strum::IntoEnumIterator;
+use okx::OkxConnector;
+pub(crate) use router::ExchangeRouter;
 
 /// What every connector may need besides its venue; each worker gets its own clone.
 #[derive(Clone)]

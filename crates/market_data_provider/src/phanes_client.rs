@@ -1,21 +1,23 @@
 //! Client of Phanes Gnosis, which releases API keys over an end-to-end encrypted HTTP round trip.
 
-use crate::alert::SendAlert;
-use crate::exit_reason::ExitReason;
-use crate::utils::{Clock, RealClock};
-use anyhow::{Context, Result, bail};
-use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};
-use layline::noise::{StaticKey, decode_private_key, decode_public_key};
-use layline::secrets::read_secret_file;
-use reqwest::{Client, StatusCode};
-use secrecy::{SecretBox, SecretString};
-use serde::Deserialize;
 use std::panic::panic_any;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use reqwest::{Client, StatusCode};
+use secrecy::{SecretBox, SecretString};
+use serde::Deserialize;
 use tracing::{error, info};
 use url::Url;
+
+use crate::alert::SendAlert;
+use crate::exit_reason::ExitReason;
+use crate::utils::{Clock, RealClock};
+use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};
+use layline::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::secrets::read_secret_file;
 
 const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -132,14 +134,6 @@ impl<Http: GnosisHttp, TimeSource: Clock> ApiKeySource for PhanesClient<Http, Ti
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use crate::alert::tests::RecordingAlert;
-    use crate::utils::tests::MockClock;
-    use futures::FutureExt;
-    use layline::gnosis::Responder;
-    use layline::noise::encode_key;
-    use layline::testing::test_keypair;
-    use secrecy::ExposeSecret;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fs::{Permissions, set_permissions, write};
@@ -147,7 +141,17 @@ pub(crate) mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::panic::AssertUnwindSafe;
     use std::path::Path;
+
+    use futures::FutureExt;
+    use secrecy::ExposeSecret;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::alert::tests::RecordingAlert;
+    use crate::utils::tests::MockClock;
+    use layline::gnosis::Responder;
+    use layline::noise::encode_key;
+    use layline::testing::test_keypair;
 
     const PHANES_URL: &str = "https://phanes.example";
     const OWNER_ONLY_MODE: u32 = 0o600;

@@ -1,12 +1,14 @@
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use futures::future::join_all;
+
 use super::websocket::TungsteniteClient;
 use super::worker::{WorkerHandle, WorkerReply, failed_reply, spawn_worker};
 use super::{BinanceConnector, ConnectorContext, OkxConnector};
 use crate::utils::RealClock;
-use anyhow::Result;
-use futures::future::join_all;
 use layline::types::{Exchange, Topic};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 /// Routes each topic to the worker of its exchange. A worker starts with its first topic and stops with its last.
 pub(crate) struct ExchangeRouter {
@@ -150,11 +152,12 @@ fn group_by_exchange(topics: &HashSet<Topic>) -> HashMap<Exchange, HashSet<Topic
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::exchanges::tests::test_connector_context;
     use crate::exchanges::worker::tests::wait_until_stopped;
     use layline::types::{Currency, MarketDataType, UnderlyingType};
-    use tempfile::tempdir;
 
     fn topic(exchange: Exchange, market_data_type: MarketDataType) -> Topic {
         layline::testing::topic(

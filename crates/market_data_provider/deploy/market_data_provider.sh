@@ -19,7 +19,7 @@ readonly CONFIG_FILE=$CONFIG_DIRECTORY/market_data_provider.toml
 readonly UNIT_FILE=/etc/systemd/system/$SERVICE.service
 # DEFAULT_ROOT_DIRECTORY: one ring file per topic, read by the strategies.
 readonly RING_DIRECTORY=/dev/shm/market_data_provider
-# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root holds target/.
+# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root defines the binary and holds target/.
 CRATE_DIRECTORY=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly CRATE_DIRECTORY
 WORKSPACE_ROOT=$(cd "$CRATE_DIRECTORY/../.." && pwd)
@@ -41,7 +41,7 @@ install_provider() {
     command -v openssl >/dev/null || die "openssl not found; it generates the Gnosis client key"
 
     log "building release binary"
-    cargo build --release -p market_data_provider --bin market_data_provider
+    cargo build --release -p teyvat --bin market_data_provider
     # Install beside, then rename: overwriting the running binary in place fails with "Text file busy".
     sudo install -m 755 "$WORKSPACE_ROOT/target/release/market_data_provider" "$BINARY.new"
     sudo mv "$BINARY.new" "$BINARY"

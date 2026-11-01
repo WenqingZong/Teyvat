@@ -1,10 +1,11 @@
 //! Secret files on disk: config files holding credentials and private keys, all chmod 600.
 
-use secrecy::SecretString;
 use std::fs::{metadata, read_to_string};
 use std::io::Error as IoError;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+use secrecy::SecretString;
 
 /// Any of these bits set means group or others can access the file; secrets must be chmod 600.
 const GROUP_AND_OTHERS_PERMISSION_BITS: u32 = 0o077;
@@ -34,10 +35,12 @@ pub fn read_secret_file(path: &Path) -> Result<SecretString, SecretFileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use secrecy::ExposeSecret;
     use std::fs::{Permissions, set_permissions, write};
+
+    use secrecy::ExposeSecret;
     use tempfile::tempdir;
+
+    use super::*;
 
     const OWNER_ONLY_MODE: u32 = 0o600;
     const GROUP_READABLE_MODE: u32 = 0o640;

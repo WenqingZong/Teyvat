@@ -29,8 +29,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets
 
-      - name: module dependency cycle check
-        run: cargo test --workspace --test module_dependencies
+      - name: module cycle and import grouping checks
+        run: cargo test --workspace --test module_dependencies --test import_groups
 
       - name: cargo test
         run: cargo test --workspace

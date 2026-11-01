@@ -2,7 +2,6 @@
 
 use std::io::Result as IoResult;
 use std::sync::Arc;
-use tracing::warn;
 
 use axum::extract::Request;
 use axum::http::StatusCode;
@@ -11,6 +10,7 @@ use axum::routing::get;
 use axum::{Json, Router, serve};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tracing::warn;
 
 use crate::celestia::server::{self as celestia_server, CelestiaState};
 use crate::client_filter::{ClientFilter, filter_clients};
@@ -91,21 +91,23 @@ async fn info() -> Json<Info> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
+
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+    use tower::ServiceExt;
+
     use super::*;
     use crate::celestia::proto::CELESTIA_PATH;
     use crate::client_filter::{CLIENT_IP_HEADER, ClientsByIp};
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
     use crate::notify::Notification;
     use crate::service::Service;
-    use axum::body::Body;
-    use axum::http::Request as HttpRequest;
     use layline::gnosis::GNOSIS_PATH;
     use layline::testing::test_keypair;
-    use std::collections::HashSet;
-    use std::net::{IpAddr, Ipv4Addr};
-    use std::path::PathBuf;
-    use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-    use tower::ServiceExt;
 
     /// Arbitrary documentation addresses (RFC 5737) with no business meaning.
     const OSAKA_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));

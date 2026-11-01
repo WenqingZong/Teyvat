@@ -1,14 +1,16 @@
-use clap::Parser;
-use layline::logging::init_tracing;
-use market_data_provider::config::ProviderConfig;
-use market_data_provider::exit_reason::ExitReason;
-use market_data_provider::server::run;
 use std::panic::{panic_any, set_hook};
 use std::path::PathBuf;
 use std::process::{ExitCode, exit};
 use std::sync::Mutex;
+
+use clap::Parser;
 use tracing::error;
 use tracing_appender::non_blocking::WorkerGuard;
+
+use layline::logging::init_tracing;
+use market_data_provider::config::ProviderConfig;
+use market_data_provider::exit_reason::ExitReason;
+use market_data_provider::server::run;
 
 /// Dropping the guard flushes buffered log lines, on a normal exit and in the panic hook alike.
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);

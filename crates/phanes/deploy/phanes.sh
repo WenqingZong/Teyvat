@@ -19,7 +19,7 @@ readonly CELESTIA_PRIVATE_KEY=$CONFIG_DIRECTORY/celestia.key
 readonly CELESTIA_PUBLIC_KEY=$CONFIG_DIRECTORY/celestia.pub
 readonly CONFIG_FILE=$CONFIG_DIRECTORY/phanes.toml
 readonly UNIT_FILE=/etc/systemd/system/phanes.service
-# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root holds target/.
+# The crate holds deploy/ (and, for Phanes, api_keys/); the workspace root defines the binary and holds target/.
 CRATE_DIRECTORY=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 readonly CRATE_DIRECTORY
 WORKSPACE_ROOT=$(cd "$CRATE_DIRECTORY/../.." && pwd)
@@ -41,7 +41,7 @@ install_phanes() {
     compgen -G "api_keys/*.txt" >/dev/null || die "no api_keys/*.txt in crates/phanes; nothing to serve"
 
     log "building release binary"
-    cargo build --release -p phanes --bin phanes
+    cargo build --release -p teyvat --bin phanes
     sudo install -m 755 "$WORKSPACE_ROOT/target/release/phanes" "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"

@@ -865,7 +865,6 @@ name = "dummy_strategy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "clap",
  "layline",
  "rust_decimal",
  "serde_json",
@@ -1645,7 +1644,6 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "chrono",
- "clap",
  "criterion",
  "futures",
  "hex",
@@ -1662,7 +1660,6 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "toml",
  "tracing",
- "tracing-appender",
  "ureq",
  "url",
 ]
@@ -1814,14 +1811,11 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "phanes"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "axum",
- "clap",
  "futures",
  "hex",
  "layline",
  "postcard",
- "reqwest",
  "secrecy",
  "serde",
  "snow",
@@ -1832,7 +1826,6 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
- "url",
 ]
 
 [[package]]
@@ -2810,6 +2803,28 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "teyvat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dummy_strategy",
+ "futures",
+ "layline",
+ "market_data_provider",
+ "phanes",
+ "reqwest",
+ "secrecy",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "tracing-appender",
+ "url",
 ]
 
 [[package]]

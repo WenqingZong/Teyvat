@@ -11,14 +11,16 @@ pub(super) use endpoint_set::{EndpointId, EndpointSet, EndpointState};
 /// A mock venue: each connection a client opens is a pair of channels the test drives by hand.
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
-    use anyhow::{Result, anyhow, bail};
-    use secrecy::ExposeSecret;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex, MutexGuard};
+
+    use anyhow::{Result, anyhow, bail};
+    use secrecy::ExposeSecret;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
     use tokio_tungstenite::tungstenite::Message;
+
+    use super::*;
 
     /// The venue's automatic answer to a frame the client sends, if any.
     pub(crate) type Responder = Arc<dyn Fn(&Message) -> Option<Message> + Send + Sync>;

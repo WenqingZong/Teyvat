@@ -1,13 +1,15 @@
-use crate::strategy::Strategy;
-use layline::time::get_current_timestamp_nanoseconds;
-use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
 use std::collections::HashMap;
 use std::mem::take;
 use std::num::NonZeroU64;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
+
 use tracing::{info, warn};
+
+use crate::strategy::Strategy;
+use layline::time::get_current_timestamp_nanoseconds;
+use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
 
 const PERCENTILES: [f64; 4] = [0.5, 0.9, 0.99, 0.999];
 const NANOSECONDS_PER_MICROSECOND: f64 = 1_000.0;
@@ -27,7 +29,7 @@ struct Report {
 
 /// Records latencies per message and hands each window to a reporter thread, which sorts and logs
 /// percentiles; the reading thread only appends, so measuring does not delay the messages measured.
-pub(crate) struct LatencyBench {
+pub struct LatencyBench {
     report_interval: Duration,
     window_start_nanoseconds: NonZeroU64,
     samples: HashMap<Topic, LatencySamples>,
@@ -35,7 +37,7 @@ pub(crate) struct LatencyBench {
 }
 
 impl LatencyBench {
-    pub(crate) fn new(report_interval: Duration) -> Self {
+    pub fn new(report_interval: Duration) -> Self {
         let (reports, receiver) = channel();
         thread::Builder::new()
             .name("latency-report".to_owned())
@@ -187,9 +189,10 @@ impl Strategy for LatencyBench {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use super::*;
     use layline::types::{Currency, Exchange, Instrument, MarketData, Side, UnderlyingType};
-    use rust_decimal::Decimal;
 
     fn instrument() -> Instrument {
         Instrument {

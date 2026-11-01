@@ -1,6 +1,6 @@
 [package]
 name = "dummy_strategy"
-description = "Development stand-in strategy that benchmarks market data latency"
+description = "Development stand-in strategy that benchmarks market data latency; its binary is defined at the workspace root"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,7 +8,6 @@ authors.workspace = true
 [dependencies]
 layline.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 

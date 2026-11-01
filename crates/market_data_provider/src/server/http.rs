@@ -1,11 +1,18 @@
-use super::coordinator::Coordinator;
-use super::format_topics;
-use crate::exchanges::connected_apis;
+use std::sync::Arc;
+use std::time::Instant;
+
 use anyhow::{Context, Result};
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Router, serve as serve_http};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
+use tracing::info;
+
+use super::coordinator::Coordinator;
+use super::format_topics;
+use crate::exchanges::connected_apis;
 use layline::build::build_profile;
 use layline::provider_api::{
     CONNECTED_APIS_PATH, ConnectedApis, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH,
@@ -13,11 +20,6 @@ use layline::provider_api::{
     UNSUBSCRIBE_PATH,
 };
 use layline::time::server_time;
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
-use tracing::info;
 
 type Rejection = (StatusCode, String);
 

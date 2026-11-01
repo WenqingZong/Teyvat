@@ -3,9 +3,9 @@
 
 use std::env::args;
 use std::path::PathBuf;
-use tracing::info;
 
 use anyhow::{Context, Result};
+use tracing::info;
 
 use layline::bark::{BarkMessage, BarkNotifier};
 use layline::logging::init_tracing;

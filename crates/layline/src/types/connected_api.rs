@@ -1,6 +1,8 @@
-use crate::types::Exchange;
-use serde::Serialize;
 use std::collections::BTreeMap;
+
+use serde::Serialize;
+
+use crate::types::Exchange;
 
 /// The venue APIs each exchange's connector calls, so their changelogs can be watched.
 pub type ConnectedApis = BTreeMap<Exchange, &'static [ConnectedApi]>;

@@ -6,12 +6,12 @@
 
 use std::fs::read_to_string;
 use std::path::PathBuf;
-use tracing::{error, info, warn};
 
 use anyhow::{Result, bail};
 use clap::Parser;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
+use tracing::{error, info, warn};
 use url::Url;
 
 use layline::gnosis::{GNOSIS_PATH, Initiator, Request, Response};

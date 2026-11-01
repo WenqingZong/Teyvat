@@ -3,6 +3,20 @@ mod message;
 mod sbe;
 mod venue_stream;
 
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::future::pending;
+use std::num::NonZeroU64;
+use std::time::Duration;
+
+use anyhow::{Error, Result, anyhow};
+use futures::future::OptionFuture;
+use secrecy::SecretString;
+use strum::EnumCount;
+use tokio::select;
+use tokio::time::{Instant, sleep_until, timeout};
+use tokio_tungstenite::tungstenite::Message;
+use tracing::{debug, error, info, warn};
+
 use super::ExchangeConnector;
 use super::websocket::{
     EndpointId, EndpointSet, EndpointState, Header, Heartbeat, Keepalive, TungsteniteClient,
@@ -11,9 +25,7 @@ use super::websocket::{
 use crate::alert::SendAlert;
 use crate::phanes_client::{ApiKeySource, PhanesClient, fetch_api_key_or_panic};
 use crate::utils::{Clock, RealClock};
-use anyhow::{Error, Result, anyhow};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
-use futures::future::OptionFuture;
 use layline::bark::Notifier;
 use layline::types::ConnectedApi;
 use layline::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
@@ -22,16 +34,6 @@ use message::{
     to_sequence,
 };
 use sbe::SbeFrame;
-use secrecy::SecretString;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::future::pending;
-use std::num::NonZeroU64;
-use std::time::Duration;
-use strum::EnumCount;
-use tokio::select;
-use tokio::time::{Instant, sleep_until, timeout};
-use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
 use venue_stream::{
     SBE_BEST_BID_ASK_CHANNEL, STREAM_NAME_CAPACITY, TRADE_CHANNEL, endpoint_for_topic,
     sbe_stream_name, stream_name,
@@ -619,6 +621,18 @@ fn describe_streams(
 
 #[cfg(test)]
 mod tests {
+    use std::panic::AssertUnwindSafe;
+    use std::sync::Arc;
+
+    use futures::FutureExt;
+    use rust_decimal::dec;
+    use serde_json::{Value, json};
+    use strum::IntoEnumIterator;
+    use tokio::time::timeout;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+    use tokio_tungstenite::tungstenite::{Bytes, Utf8Bytes};
+
     use super::*;
     use crate::alert::tests::RecordingAlert;
     use crate::exchanges::tests::test_connector_context;
@@ -628,18 +642,8 @@ mod tests {
     use crate::exit_reason::ExitReason;
     use crate::phanes_client::tests::MockApiKeySource;
     use crate::utils::tests::MockClock;
-    use futures::FutureExt;
     use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
-    use rust_decimal::dec;
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
-    use serde_json::{Value, json};
-    use std::panic::AssertUnwindSafe;
-    use std::sync::Arc;
-    use strum::IntoEnumIterator;
-    use tokio::time::timeout;
-    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-    use tokio_tungstenite::tungstenite::{Bytes, Utf8Bytes};
 
     const SBE_API_KEY: &str = "dummy-sbe-api-key";
     /// 2026-10-24 00:00:00 UTC.

@@ -1,5 +1,6 @@
-use layline::bark::{BarkMessage, Notifier};
 use tracing::error;
+
+use layline::bark::{BarkMessage, Notifier};
 
 const ALERT_GROUP: &str = "market_data_provider";
 const ALERT_SOUND: &str = "alarm";
@@ -25,8 +26,9 @@ impl SendAlert for Notifier {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use std::sync::{Arc, Mutex};
+
+    use super::*;
 
     /// Clones share the record, so a test keeps one and hands the other to the code under test.
     #[derive(Clone, Default)]

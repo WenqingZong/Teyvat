@@ -3,15 +3,17 @@
 //! ~400 ns a frame); anything it does not recognise is logged as an error, so the parser can learn it,
 //! and falls back to serde_json, so odd input is never misread.
 
-use crate::time::milliseconds_to_nanoseconds;
-use anyhow::{Context, Result, anyhow};
-use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::num::NonZeroU64;
+
+use anyhow::{Context, Result, anyhow};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use tracing::error;
+
+use crate::time::milliseconds_to_nanoseconds;
+use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
 
 /// Futures `@trade` also reports insurance fund and ADL fills, which are not market prints.
 const MARKET_ORDER_TYPE: &str = "MARKET";
@@ -293,9 +295,10 @@ pub(super) fn taker_side(buyer_is_maker: bool) -> Side {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::dec;
+
     use super::*;
     use layline::types::{Currency, Exchange, Instrument, UnderlyingType};
-    use rust_decimal::dec;
 
     const RECEIVED_TIME_NANOSECONDS: NonZeroU64 =
         NonZeroU64::new(1_792_881_786_600_000_000).expect("not zero");

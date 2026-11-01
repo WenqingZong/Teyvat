@@ -1,4 +1,20 @@
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs::{Permissions, set_permissions, write};
+use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+
 use chrono::{NaiveDateTime, TimeDelta, Utc};
+use serde_json::{Value, json};
+use tempfile::tempdir;
+use tokio::net::TcpListener;
+use tokio::task::spawn_blocking;
+use ureq::http::Response;
+use ureq::{Body, Error};
+
 use layline::provider_api::{
     CONNECTED_APIS_PATH, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH, SUBSCRIBE_PATH,
     SUBSCRIBED_PATH, SubscribedResponse, Subscription, SubscriptionRequest, SubscriptionResponse,
@@ -10,20 +26,6 @@ use layline::types::{
 };
 use market_data_provider::config::ProviderConfig;
 use market_data_provider::server::{run, serve};
-use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs::{Permissions, set_permissions, write};
-use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
-use std::path::PathBuf;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
-use tempfile::tempdir;
-use tokio::net::TcpListener;
-use tokio::task::spawn_blocking;
-use ureq::http::Response;
-use ureq::{Body, Error};
 
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const LONG_LEASE: Duration = Duration::from_secs(300);

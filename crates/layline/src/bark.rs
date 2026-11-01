@@ -4,6 +4,8 @@
 //! so the Bark relay server only sees ciphertext. The key and IV are used as raw
 //! ASCII bytes, matching the Bark app's "AES-256-CBC" encryption setting.
 
+use std::sync::Arc;
+
 use aes::Aes256;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -13,7 +15,6 @@ use reqwest::{Client, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Deserializer, Serialize};
-use std::sync::Arc;
 use tracing::info;
 use url::Url;
 

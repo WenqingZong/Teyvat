@@ -2,11 +2,13 @@
 //! Block lengths come from the frame, so fields a newer schema appends are skipped. Decoding borrows
 //! the frame and allocates nothing, since it runs for every event.
 
-use crate::time::microseconds_to_nanoseconds;
-use anyhow::{Context, Result, bail};
-use rust_decimal::Decimal;
 use std::num::NonZeroU64;
 use std::str::from_utf8;
+
+use anyhow::{Context, Result, bail};
+use rust_decimal::Decimal;
+
+use crate::time::microseconds_to_nanoseconds;
 
 const SCHEMA_ID: u16 = 1;
 const TRADES_TEMPLATE_ID: u16 = 10000;
@@ -226,8 +228,9 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::*;
     use rust_decimal::dec;
+
+    use super::*;
 
     pub(in crate::exchanges::binance) struct EncodedTrade {
         pub(in crate::exchanges::binance) id: i64,

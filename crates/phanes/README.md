@@ -134,7 +134,7 @@ done
 
 ### 3. 客户端代码
 
-Gnosis 协议的两端都在 `layline::gnosis`，Osaka 上的 crate（如 `market_data_provider`）依赖 workspace 里的 `layline`，参考 [`examples/fetch.rs`](examples/fetch.rs)：
+Gnosis 协议的两端都在 `layline::gnosis`，Osaka 上的 crate（如 `market_data_provider`）依赖 workspace 里的 `layline`，参考 Teyvat 根目录的 [`examples/fetch.rs`](../../examples/fetch.rs)：
 
 ```toml
 layline.workspace = true
@@ -157,7 +157,7 @@ curl https://phanes.wenqing.dev/info        # → {"status":"ok",...}
 在 RedmiBook 的 Teyvat 仓库根目录编译测试客户端并拷到 Osaka：
 
 ```bash
-cargo build --release -p phanes --example fetch
+cargo build --release --example fetch
 scp target/release/examples/fetch osaka:~/
 ```
 
@@ -171,7 +171,7 @@ scp target/release/examples/fetch osaka:~/
 
 | 现象 | 原因 |
 |---|---|
-| `GLIBC_2.xx not found` | Kali 的 glibc 比 Osaka 新。改用 `sudo apt install musl-tools && rustup target add x86_64-unknown-linux-musl && cargo build --release -p phanes --example fetch --target x86_64-unknown-linux-musl` |
+| `GLIBC_2.xx not found` | Kali 的 glibc 比 Osaka 新。改用 `sudo apt install musl-tools && rustup target add x86_64-unknown-linux-musl && cargo build --release --example fetch --target x86_64-unknown-linux-musl` |
 | 403 + HTML 页面 | Cloudflare Bot Fight Mode / WAF 拦了数据中心 IP，给该 hostname 加 WAF Skip 规则 |
 | 空 404，手机收到"白名单外的降临者被拦截" | 来源 IP 不在该服务的 `allowed_clients` 里。`journalctl` 里的 `blocked ... from cf-connecting-ip` 记录了 Cloudflare 看到的实际 IP，核对 `[clients.<name>]` 的 `ipv4` / `ipv6` |
 | 空 404，手机收到"检测到未授权降临者" | Noise 握手失败：检查两边公钥是否配对、是否填反 |
@@ -179,11 +179,11 @@ scp target/release/examples/fetch osaka:~/
 
 ### 进程监控（简化版）
 
-`examples/celestia/` 模拟 Osaka 端（`client.rs` 发送与补发、`sampler.rs` 采样）：每秒采样一个进程，发给 Phanes。
+Teyvat 根目录的 `examples/celestia/` 模拟 Osaka 端（`client.rs` 发送与补发、`sampler.rs` 采样）：每秒采样一个进程，发给 Phanes。
 没收到 ack 的数据在内存里最多缓存 1 小时，断线后指数退避重连（1s → 60s）并补发。Osaka 正式版只需 `phanes::celestia::proto` 和 `layline::noise`（正式客户端出现时，`celestia::proto` 将移入 `layline`）。
 
 ```bash
-cargo build --release -p phanes --example celestia
+cargo build --release --example celestia
 scp target/release/examples/celestia osaka:~/
 ```
 
@@ -211,8 +211,8 @@ RedmiBook 的日志里每秒一行 `Osaka #<sequence>: time .. ms, cpu ..%, memo
 cargo fmt --all --check && cargo clippy --workspace --all-targets && cargo test --workspace
 ```
 
-debug 构建（`cargo run -p phanes -- serve --config <phanes.toml>`）不需要 `[bark]`，所有推送改为打 `info` 日志，也不挂 IP 白名单
+debug 构建（`cargo run --bin phanes -- serve --config <phanes.toml>`）不需要 `[bark]`，所有推送改为打 `info` 日志，也不挂 IP 白名单
 （`examples/` 直连、没有 `CF-Connecting-IP`），日志里的客户端名字显示为 `unfiltered`，方便本机开发；
 release 构建（部署用）缺少 `[bark]` 会报错并拒绝启动。`phanes.toml` 含凭据，必须 `chmod 600`，否则拒绝启动。
 
-测试 Bark 推送：`cargo run -p phanes --example bark_push -- <phanes.toml> "message"`。
+测试 Bark 推送：`cargo run --example bark_push -- <phanes.toml> "message"`。

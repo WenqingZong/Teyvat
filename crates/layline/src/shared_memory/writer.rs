@@ -1,12 +1,14 @@
-use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_metadata, write_metadata};
-use crate::time::get_current_timestamp_nanoseconds;
-use crate::types::{MarketData, MarketDataType};
+use std::fs::{OpenOptions, create_dir_all};
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use bcast::{RingBuffer, Writer};
 use memmap2::{MmapMut, MmapOptions};
 use rkyv::rancor::Error as RkyvError;
-use std::fs::{OpenOptions, create_dir_all};
-use std::path::Path;
+
+use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_metadata, write_metadata};
+use crate::time::get_current_timestamp_nanoseconds;
+use crate::types::{MarketData, MarketDataType};
 
 /// The single writer of one topic's ring.
 pub struct MarketDataWriter {
@@ -80,6 +82,12 @@ impl MarketDataWriter {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+    use std::path::PathBuf;
+    use std::slice;
+
+    use tempfile::{TempDir, tempdir};
+
     use super::*;
     use crate::shared_memory::MarketDataReader;
     use crate::shared_memory::ring_format::RING_CAPACITY;
@@ -87,10 +95,6 @@ mod tests {
     use crate::types::{
         Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Topic, UnderlyingType,
     };
-    use std::num::NonZeroU64;
-    use std::path::PathBuf;
-    use std::slice;
-    use tempfile::{TempDir, tempdir};
 
     #[derive(Default)]
     struct Collector {

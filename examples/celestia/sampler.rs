@@ -217,9 +217,11 @@ pub fn parse_systemctl_show(output: &str) -> Option<UnitStatus> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::process::id as current_process_id;
+
     use tokio::time::sleep;
+
+    use super::*;
 
     const STAT: &str = "1234 (my (weird) app) S 1 1234 1234 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 4 0 100 1000000 500 18446744073709551615";
 

@@ -1,5 +1,6 @@
-use layline::time::get_current_timestamp_nanoseconds;
 use std::num::NonZeroU64;
+
+use layline::time::get_current_timestamp_nanoseconds;
 
 /// Wall-clock source, so tests can pin timestamps. Timers use tokio time, which tests pause instead.
 pub(crate) trait Clock {
@@ -17,10 +18,11 @@ impl Clock for RealClock {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    use super::*;
 
     /// Clones share one time, so a test can move the clock it handed to the code under test.
     #[derive(Clone, Debug)]

@@ -1,11 +1,13 @@
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use tracing::{info, warn};
+
 use super::format_topics;
 use super::registry::SubscriptionRegistry;
 use crate::exchanges::ExchangeRouter;
 use layline::provider_api::{SubscriptionResult, TopicStatus};
 use layline::types::Topic;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-use tracing::{info, warn};
 
 /// Owns all subscription state; the server serialises calls through one lock.
 pub(crate) struct Coordinator {

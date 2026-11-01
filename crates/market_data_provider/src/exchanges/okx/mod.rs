@@ -1,10 +1,12 @@
+use std::collections::HashSet;
+
+use anyhow::Result;
+use tracing::{info, trace};
+
 use super::ExchangeConnector;
 use super::synthetic::SyntheticFeed;
 use crate::utils::RealClock;
-use anyhow::Result;
 use layline::types::{ConnectedApi, Exchange, MarketData, Topic};
-use std::collections::HashSet;
-use tracing::{info, trace};
 
 /// Dummy: logs each call and serves synthetic data until the real websocket client lands.
 pub(crate) struct OkxConnector {

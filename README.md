@@ -2,24 +2,39 @@
 
 个人量化交易系统的唯一代码库。命名取自原神。
 
-| Crate | 说明 | 部署位置 |
-|---|---|---|
-| [`phanes`](crates/phanes/README.md) | 天理法涅斯，系统总控：Gnosis 发放 API Key，Celestia 接收进程监控数据 | RedmiBook |
-| [`market_data_provider`](crates/market_data_provider/README.md) | 连接交易所，经共享内存向策略发布行情 | Osaka |
-| `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | Osaka |
-| `layline` | 地脉，蕴含一切信息：各 crate 共用的代码（行情类型、共享内存、Phanes 协议、Bark 推送、日志等） | 库，不单独部署 |
+所有二进制（生产服务和测试工具）都在顶层的 `teyvat` package 里定义，一条命令全部构建：
 
-只有被两个及以上 crate 用到的代码才放进 `layline`。
+```bash
+cargo build --release --bins --examples
+```
+
+| 二进制 | 说明 | 部署位置 |
+|---|---|---|
+| `phanes` | 天理法涅斯，系统总控：Gnosis 发放 API Key，Celestia 接收进程监控数据 | RedmiBook |
+| `market_data_provider` | 连接交易所，经共享内存向策略发布行情 | Osaka |
+| `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | Osaka |
+| example `fetch` / `bark_push` / `celestia` | 测试工具：模拟 Osaka 取 key、发一条 Bark 推送、模拟进程监控 | 按需拷贝 |
+
+其余代码都是 `crates/` 下的库：
+
+| Crate | 说明 |
+|---|---|
+| [`phanes`](crates/phanes/README.md) | 总控的实现 |
+| [`market_data_provider`](crates/market_data_provider/README.md) | 行情服务的实现 |
+| `dummy_strategy` | 占位策略的实现 |
+| `layline` | 地脉，蕴含一切信息：各 crate 共用的代码（行情类型、共享内存、Phanes 协议、Bark 推送、日志、测试 fixture 等）。只有被两个及以上 crate 用到的代码才放进来 |
 
 ## 目录结构
 
 ```
 Teyvat/
-├── Cargo.toml        # workspace：统一依赖版本和 clippy lint
+├── Cargo.toml        # workspace（统一依赖版本和 clippy lint）+ teyvat package（定义所有二进制）
 ├── Cargo.lock
+├── src/bin/          # 生产二进制
+├── examples/         # 测试工具
 └── crates/
     ├── layline/
-    ├── phanes/                 # 含 deploy/、examples/、plan/
+    ├── phanes/                 # 含 deploy/、plan/
     ├── market_data_provider/   # 含 deploy/、benches/
     └── dummy_strategy/
 ```
@@ -31,7 +46,7 @@ Teyvat/
 在仓库根目录：
 
 ```bash
-cargo build
+cargo build --bins --examples
 cargo fmt --all --check
 cargo clippy --workspace --all-targets
 cargo test --workspace

@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -23,6 +22,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::spawn;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
+use tracing::{error, info, warn};
 
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;

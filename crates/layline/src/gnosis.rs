@@ -8,13 +8,14 @@
 //! A request that fails the handshake gets an empty 404; an authenticated client gets an
 //! encrypted `Response` either way.
 
+use std::num::NonZeroU64;
+
 use hex::encode as encode_hex;
 use rand::fill;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Error as JsonError, from_slice, to_vec};
 use snow::{Error as NoiseError, HandshakeState};
-use std::num::NonZeroU64;
 
 use crate::noise::{SecretBuffer, StaticKey, build_handshake, decrypt, encrypt};
 

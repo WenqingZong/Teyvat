@@ -1,17 +1,19 @@
-use super::ExchangeConnector;
-use anyhow::Result;
-use layline::shared_memory::MarketDataWriter;
-use layline::types::{Exchange, MarketData, Topic};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+
+use anyhow::Result;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+
+use super::ExchangeConnector;
+use layline::shared_memory::MarketDataWriter;
+use layline::types::{Exchange, MarketData, Topic};
 
 enum WorkerCommand {
     Subscribe {
@@ -270,14 +272,16 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::*;
-    use crate::exchanges::OkxConnector;
-    use anyhow::bail;
-    use layline::types::ConnectedApi;
-    use layline::types::{Currency, Instrument, MarketDataType, UnderlyingType};
     use std::fs::create_dir_all;
     use std::future::pending;
+
+    use anyhow::bail;
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::exchanges::OkxConnector;
+    use layline::types::ConnectedApi;
+    use layline::types::{Currency, Instrument, MarketDataType, UnderlyingType};
 
     /// Resolves once the worker thread has dropped its command receiver.
     pub(in crate::exchanges) async fn wait_until_stopped(worker: &WorkerHandle) {

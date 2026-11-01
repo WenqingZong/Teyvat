@@ -1,8 +1,10 @@
-use crate::types::rkyv_decimal::RkyvDecimal;
-use crate::types::{Instrument, LatencyMetric};
+use std::num::NonZeroU64;
+
 use rkyv::{Archive, Deserialize, Serialize};
 use rust_decimal::Decimal;
-use std::num::NonZeroU64;
+
+use crate::types::rkyv_decimal::RkyvDecimal;
+use crate::types::{Instrument, LatencyMetric};
 
 #[derive(Archive, Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Bbo {

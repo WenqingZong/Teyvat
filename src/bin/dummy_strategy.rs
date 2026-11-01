@@ -1,19 +1,17 @@
-mod client;
-mod latency_bench;
-mod strategy;
+use std::collections::HashSet;
+use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use client::subscribe;
-use latency_bench::LatencyBench;
+
+use dummy_strategy::client::subscribe;
+use dummy_strategy::latency_bench::LatencyBench;
+use dummy_strategy::strategy::Strategy;
 use layline::logging::init_tracing;
 use layline::provider_api::DEFAULT_PROVIDER_ADDRESS;
 use layline::shared_memory::MarketDataReader;
 use layline::types::{Currency, Exchange, Instrument, MarketDataType, Topic, UnderlyingType};
-use std::collections::HashSet;
-use std::process::ExitCode;
-use std::time::Duration;
-use strategy::Strategy;
 
 const STRATEGY_NAME: &str = "dummy_strategy";
 

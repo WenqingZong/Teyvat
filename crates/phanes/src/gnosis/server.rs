@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tracing::{error, info, warn};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -15,6 +14,7 @@ use axum::routing::post;
 use secrecy::{ExposeSecret, SecretBox, SecretString};
 use tokio::fs::read_to_string;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::{error, info, warn};
 
 use crate::client_filter::ClientName;
 use crate::notify::{Notification, UnauthenticatedThrottle};
@@ -253,18 +253,20 @@ async fn gnosis(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::client_filter::UNFILTERED_CLIENT_NAME;
-    use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
+    use std::fs::write;
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request as HttpRequest};
-    use layline::gnosis::Initiator;
-    use layline::testing::test_keypair;
-    use layline::time::get_current_timestamp_nanoseconds;
-    use std::fs::write;
     use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tower::ServiceExt;
+
+    use super::*;
+    use crate::client_filter::UNFILTERED_CLIENT_NAME;
+    use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
+    use layline::gnosis::Initiator;
+    use layline::testing::test_keypair;
+    use layline::time::get_current_timestamp_nanoseconds;
 
     const KEY_ID: &str = "binance_demo";
     const SECRET: &str = "世界为之焕然一新";

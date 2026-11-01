@@ -1,16 +1,18 @@
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::thread;
+use std::time::Duration;
+
 use anyhow::{Result, bail};
+use tracing::{debug, error, warn};
+use ureq::Agent;
+
 use layline::backoff::exponential_backoff;
 use layline::provider_api::{
     RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest, SubscriptionResponse,
     SubscriptionResult,
 };
 use layline::types::Topic;
-use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
-use std::thread;
-use std::time::Duration;
-use tracing::{debug, error, warn};
-use ureq::Agent;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -19,7 +21,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Blocks until the provider accepts every topic, then resubscribes periodically on a background thread.
-pub(crate) fn subscribe(
+pub fn subscribe(
     provider_address: SocketAddr,
     strategy_name: &str,
     demo: bool,
@@ -150,12 +152,13 @@ fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, Subsc
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use layline::types::{Currency, Exchange, Instrument, MarketDataType, UnderlyingType};
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::mpsc::{Sender, channel};
+
+    use super::*;
+    use layline::types::{Currency, Exchange, Instrument, MarketDataType, UnderlyingType};
 
     const STRATEGY_NAME: &str = "test_strategy";
     const TEST_RESUBSCRIBE_INTERVAL: Duration = Duration::from_millis(50);

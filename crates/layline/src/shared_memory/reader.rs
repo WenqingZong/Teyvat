@@ -1,16 +1,18 @@
-use super::MAX_PAYLOAD_LENGTH;
-use super::ring_format::{RING_FILE_LENGTH, read_metadata};
-use crate::time::get_current_timestamp_nanoseconds;
-use crate::types::Subscription;
-use crate::types::{Bbo, MarketData, MarketDataType, Topic, Trade};
+use std::fs::OpenOptions;
+use std::num::NonZeroU64;
+
 use anyhow::{Context, Result, ensure};
 use bcast::error::Error::Overrun;
 use bcast::{Reader, RingBuffer};
 use memmap2::{Mmap, MmapOptions};
 use rkyv::rancor::Error as RkyvError;
-use std::fs::OpenOptions;
-use std::num::NonZeroU64;
 use tracing::{error, warn};
+
+use super::MAX_PAYLOAD_LENGTH;
+use super::ring_format::{RING_FILE_LENGTH, read_metadata};
+use crate::time::get_current_timestamp_nanoseconds;
+use crate::types::Subscription;
+use crate::types::{Bbo, MarketData, MarketDataType, Topic, Trade};
 
 // rkyv requires the archived bytes to be aligned.
 #[repr(C, align(16))]
@@ -128,10 +130,12 @@ impl MarketDataReader {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::tempdir;
+
     use super::*;
     use crate::types::{Currency, Exchange, UnderlyingType};
-    use std::path::PathBuf;
-    use tempfile::tempdir;
 
     fn subscription(path: PathBuf) -> Subscription {
         Subscription {

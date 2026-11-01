@@ -8,7 +8,6 @@ use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tracing::{debug, error, warn};
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::StatusCode;
@@ -16,6 +15,7 @@ use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::{debug, error, warn};
 
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::RequestDetails;
@@ -123,16 +123,18 @@ pub async fn filter_clients(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::request_details::RequestHead;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     use axum::Router;
     use axum::body::{Body, to_bytes};
     use axum::http::{HeaderMap, Method, Uri};
     use axum::middleware::from_fn_with_state;
     use axum::routing::get;
-    use std::net::{Ipv4Addr, Ipv6Addr};
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tower::ServiceExt;
+
+    use super::*;
+    use crate::request_details::RequestHead;
 
     const PATH: &str = "/whoami";
     /// Arbitrary documentation addresses (RFC 5737 / RFC 3849) with no business meaning.

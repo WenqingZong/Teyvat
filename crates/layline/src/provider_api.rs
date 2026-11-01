@@ -8,13 +8,14 @@
 //! GET /subscribed   {"topics": {"Binance": {"BTC-USDT-SPOT": {"BBO": {"path": "...", "strategy_names": ["dummy_strategy"]}}}}}
 //! GET /connected_apis {"Binance": [{"description": "...", "api": "wss://...", "doc": "https://..."}], "OKX": []}
 //! ```
-use crate::types::{Exchange, Instrument, MarketDataType, Topic};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
+use crate::types::{Exchange, Instrument, MarketDataType, Topic};
 
 pub const DEFAULT_PROVIDER_ADDRESS: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6666));
@@ -142,11 +143,13 @@ where
 
 /// `HashSet<Topic>` as `{exchange: {instrument: [market_data_type, ...]}}`.
 mod topic_set {
-    use super::{TopicTree, nest, unnest};
-    use crate::types::{MarketDataType, Topic};
+    use std::collections::{BTreeSet, HashSet};
+
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::{BTreeSet, HashSet};
+
+    use super::{TopicTree, nest, unnest};
+    use crate::types::{MarketDataType, Topic};
 
     pub(super) fn serialize<S: Serializer>(
         topics: &HashSet<Topic>,
@@ -168,11 +171,13 @@ mod topic_set {
 
 /// `HashMap<Topic, Value>` as `{exchange: {instrument: {market_data_type: value}}}`.
 mod topic_map {
-    use super::{TopicTree, nest, unnest};
-    use crate::types::{MarketDataType, Topic};
+    use std::collections::{BTreeMap, HashMap};
+
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::collections::{BTreeMap, HashMap};
+
+    use super::{TopicTree, nest, unnest};
+    use crate::types::{MarketDataType, Topic};
 
     pub(super) fn serialize<Value: Serialize, S: Serializer>(
         values: &HashMap<Topic, Value>,
@@ -193,9 +198,10 @@ mod topic_map {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
     use crate::types::{Currency, MarketDataType, UnderlyingType};
-    use serde_json::{Value, json};
 
     fn topic(
         exchange: Exchange,

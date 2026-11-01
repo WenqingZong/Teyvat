@@ -1,13 +1,15 @@
-use super::client::{Header, WebSocketClient};
-use anyhow::{Context, Error, Result, anyhow, bail};
 use std::pin::Pin;
 use std::time::Duration;
+
+use anyhow::{Context, Error, Result, anyhow, bail};
 use tokio::select;
 use tokio::time::{Instant, Sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Bytes, Message, Utf8Bytes};
 use tracing::{debug, info, trace, warn};
+
+use super::client::{Header, WebSocketClient};
 
 /// How an idle connection is kept alive: a websocket control frame, or venue-level text.
 #[derive(Clone, Copy, Debug)]
@@ -252,11 +254,12 @@ impl<Client: WebSocketClient> WebSocketConnection<Client> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
+
     use super::*;
     use crate::exchanges::websocket::tests::{
         MockVenue, MockVenueConnection, MockWebSocketClient, mock_websocket,
     };
-    use std::future::pending;
 
     const URL: &str = "wss://venue.example/stream";
     const HEARTBEAT: Heartbeat = Heartbeat {

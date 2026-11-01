@@ -1,10 +1,12 @@
 //! TEMPORARY, development only: synthetic data standing in for venue feeds.
 //! Never human-reviewed; the whole module will be deleted once real connectors land.
+use std::collections::{HashSet, VecDeque};
+
+use rust_decimal::{Decimal, dec};
+use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
+
 use crate::utils::Clock;
 use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
-use rust_decimal::{Decimal, dec};
-use std::collections::{HashSet, VecDeque};
-use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 
 const SYNTHETIC_INTERVAL: Duration = Duration::from_millis(10);
 const TICK_SIZE: Decimal = dec!(0.01);

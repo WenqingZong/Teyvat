@@ -3,7 +3,6 @@ use std::iter::once;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
-use layline::secrets::{SecretFileError, read_secret_file};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::Deserialize;
 use toml::de::Error as TomlError;
@@ -11,6 +10,7 @@ use toml::de::Error as TomlError;
 use crate::client_filter::ClientsByIp;
 use layline::bark::BarkConfig;
 use layline::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::secrets::{SecretFileError, read_secret_file};
 
 pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 
@@ -181,12 +181,14 @@ fn decode_client_public_key(encoded: &str, field: &str) -> Result<StaticKey, Pha
 
 #[cfg(test)]
 mod tests {
+    use std::fs::{Permissions, set_permissions, write};
+    use std::os::unix::fs::PermissionsExt;
+
+    use tempfile::{TempDir, tempdir};
+
     use super::*;
     use layline::noise::encode_key;
     use layline::testing::test_keypair;
-    use std::fs::{Permissions, set_permissions, write};
-    use std::os::unix::fs::PermissionsExt;
-    use tempfile::{TempDir, tempdir};
 
     const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;

@@ -1,7 +1,9 @@
-use crate::types::{Instrument, MarketDataType};
-use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::types::{Instrument, MarketDataType};
 
 /// Unit of subscription and deduplication; each topic owns one shared-memory ring.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]

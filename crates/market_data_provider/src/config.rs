@@ -1,16 +1,18 @@
 //! The provider's TOML config, read once at startup; see `deploy/market_data_provider.example.toml`.
 
-use crate::DEFAULT_ROOT_DIRECTORY;
-use crate::phanes_client::{PhanesClient, PhanesClientConfig};
-use anyhow::{Context, Result};
-use layline::bark::{BarkConfig, Notifier};
-use layline::build::RELEASE_BUILD;
-use layline::secrets::read_secret_file;
-use secrecy::ExposeSecret;
-use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
+use serde::Deserialize;
+
+use crate::DEFAULT_ROOT_DIRECTORY;
+use crate::phanes_client::{PhanesClient, PhanesClientConfig};
+use layline::bark::{BarkConfig, Notifier};
+use layline::build::RELEASE_BUILD;
+use layline::secrets::read_secret_file;
 
 const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(30);
 #[derive(Debug, Deserialize)]
@@ -56,10 +58,12 @@ impl ProviderConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::{Permissions, set_permissions, write};
     use std::os::unix::fs::PermissionsExt;
+
     use tempfile::{TempDir, tempdir};
+
+    use super::*;
 
     const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;

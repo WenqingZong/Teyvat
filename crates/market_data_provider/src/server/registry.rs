@@ -1,8 +1,9 @@
-use layline::provider_api::TopicStatus;
-use layline::types::Topic;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
+
+use layline::provider_api::TopicStatus;
+use layline::types::Topic;
 
 struct TopicState {
     holders: HashSet<String>,
@@ -98,9 +99,10 @@ impl SubscriptionRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
-    use std::time::Duration;
 
     const FIRST: &str = "first";
     const SECOND: &str = "second";
