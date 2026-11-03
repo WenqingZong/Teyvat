@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{Permissions, set_permissions, write};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -18,11 +18,11 @@ use ureq::{Body, Error};
 use layline::provider_api::{
     CONNECTED_APIS_PATH, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH, SUBSCRIBE_PATH,
     SUBSCRIBED_PATH, SubscribedResponse, Subscription, SubscriptionRequest, SubscriptionResponse,
-    TopicStatus, UNSUBSCRIBE_PATH,
+    UNSUBSCRIBE_PATH,
 };
 use layline::shared_memory::MarketDataReader;
 use layline::types::{
-    Currency, Exchange, Instrument, MarketData, MarketDataType, Topic, UnderlyingType,
+    Currency, Exchange, Instrument, MarketData, MarketDataType, StrategyName, Topic, UnderlyingType,
 };
 use market_data_provider::config::ProviderConfig;
 use market_data_provider::server::{run, serve};
@@ -32,38 +32,47 @@ const LONG_LEASE: Duration = Duration::from_secs(300);
 const SHORT_LEASE: Duration = Duration::from_millis(1);
 // Longer than the lease sweep interval plus the short lease.
 const EXPIRY_WAIT: Duration = Duration::from_millis(1500);
-const FIRST_STRATEGY: &str = "first_strategy";
-const SECOND_STRATEGY: &str = "second_strategy";
+const FIRST_STRATEGY_NAME: &str = "first_strategy";
+const SECOND_STRATEGY_NAME: &str = "second_strategy";
 const OWNER_ONLY_MODE: u32 = 0o600;
 /// Any 32 bytes, base64-encoded, make a valid X25519 key for parsing.
 const DUMMY_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
 
-fn instrument(exchange: Exchange, underlying_type: UnderlyingType) -> Instrument {
+fn instrument(exchange: Exchange, base: Currency, underlying_type: UnderlyingType) -> Instrument {
     Instrument {
         exchange,
-        base: Currency::Btc,
+        base,
         quote: Currency::Usdt,
         underlying_type,
     }
 }
 
-fn okx_spot_bbo() -> Topic {
+fn okx_bitcoin_spot_bbo() -> Topic {
     Topic {
-        instrument: instrument(Exchange::Okx, UnderlyingType::Spot),
+        instrument: instrument(Exchange::Okx, Currency::Btc, UnderlyingType::Spot),
+        market_data_type: MarketDataType::Bbo,
+    }
+}
+
+fn okx_ether_spot_bbo() -> Topic {
+    Topic {
+        instrument: instrument(Exchange::Okx, Currency::Eth, UnderlyingType::Spot),
         market_data_type: MarketDataType::Bbo,
     }
 }
 
 /// OKX only: its connector is still a dummy, while Binance's would reach the venue and Phanes.
+/// The two spot BBO topics share one ring.
 fn topics() -> HashSet<Topic> {
     HashSet::from([
-        okx_spot_bbo(),
+        okx_bitcoin_spot_bbo(),
+        okx_ether_spot_bbo(),
         Topic {
-            instrument: instrument(Exchange::Okx, UnderlyingType::Spot),
+            instrument: instrument(Exchange::Okx, Currency::Btc, UnderlyingType::Spot),
             market_data_type: MarketDataType::Trade,
         },
         Topic {
-            instrument: instrument(Exchange::Okx, UnderlyingType::Perpetual),
+            instrument: instrument(Exchange::Okx, Currency::Btc, UnderlyingType::Perpetual),
             market_data_type: MarketDataType::Bbo,
         },
     ])
@@ -121,14 +130,14 @@ fn url(address: SocketAddr, path: &str) -> String {
 fn post(
     address: SocketAddr,
     path: &str,
-    strategy_name: &str,
+    strategy_name: &StrategyName,
     topics: &HashSet<Topic>,
 ) -> Response<Body> {
     post_request(
         address,
         path,
         &SubscriptionRequest {
-            strategy_name: strategy_name.to_owned(),
+            strategy_name: strategy_name.clone(),
             demo: false,
             topics: topics.clone(),
         },
@@ -156,7 +165,7 @@ fn accepted_paths(mut response: Response<Body>) -> HashMap<Topic, PathBuf> {
         .collect()
 }
 
-fn statuses(address: SocketAddr) -> HashMap<Topic, TopicStatus> {
+fn subscribed_topics(address: SocketAddr) -> HashSet<Topic> {
     let response: SubscribedResponse = ureq::get(&url(address, SUBSCRIBED_PATH))
         .call()
         .expect("request is expected to not fail")
@@ -164,20 +173,6 @@ fn statuses(address: SocketAddr) -> HashMap<Topic, TopicStatus> {
         .read_json()
         .expect("response is expected to be json");
     response.topics
-}
-
-fn holders(address: SocketAddr) -> HashMap<Topic, BTreeSet<String>> {
-    statuses(address)
-        .into_iter()
-        .map(|(topic, status)| (topic, status.strategy_names))
-        .collect()
-}
-
-fn names(strategy_names: &[&str]) -> BTreeSet<String> {
-    strategy_names
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect()
 }
 
 fn assert_server_time_is_utc_milliseconds(server_time: &str) {
@@ -215,15 +210,20 @@ fn receive_all(subscriptions: &[Subscription]) -> HashSet<Topic> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn strategy_receives_every_subscribed_topic_from_each_exchange() {
+    let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let address = start_provider(directory.path(), LONG_LEASE).await;
 
     let received = spawn_blocking(move || {
-        let subscriptions: Vec<Subscription> =
-            accepted_paths(post(address, SUBSCRIBE_PATH, FIRST_STRATEGY, &topics()))
-                .into_iter()
-                .map(|(topic, path)| Subscription { topic, path })
-                .collect();
+        let subscriptions: Vec<Subscription> = accepted_paths(post(
+            address,
+            SUBSCRIBE_PATH,
+            &first_strategy_name,
+            &topics(),
+        ))
+        .into_iter()
+        .map(|(topic, path)| Subscription { topic, path })
+        .collect();
         receive_all(&subscriptions)
     })
     .await
@@ -234,28 +234,36 @@ async fn strategy_receives_every_subscribed_topic_from_each_exchange() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn topic_stays_subscribed_until_its_last_strategy_leaves() {
+    let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
+    let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let address = start_provider(directory.path(), LONG_LEASE).await;
 
     spawn_blocking(move || {
-        let first = accepted_paths(post(address, SUBSCRIBE_PATH, FIRST_STRATEGY, &topics()));
-        let second = accepted_paths(post(address, SUBSCRIBE_PATH, SECOND_STRATEGY, &topics()));
-        assert_eq!(first, second);
-        let both = names(&[FIRST_STRATEGY, SECOND_STRATEGY]);
-        assert!(holders(address).values().all(|holders| *holders == both));
-
-        let response = post(address, UNSUBSCRIBE_PATH, FIRST_STRATEGY, &topics());
-        assert_eq!(204, response.status());
-        let remaining = names(&[SECOND_STRATEGY]);
-        assert_eq!(topics().len(), holders(address).len());
+        let first = accepted_paths(post(
+            address,
+            SUBSCRIBE_PATH,
+            &first_strategy_name,
+            &topics(),
+        ));
+        let second = accepted_paths(post(
+            address,
+            SUBSCRIBE_PATH,
+            &second_strategy_name,
+            &topics(),
+        ));
         assert!(
-            holders(address)
-                .values()
-                .all(|holders| *holders == remaining)
+            first.iter().all(|(topic, path)| second[topic] != *path),
+            "each strategy is expected to read its own rings"
         );
+        assert_eq!(topics(), subscribed_topics(address));
 
-        post(address, UNSUBSCRIBE_PATH, SECOND_STRATEGY, &topics());
-        assert!(statuses(address).is_empty());
+        let response = post(address, UNSUBSCRIBE_PATH, &first_strategy_name, &topics());
+        assert_eq!(204, response.status());
+        assert_eq!(topics(), subscribed_topics(address));
+
+        post(address, UNSUBSCRIBE_PATH, &second_strategy_name, &topics());
+        assert!(subscribed_topics(address).is_empty());
     })
     .await
     .expect("strategy task is expected to not panic");
@@ -263,20 +271,21 @@ async fn topic_stays_subscribed_until_its_last_strategy_leaves() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resubscribe_replaces_the_strategy_set() {
+    let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let address = start_provider(directory.path(), LONG_LEASE).await;
 
     spawn_blocking(move || {
-        post(address, SUBSCRIBE_PATH, FIRST_STRATEGY, &topics());
+        post(address, SUBSCRIBE_PATH, &first_strategy_name, &topics());
         post(
             address,
             RESUBSCRIBE_PATH,
-            FIRST_STRATEGY,
-            &HashSet::from([okx_spot_bbo()]),
+            &first_strategy_name,
+            &HashSet::from([okx_bitcoin_spot_bbo()]),
         );
         assert_eq!(
-            HashMap::from([(okx_spot_bbo(), names(&[FIRST_STRATEGY]))]),
-            holders(address)
+            HashSet::from([okx_bitcoin_spot_bbo()]),
+            subscribed_topics(address)
         );
     })
     .await
@@ -285,15 +294,26 @@ async fn resubscribe_replaces_the_strategy_set() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn expired_lease_releases_topics() {
+    let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let address = start_provider(directory.path(), SHORT_LEASE).await;
 
     spawn_blocking(move || {
-        let first = accepted_paths(post(address, SUBSCRIBE_PATH, FIRST_STRATEGY, &topics()));
+        let first = accepted_paths(post(
+            address,
+            SUBSCRIBE_PATH,
+            &first_strategy_name,
+            &topics(),
+        ));
         sleep(EXPIRY_WAIT);
-        assert!(statuses(address).is_empty());
+        assert!(subscribed_topics(address).is_empty());
 
-        let returning = accepted_paths(post(address, SUBSCRIBE_PATH, FIRST_STRATEGY, &topics()));
+        let returning = accepted_paths(post(
+            address,
+            SUBSCRIBE_PATH,
+            &first_strategy_name,
+            &topics(),
+        ));
         assert_eq!(first, returning);
     })
     .await
@@ -344,13 +364,13 @@ async fn demo_request_is_refused_while_provider_serves_live() {
 
     spawn_blocking(move || {
         let request = SubscriptionRequest {
-            strategy_name: FIRST_STRATEGY.to_owned(),
+            strategy_name: StrategyName::from(FIRST_STRATEGY_NAME),
             demo: true,
-            topics: HashSet::from([okx_spot_bbo()]),
+            topics: HashSet::from([okx_bitcoin_spot_bbo()]),
         };
         let rejection_result = ureq::post(&url(address, SUBSCRIBE_PATH)).send_json(request);
         assert!(matches!(rejection_result, Err(Error::StatusCode(400))));
-        assert!(statuses(address).is_empty());
+        assert!(subscribed_topics(address).is_empty());
     })
     .await
     .expect("strategy task is expected to not panic");
@@ -363,12 +383,12 @@ async fn demo_provider_accepts_demo_requests() {
 
     spawn_blocking(move || {
         let request = SubscriptionRequest {
-            strategy_name: FIRST_STRATEGY.to_owned(),
+            strategy_name: StrategyName::from(FIRST_STRATEGY_NAME),
             demo: true,
-            topics: HashSet::from([okx_spot_bbo()]),
+            topics: HashSet::from([okx_bitcoin_spot_bbo()]),
         };
         accepted_paths(post_request(address, SUBSCRIBE_PATH, &request));
-        assert!(statuses(address).contains_key(&okx_spot_bbo()));
+        assert!(subscribed_topics(address).contains(&okx_bitcoin_spot_bbo()));
     })
     .await
     .expect("strategy task is expected to not panic");

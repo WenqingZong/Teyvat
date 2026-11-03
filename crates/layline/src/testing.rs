@@ -4,16 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{read_dir, read_to_string};
 use std::path::{Path, PathBuf};
 
+use rust_decimal::dec;
 use secrecy::SecretBox;
 
 use crate::noise::{StaticKey, generate_keypair};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{
-    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Subscription, Topic, Trade,
-    UnderlyingType,
+    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Side, StrategyName,
+    Subscription, Topic, Trade, UnderlyingType,
 };
 
-pub fn instrument(
+pub fn test_instrument(
     exchange: Exchange,
     base: Currency,
     quote: Currency,
@@ -27,41 +28,45 @@ pub fn instrument(
     }
 }
 
-pub fn topic(instrument: Instrument, market_data_type: MarketDataType) -> Topic {
+pub fn test_topic(instrument: Instrument, market_data_type: MarketDataType) -> Topic {
     Topic {
         instrument,
         market_data_type,
     }
 }
 
-pub fn subscription(directory: &Path, topic: Topic) -> Subscription {
+pub fn test_subscription(
+    root_directory: &Path,
+    strategy_name: &StrategyName,
+    topic: Topic,
+) -> Subscription {
     Subscription {
         topic,
-        path: topic.file_path(directory),
+        path: topic.file_path(root_directory, strategy_name),
     }
 }
 
-pub fn bbo(instrument: Instrument, sequence: usize) -> Bbo {
+pub fn test_bbo(instrument: Instrument, sequence: usize) -> Bbo {
     Bbo {
         instrument,
         exchange_time_nanoseconds: None,
         latency_metric: LatencyMetric::received(get_current_timestamp_nanoseconds()),
-        ask_price: rust_decimal::dec!(101.5),
-        ask_size: rust_decimal::dec!(2),
-        bid_price: rust_decimal::dec!(101.4),
-        bid_size: rust_decimal::dec!(4),
+        ask_price: dec!(101.5),
+        ask_size: dec!(2),
+        bid_price: dec!(101.4),
+        bid_size: dec!(4),
         sequence,
     }
 }
 
-pub fn trade(instrument: Instrument, sequence: usize) -> Trade {
+pub fn test_trade(instrument: Instrument, sequence: usize) -> Trade {
     Trade {
         instrument,
         exchange_time_nanoseconds: None,
         latency_metric: LatencyMetric::received(get_current_timestamp_nanoseconds()),
-        price: rust_decimal::dec!(101.5),
-        size: rust_decimal::dec!(0.25),
-        taker_side: crate::types::Side::Buy,
+        price: dec!(101.5),
+        size: dec!(0.25),
+        taker_side: Side::Buy,
         sequence,
     }
 }

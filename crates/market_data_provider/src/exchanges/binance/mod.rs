@@ -651,6 +651,7 @@ mod tests {
     use crate::phanes_client::tests::MockApiKeySource;
     use crate::utils::tests::MockClock;
     use layline::api_keys::{ApiKey, ApiKeyId, parse_api_key};
+    use layline::testing::{test_instrument, test_topic};
     use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
 
@@ -824,8 +825,8 @@ mod tests {
         underlying_type: UnderlyingType,
         market_data_type: MarketDataType,
     ) -> Topic {
-        layline::testing::topic(
-            layline::testing::instrument(Exchange::Binance, base, Currency::Usdt, underlying_type),
+        test_topic(
+            test_instrument(Exchange::Binance, base, Currency::Usdt, underlying_type),
             market_data_type,
         )
     }

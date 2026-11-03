@@ -6,5 +6,5 @@
 |---|---|
 | [`celestia.md`](celestia.md) | 进程监控的完整设计：磁盘 spool、ClickHouse 入库、Grafana 看板、`celestia_client` |
 | [`database.md`](database.md) | 数据库：ClickHouse 表设计、回测数据读取、研究行情采集 |
-| [`market_data_provider.md`](market_data_provider.md) | 行情服务：InstrumentManager、Coindesk 检查、订阅持久化、seqlock、OKX |
+| [`market_data_provider.md`](market_data_provider.md) | 行情服务：InstrumentManager、Coindesk 检查、订阅持久化、OKX、替换 bcast（长远） |
 | [`todo.md`](todo.md) | 部署后的手工步骤 |

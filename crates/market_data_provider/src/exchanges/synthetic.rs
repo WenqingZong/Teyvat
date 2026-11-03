@@ -95,11 +95,12 @@ fn synthetic_data(topic: Topic, latency_metric: LatencyMetric, sequence: usize) 
 mod tests {
     use super::*;
     use crate::utils::RealClock;
+    use layline::testing::{test_instrument, test_topic};
     use layline::time::get_current_timestamp_nanoseconds;
     use layline::types::{Currency, Exchange, Instrument, UnderlyingType};
 
     fn instrument() -> Instrument {
-        layline::testing::instrument(
+        test_instrument(
             Exchange::Binance,
             Currency::Eth,
             Currency::Usdt,
@@ -108,7 +109,7 @@ mod tests {
     }
 
     fn topic(market_data_type: MarketDataType) -> Topic {
-        layline::testing::topic(instrument(), market_data_type)
+        test_topic(instrument(), market_data_type)
     }
 
     #[tokio::test]

@@ -49,8 +49,8 @@ install_phanes() {
     generate_key_pair Gnosis "$GNOSIS_PRIVATE_KEY" "$GNOSIS_PUBLIC_KEY"
     generate_key_pair celestia "$CELESTIA_PRIVATE_KEY" "$CELESTIA_PUBLIC_KEY"
 
-    log "syncing gnoses/*.json into $GNOSES_DIRECTORY"
-    install -m 600 gnoses/*.json "$GNOSES_DIRECTORY/"
+    # log "syncing gnoses/*.json into $GNOSES_DIRECTORY"
+    # install -m 600 gnoses/*.json "$GNOSES_DIRECTORY/"
 
     [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes/phanes.example.toml "$CONFIG_FILE"
 

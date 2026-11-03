@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Instrument, MarketDataType};
+use crate::types::{Instrument, MarketDataType, RingKey, StrategyName};
 
-/// Unit of subscription and deduplication; each topic owns one shared-memory ring.
+/// Unit of subscription and deduplication; a strategy's topics of one `RingKey` share a ring.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct Topic {
     pub instrument: Instrument,
@@ -13,8 +13,17 @@ pub struct Topic {
 }
 
 impl Topic {
-    pub fn file_path(&self, root_directory: &Path) -> PathBuf {
-        root_directory.join(format!("{self}.dat"))
+    pub fn ring_key(&self) -> RingKey {
+        RingKey {
+            exchange: self.instrument.exchange,
+            underlying_type: self.instrument.underlying_type,
+            market_data_type: self.market_data_type,
+        }
+    }
+
+    /// The ring that delivers this topic to `strategy_name`.
+    pub fn file_path(&self, root_directory: &Path, strategy_name: &StrategyName) -> PathBuf {
+        self.ring_key().file_path(root_directory, strategy_name)
     }
 }
 
@@ -27,6 +36,7 @@ impl Display for Topic {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{test_instrument, test_topic};
     use crate::types::{Currency, Exchange, UnderlyingType};
 
     fn topic() -> Topic {
@@ -42,10 +52,26 @@ mod tests {
     }
 
     #[test]
-    fn file_path_nests_exchange_symbol_and_market_data_type() {
+    fn a_strategys_instruments_of_one_exchange_and_underlying_type_share_a_ring() {
+        let other_pair = test_topic(
+            test_instrument(
+                Exchange::Okx,
+                Currency::Btc,
+                Currency::Usdt,
+                UnderlyingType::Spot,
+            ),
+            MarketDataType::Trade,
+        );
+        let root_directory = Path::new("/dev/shm/root");
+        let first_strategy_name = StrategyName::from("first");
+        let second_strategy_name = StrategyName::from("second");
         assert_eq!(
-            PathBuf::from("/dev/shm/root/OKX/ETH-USDC-SPOT/TRADE.dat"),
-            topic().file_path(Path::new("/dev/shm/root"))
+            topic().file_path(root_directory, &first_strategy_name),
+            other_pair.file_path(root_directory, &first_strategy_name)
+        );
+        assert_ne!(
+            topic().file_path(root_directory, &first_strategy_name),
+            topic().file_path(root_directory, &second_strategy_name)
         );
     }
 

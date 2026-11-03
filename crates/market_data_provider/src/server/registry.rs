@@ -1,98 +1,73 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::time::Instant;
 
-use layline::provider_api::TopicStatus;
-use layline::types::Topic;
+use layline::types::{StrategyName, Topic};
 
-struct TopicState {
-    holders: HashSet<String>,
-}
-
-/// Reference counts exchange subscriptions by strategy name; a strategy holds its topics until it unsubscribes or its lease expires.
+/// The topics each strategy holds and when its lease ends; a strategy holds its topics until it
+/// unsubscribes or its lease expires.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
-    topics: HashMap<Topic, TopicState>,
-    lease_expiries: HashMap<String, Instant>,
+    topics_by_strategy: HashMap<StrategyName, HashSet<Topic>>,
+    lease_expiries: HashMap<StrategyName, Instant>,
 }
 
 impl SubscriptionRegistry {
-    pub(crate) fn is_active(&self, topic: &Topic) -> bool {
-        self.topics.contains_key(topic)
+    pub(crate) fn held_by(&self, strategy_name: &StrategyName) -> HashSet<Topic> {
+        self.topics_by_strategy
+            .get(strategy_name)
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// Adds `strategy_name` to `topic`, activating the topic when it is not active yet.
-    pub(crate) fn add_holder(&mut self, topic: &Topic, strategy_name: &str) {
-        self.topics
-            .entry(*topic)
-            .or_insert_with(|| TopicState {
-                holders: HashSet::new(),
-            })
-            .holders
-            .insert(strategy_name.to_owned());
+    pub(crate) fn add(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
+        self.topics_by_strategy
+            .entry(strategy_name.to_owned())
+            .or_default()
+            .extend(topics);
     }
 
-    pub(crate) fn renew_lease(&mut self, strategy_name: &str, expires_at: Instant) {
+    pub(crate) fn remove(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
+        let Some(held) = self.topics_by_strategy.get_mut(strategy_name) else {
+            return;
+        };
+        held.retain(|topic| !topics.contains(topic));
+        if held.is_empty() {
+            self.topics_by_strategy.remove(strategy_name);
+        }
+    }
+
+    pub(crate) fn renew_lease(&mut self, strategy_name: &StrategyName, expires_at: Instant) {
         self.lease_expiries
             .insert(strategy_name.to_owned(), expires_at);
     }
 
-    pub(crate) fn held_by(&self, strategy_name: &str) -> HashSet<Topic> {
-        self.topics
-            .iter()
-            .filter(|(_, state)| state.holders.contains(strategy_name))
-            .map(|(topic, _)| *topic)
-            .collect()
-    }
-
-    /// Forgets and returns the topics left without holders.
-    pub(crate) fn remove_holder(
-        &mut self,
-        strategy_name: &str,
-        topics: &HashSet<Topic>,
-    ) -> HashSet<Topic> {
-        let mut orphaned = HashSet::new();
-        for topic in topics {
-            let Some(state) = self.topics.get_mut(topic) else {
-                continue;
-            };
-            if !state.holders.remove(strategy_name) || !state.holders.is_empty() {
-                continue;
-            }
-            self.topics.remove(topic);
-            orphaned.insert(*topic);
-        }
-        orphaned
-    }
-
-    /// Drops every strategy whose lease ended by `now`; returns the topics left without holders.
-    pub(crate) fn expire_leases(&mut self, now: Instant) -> HashSet<Topic> {
-        let expired: Vec<String> = self
+    /// Forgets every strategy whose lease ended by `now`, returning the topics each one held.
+    pub(crate) fn expire_leases(&mut self, now: Instant) -> HashMap<StrategyName, HashSet<Topic>> {
+        let expired: Vec<StrategyName> = self
             .lease_expiries
             .iter()
             .filter(|(_, expires_at)| **expires_at <= now)
             .map(|(strategy_name, _)| strategy_name.clone())
             .collect();
-        let mut orphaned = HashSet::new();
-        for strategy_name in expired {
-            self.lease_expiries.remove(&strategy_name);
-            let held = self.held_by(&strategy_name);
-            orphaned.extend(self.remove_holder(&strategy_name, &held));
-        }
-        orphaned
+        expired
+            .into_iter()
+            .map(|strategy_name| {
+                self.lease_expiries.remove(&strategy_name);
+                let held = self
+                    .topics_by_strategy
+                    .remove(&strategy_name)
+                    .unwrap_or_default();
+                (strategy_name, held)
+            })
+            .collect()
     }
 
-    /// Every active topic, its ring path and the strategies holding it.
-    pub(crate) fn statuses(&self, root_directory: &Path) -> HashMap<Topic, TopicStatus> {
-        self.topics
-            .iter()
-            .map(|(topic, state)| {
-                let status = TopicStatus {
-                    path: topic.file_path(root_directory),
-                    strategy_names: state.holders.iter().cloned().collect(),
-                };
-                (*topic, status)
-            })
+    /// Every topic some strategy holds, which is what the provider publishes.
+    pub(crate) fn subscribed_topics(&self) -> HashSet<Topic> {
+        self.topics_by_strategy
+            .values()
+            .flatten()
+            .copied()
             .collect()
     }
 }
@@ -102,15 +77,16 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use layline::testing::{test_instrument, test_topic};
     use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
 
-    const FIRST: &str = "first";
-    const SECOND: &str = "second";
+    const FIRST_STRATEGY_NAME: &str = "first";
+    const SECOND_STRATEGY_NAME: &str = "second";
     const LEASE: Duration = Duration::from_secs(60);
 
     fn topic(market_data_type: MarketDataType) -> Topic {
-        layline::testing::topic(
-            layline::testing::instrument(
+        test_topic(
+            test_instrument(
                 Exchange::Okx,
                 Currency::Btc,
                 Currency::Usdt,
@@ -120,65 +96,54 @@ mod tests {
         )
     }
 
-    fn registry_held_by(strategy_names: &[&str]) -> SubscriptionRegistry {
+    fn bbo() -> HashSet<Topic> {
+        HashSet::from([topic(MarketDataType::Bbo)])
+    }
+
+    fn trade() -> HashSet<Topic> {
+        HashSet::from([topic(MarketDataType::Trade)])
+    }
+
+    #[test]
+    fn strategies_hold_what_they_add_until_they_remove_it() {
+        let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
+        let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
         let mut registry = SubscriptionRegistry::default();
-        for strategy_name in strategy_names {
-            registry.add_holder(&topic(MarketDataType::Bbo), strategy_name);
-        }
-        registry
+        registry.add(&first_strategy_name, &bbo());
+        registry.add(&first_strategy_name, &trade());
+        registry.add(&second_strategy_name, &bbo());
+        assert_eq!(&bbo() | &trade(), registry.held_by(&first_strategy_name));
+
+        registry.remove(&first_strategy_name, &bbo());
+        assert_eq!(trade(), registry.held_by(&first_strategy_name));
+        assert_eq!(bbo(), registry.held_by(&second_strategy_name));
     }
 
     #[test]
-    fn holding_a_topic_activates_it() {
+    fn subscribed_topics_are_every_strategys_topics() {
+        let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
+        let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
         let mut registry = SubscriptionRegistry::default();
-        let bbo = topic(MarketDataType::Bbo);
-        assert!(!registry.is_active(&bbo));
-        registry.add_holder(&bbo, FIRST);
-        assert!(registry.is_active(&bbo));
-        assert_eq!(HashSet::from([bbo]), registry.held_by(FIRST));
-    }
+        registry.add(&first_strategy_name, &bbo());
+        registry.add(&second_strategy_name, &bbo());
+        registry.add(&second_strategy_name, &trade());
+        assert_eq!(&bbo() | &trade(), registry.subscribed_topics());
 
-    #[test]
-    fn topic_stays_active_while_any_strategy_holds_it() {
-        let mut registry = registry_held_by(&[FIRST, SECOND]);
-
-        assert!(
-            registry
-                .remove_holder(FIRST, &HashSet::from([topic(MarketDataType::Bbo)]))
-                .is_empty()
-        );
-        assert!(registry.is_active(&topic(MarketDataType::Bbo)));
-        assert_eq!(
-            HashSet::from([topic(MarketDataType::Bbo)]),
-            registry.remove_holder(SECOND, &HashSet::from([topic(MarketDataType::Bbo)]))
-        );
-        assert!(!registry.is_active(&topic(MarketDataType::Bbo)));
-    }
-
-    #[test]
-    fn removing_unheld_topic_changes_nothing() {
-        let mut registry = registry_held_by(&[FIRST]);
-        assert!(
-            registry
-                .remove_holder(
-                    SECOND,
-                    &HashSet::from([topic(MarketDataType::Bbo), topic(MarketDataType::Trade)])
-                )
-                .is_empty()
-        );
-        assert_eq!(
-            HashSet::from([topic(MarketDataType::Bbo)]),
-            registry.held_by(FIRST)
-        );
+        registry.remove(&second_strategy_name, &(&bbo() | &trade()));
+        registry.remove(&first_strategy_name, &bbo());
+        assert!(registry.subscribed_topics().is_empty());
     }
 
     #[test]
     fn expired_lease_releases_only_that_strategy() {
-        let mut registry = registry_held_by(&[FIRST, SECOND]);
-        registry.add_holder(&topic(MarketDataType::Trade), FIRST);
+        let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
+        let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
+        let mut registry = SubscriptionRegistry::default();
+        registry.add(&first_strategy_name, &(&bbo() | &trade()));
+        registry.add(&second_strategy_name, &bbo());
         let start = Instant::now();
-        registry.renew_lease(FIRST, start + LEASE);
-        registry.renew_lease(SECOND, start + LEASE * 2);
+        registry.renew_lease(&first_strategy_name, start + LEASE);
+        registry.renew_lease(&second_strategy_name, start + LEASE * 2);
 
         assert!(
             registry
@@ -186,37 +151,21 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            HashSet::from([topic(MarketDataType::Trade)]),
+            HashMap::from([(StrategyName::from(FIRST_STRATEGY_NAME), &bbo() | &trade())]),
             registry.expire_leases(start + LEASE)
         );
-        assert_eq!(
-            HashSet::from([topic(MarketDataType::Bbo)]),
-            registry.held_by(SECOND)
-        );
-        assert!(registry.held_by(FIRST).is_empty());
+        assert!(registry.held_by(&first_strategy_name).is_empty());
+        assert_eq!(bbo(), registry.held_by(&second_strategy_name));
     }
 
     #[test]
     fn renewed_lease_postpones_expiry() {
-        let mut registry = registry_held_by(&[FIRST]);
+        let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
+        let mut registry = SubscriptionRegistry::default();
+        registry.add(&first_strategy_name, &bbo());
         let start = Instant::now();
-        registry.renew_lease(FIRST, start + LEASE);
-        registry.renew_lease(FIRST, start + LEASE * 2);
+        registry.renew_lease(&first_strategy_name, start + LEASE);
+        registry.renew_lease(&first_strategy_name, start + LEASE * 2);
         assert!(registry.expire_leases(start + LEASE).is_empty());
-    }
-
-    #[test]
-    fn statuses_list_every_holder() {
-        let registry = registry_held_by(&[SECOND, FIRST]);
-        assert_eq!(
-            HashMap::from([(
-                topic(MarketDataType::Bbo),
-                TopicStatus {
-                    path: topic(MarketDataType::Bbo).file_path(Path::new("/dev/shm")),
-                    strategy_names: [FIRST.to_owned(), SECOND.to_owned()].into(),
-                },
-            )]),
-            registry.statuses(Path::new("/dev/shm"))
-        );
     }
 }

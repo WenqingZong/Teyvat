@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 use bcast::error::Error::Overrun;
@@ -9,22 +10,26 @@ use rkyv::rancor::Error as RkyvError;
 use tracing::{error, warn};
 
 use super::MAX_PAYLOAD_LENGTH;
-use super::ring_format::{RING_FILE_LENGTH, read_metadata};
+use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_market_data_type};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::Subscription;
-use crate::types::{Bbo, MarketData, MarketDataType, Topic, Trade};
+use crate::types::{Bbo, MarketData, MarketDataType, Trade};
 
 // rkyv requires the archived bytes to be aligned.
 #[repr(C, align(16))]
 struct PayloadBuffer([u8; MAX_PAYLOAD_LENGTH]);
 
-struct TopicSharedMemoryRingBufferReader {
-    topic: Topic,
+/// One of the strategy's rings; it carries only topics this strategy subscribed to.
+struct RingReader {
+    path: PathBuf,
+    market_data_type: MarketDataType,
     reader: Reader,
+    // Never read, only kept alive: `reader` points into this mapping, and dropping it would unmap the
+    // ring under the reader. Declared after `reader`, so it is dropped after it.
     _memory_map: Mmap,
 }
 
-impl TopicSharedMemoryRingBufferReader {
+impl RingReader {
     fn open(subscription: &Subscription) -> Result<Self> {
         let path = &subscription.path;
         let file = OpenOptions::new()
@@ -39,16 +44,20 @@ impl TopicSharedMemoryRingBufferReader {
         );
 
         let memory_map = unsafe { MmapOptions::new().map(&file)? };
-        let reader = RingBuffer::new(memory_map.as_ref()).into_reader();
-        let stored_option = read_metadata(reader.metadata());
-        let expected = subscription.topic.market_data_type;
+        // Checked before `into_reader`, which spins until a writer marks the ring ready and would
+        // hang forever on a file no writer initialized.
+        let expected_market_data_type = subscription.topic.market_data_type;
+        let actual_market_data_type = read_market_data_type(&memory_map[METADATA_RANGE])
+            .with_context(|| format!("{} is not a market data ring", path.display()))?;
         ensure!(
-            stored_option == Some(expected),
-            "{} holds {stored_option:?}, expected {expected}",
+            actual_market_data_type == expected_market_data_type,
+            "{} holds {actual_market_data_type}, expected {expected_market_data_type}",
             path.display()
         );
+        let reader = RingBuffer::new(memory_map.as_ref()).into_reader();
         Ok(Self {
-            topic: subscription.topic,
+            path: path.clone(),
+            market_data_type: expected_market_data_type,
             reader,
             _memory_map: memory_map,
         })
@@ -65,18 +74,18 @@ impl TopicSharedMemoryRingBufferReader {
             let length = match message_result.and_then(|message| message.read(&mut buffer.0)) {
                 Ok(length) => length,
                 Err(Overrun(position)) => {
-                    warn!("{} overrun at position {position}", self.topic);
+                    warn!("{} overrun at position {position}", self.path.display());
                     self.reader.reset();
                     break;
                 }
                 Err(error) => {
-                    error!("dropping {} message: {error}", self.topic);
+                    error!("dropping a message of {}: {error}", self.path.display());
                     continue;
                 }
             };
             let received_at_nanoseconds = get_current_timestamp_nanoseconds();
             let payload = &buffer.0[..length];
-            let data = match self.topic.market_data_type {
+            let data = match self.market_data_type {
                 MarketDataType::Bbo => {
                     MarketData::Bbo(rkyv::from_bytes::<Bbo, RkyvError>(payload)?)
                 }
@@ -91,17 +100,23 @@ impl TopicSharedMemoryRingBufferReader {
     }
 }
 
-/// Reads every subscribed topic's ring in turn and hands each message to the caller with its receive time.
+/// Reads every ring of the strategy in turn and hands each message to the caller with its receive time.
 pub struct MarketDataReader {
-    readers: Vec<TopicSharedMemoryRingBufferReader>,
+    readers: Vec<RingReader>,
 }
 
 impl MarketDataReader {
+    /// Topics sharing a ring share its path, so each path is opened once.
     pub fn open(subscriptions: &[Subscription]) -> Result<Self> {
-        let readers = subscriptions
-            .iter()
-            .map(TopicSharedMemoryRingBufferReader::open)
-            .collect::<Result<_>>()?;
+        let mut readers: Vec<RingReader> = Vec::new();
+        for subscription in subscriptions {
+            if readers
+                .iter()
+                .all(|reader| reader.path != subscription.path)
+            {
+                readers.push(RingReader::open(subscription)?);
+            }
+        }
         Ok(Self { readers })
     }
 
@@ -111,16 +126,13 @@ impl MarketDataReader {
         }
     }
 
-    /// Dispatches every pending message across all topics and returns how many were handled.
+    /// Dispatches every pending message across all rings and returns how many were handled.
     pub fn poll<OnData: FnMut(MarketData, NonZeroU64)>(
         &self,
         mut on_data: OnData,
     ) -> Result<usize> {
         let mut handled = 0;
-        // PERFORMANCE: possible bottleneck.
-        // Why: one ring per topic keeps the provider single-writer per ring and lets strategies pick topics; sweeping them in turn is lock- and syscall-free.
-        // Cost: every sweep loads each ring's producer position, so idle topics still cost a cache-line read; one topic's latency grows with the topic count, a busy topic's batch delays the others, and there is no cross-topic ordering.
-        // Later: a per-strategy notification ring (or one multiplexed ring) to touch only changed topics, zero-copy rkyv access instead of deserializing, and pinning the polling thread to a core.
+        // PERFORMANCE: possible bottleneck. Consider zero-copy rkyv access instead of deserializing, and pinning the polling thread to a core.
         for reader in &self.readers {
             handled += reader.poll(&mut on_data)?;
         }
@@ -130,17 +142,16 @@ impl MarketDataReader {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use tempfile::tempdir;
 
     use super::*;
+    use crate::testing::{test_instrument, test_topic};
     use crate::types::{Currency, Exchange, UnderlyingType};
 
     fn subscription(path: PathBuf) -> Subscription {
         Subscription {
-            topic: crate::testing::topic(
-                crate::testing::instrument(
+            topic: test_topic(
+                test_instrument(
                     Exchange::Binance,
                     Currency::Btc,
                     Currency::Usdt,
@@ -153,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_rejects_missing_and_unsized_files() {
+    fn reader_rejects_missing_unsized_and_unformatted_files() {
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let missing = subscription(directory.path().join("missing.dat"));
         assert!(MarketDataReader::open(&[missing]).is_err());
@@ -166,5 +177,19 @@ mod tests {
             .open(&unsized_path)
             .expect("file creation is expected to not fail");
         assert!(MarketDataReader::open(&[subscription(unsized_path)]).is_err());
+
+        let unformatted_path = directory.path().join("zeros.dat");
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&unformatted_path)
+            .expect("file creation is expected to not fail")
+            .set_len(RING_FILE_LENGTH)
+            .expect("sizing the file is expected to not fail");
+        let error = MarketDataReader::open(&[subscription(unformatted_path)])
+            .err()
+            .expect("a file without ring metadata is expected to be refused");
+        assert!(format!("{error:#}").contains("not a market data ring"));
     }
 }

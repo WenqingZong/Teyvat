@@ -12,7 +12,7 @@ use layline::provider_api::{
     RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest, SubscriptionResponse,
     SubscriptionResult, group_by_reason,
 };
-use layline::types::Topic;
+use layline::types::{StrategyName, Topic};
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -23,7 +23,7 @@ const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(10);
 /// Blocks until the provider accepts every topic, then resubscribes periodically on a background thread.
 pub fn subscribe(
     provider_address: SocketAddr,
-    strategy_name: &str,
+    strategy_name: StrategyName,
     demo: bool,
     topics: HashSet<Topic>,
 ) -> Result<Vec<Subscription>> {
@@ -38,7 +38,7 @@ pub fn subscribe(
 
 fn subscribe_with_resubscribe_interval(
     provider_address: SocketAddr,
-    strategy_name: &str,
+    strategy_name: StrategyName,
     demo: bool,
     topics: HashSet<Topic>,
     resubscribe_interval: Duration,
@@ -50,7 +50,7 @@ fn subscribe_with_resubscribe_interval(
             .into(),
         base_url: format!("http://{provider_address}"),
         request: SubscriptionRequest {
-            strategy_name: strategy_name.to_owned(),
+            strategy_name,
             demo,
             topics,
         },
@@ -274,7 +274,7 @@ mod tests {
 
         let subscriptions = subscribe_with_resubscribe_interval(
             address,
-            STRATEGY_NAME,
+            STRATEGY_NAME.to_owned(),
             true,
             HashSet::from([topic()]),
             TEST_RESUBSCRIBE_INTERVAL,
@@ -313,8 +313,13 @@ mod tests {
             answer(&listener, &Err("unmapped instrument".to_owned()), &requests);
         });
 
-        let error = subscribe(address, STRATEGY_NAME, false, HashSet::from([topic()]))
-            .expect_err("rejected subscription is expected to fail");
+        let error = subscribe(
+            address,
+            STRATEGY_NAME.to_owned(),
+            false,
+            HashSet::from([topic()]),
+        )
+        .expect_err("rejected subscription is expected to fail");
         assert!(error.to_string().contains("unmapped instrument"));
         provider
             .join()
