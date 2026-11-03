@@ -119,7 +119,7 @@ async fn unsubscribe(
 
 async fn subscribed(State(state): State<ServerState>) -> Json<SubscribedResponse> {
     Json(SubscribedResponse {
-        topics: state.coordinator.lock().await.statuses(),
+        topics: state.coordinator.lock().await.subscribed_topics(),
     })
 }
 

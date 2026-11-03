@@ -1,5 +1,6 @@
 //! Latency of the market data path, bottom up: codec, publish, reader fan-out, cross-thread delivery.
 //! Run with `cargo bench -p market_data_provider`.
+use std::collections::HashMap;
 use std::hint::{black_box, spin_loop};
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -15,15 +16,18 @@ use rust_decimal::dec;
 use tempfile::{TempDir, tempdir, tempdir_in};
 
 use layline::provider_api::Subscription;
-use layline::shared_memory::{MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter};
+use layline::shared_memory::{
+    MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter, SerializedMarketData,
+};
 use layline::time::get_current_timestamp_nanoseconds;
 use layline::types::{
-    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side, Topic,
-    Trade, UnderlyingType,
+    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side,
+    StrategyName, Topic, Trade, UnderlyingType,
 };
 
 const SHARED_MEMORY_DIRECTORY: &str = "/dev/shm";
 const FAN_OUT_TOPIC_COUNTS: [usize; 3] = [1, 8, 64];
+const STRATEGY_NAME: &str = "bench_strategy";
 
 // Mirrors the reader's buffer: rkyv requires aligned input.
 #[repr(C, align(16))]
@@ -68,14 +72,16 @@ fn topics(count: usize) -> Vec<Topic> {
 }
 
 fn subscription(directory: &TempDir, topic: Topic) -> Subscription {
+    let strategy_name = StrategyName::from(STRATEGY_NAME);
     Subscription {
         topic,
-        path: topic.file_path(directory.path()),
+        path: topic.file_path(directory.path(), &strategy_name),
     }
 }
 
-fn writer(subscription: &Subscription) -> MarketDataWriter {
-    MarketDataWriter::open(&subscription.path, subscription.topic.market_data_type)
+fn writer(directory: &TempDir, topic: Topic) -> MarketDataWriter {
+    let strategy_name = StrategyName::from(STRATEGY_NAME);
+    MarketDataWriter::open(directory.path(), &strategy_name, topic.ring_key())
         .expect("writer open is expected to not fail")
 }
 
@@ -123,10 +129,11 @@ fn market_data(topic: Topic, sequence: usize) -> MarketData {
     }
 }
 
+/// Serializes, then writes into the ring, as the exchange worker does for each message.
 fn publish(writer: &MarketDataWriter, data: &MarketData) {
-    writer
-        .publish(data)
-        .expect("publish is expected to not fail");
+    let serialized =
+        SerializedMarketData::new(data).expect("serialization is expected to not fail");
+    writer.publish(&serialized);
 }
 
 fn write_time(data: &MarketData) -> NonZeroU64 {
@@ -183,7 +190,7 @@ fn publish_to_ring(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("publish");
     let directory = ring_directory();
     for topic in bbo_and_trade_topics() {
-        let writer = writer(&subscription(&directory, topic));
+        let writer = writer(&directory, topic);
         let data = market_data(topic, 1);
         group.bench_function(topic.market_data_type.to_string(), |bencher| {
             bencher.iter(|| publish(&writer, black_box(&data)));
@@ -193,6 +200,7 @@ fn publish_to_ring(criterion: &mut Criterion) {
 }
 
 /// `idle` is the pure sweep over rings without data; `one_active` adds one message on the first topic.
+/// Topics share rings per (exchange, underlying type, market data type): 64 topics span 4 rings.
 fn poll_fan_out(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("poll_fan_out");
     for topic_count in FAN_OUT_TOPIC_COUNTS {
@@ -201,9 +209,16 @@ fn poll_fan_out(criterion: &mut Criterion) {
             .into_iter()
             .map(|topic| subscription(&directory, topic))
             .collect();
-        let writers: Vec<MarketDataWriter> = subscriptions.iter().map(writer).collect();
+        let mut writers = HashMap::new();
+        for subscription in &subscriptions {
+            writers
+                .entry(subscription.topic.ring_key())
+                .or_insert_with(|| writer(&directory, subscription.topic));
+        }
+        let first_topic = subscriptions[0].topic;
+        let first_writer = &writers[&first_topic.ring_key()];
         let reader = reader(&subscriptions);
-        let data = market_data(subscriptions[0].topic, 1);
+        let data = market_data(first_topic, 1);
 
         group.bench_with_input(
             BenchmarkId::new("idle", topic_count),
@@ -223,7 +238,7 @@ fn poll_fan_out(criterion: &mut Criterion) {
             &reader,
             |bencher, reader| {
                 bencher.iter(|| {
-                    publish(&writers[0], &data);
+                    publish(first_writer, &data);
                     reader
                         .poll(|data, received_at_nanoseconds| {
                             black_box((data, received_at_nanoseconds));
@@ -243,7 +258,7 @@ fn cross_thread_latency(criterion: &mut Criterion) {
     let directory = ring_directory();
     for topic in bbo_and_trade_topics() {
         let subscription = subscription(&directory, topic);
-        let writer = writer(&subscription);
+        let writer = writer(&directory, topic);
         group.bench_function(topic.market_data_type.to_string(), |bencher| {
             bencher.iter_custom(|iterations| deliver(&writer, &subscription, iterations));
         });

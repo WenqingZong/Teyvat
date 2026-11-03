@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::format_topics;
 use super::registry::SubscriptionRegistry;
 use crate::exchanges::ExchangeRouter;
-use layline::provider_api::{SubscriptionResult, TopicStatus, group_by_reason};
-use layline::types::Topic;
+use layline::provider_api::{SubscriptionResult, group_by_reason};
+use layline::types::{StrategyName, Topic};
 
 /// Owns all subscription state; the server serialises calls through one lock.
 pub(crate) struct Coordinator {
@@ -27,7 +27,7 @@ impl Coordinator {
 
     pub(crate) async fn subscribe(
         &mut self,
-        strategy_name: &str,
+        strategy_name: &StrategyName,
         topics: &HashSet<Topic>,
         now: Instant,
     ) -> HashMap<Topic, SubscriptionResult> {
@@ -39,7 +39,7 @@ impl Coordinator {
     /// Makes `topics` the strategy's whole set, releasing whatever else it held. Silent unless the set changed.
     pub(crate) async fn resubscribe(
         &mut self,
-        strategy_name: &str,
+        strategy_name: &StrategyName,
         topics: &HashSet<Topic>,
         now: Instant,
     ) -> HashMap<Topic, SubscriptionResult> {
@@ -56,34 +56,33 @@ impl Coordinator {
 
     pub(crate) async fn unsubscribe(
         &mut self,
-        strategy_name: &str,
+        strategy_name: &StrategyName,
         topics: &HashSet<Topic>,
         now: Instant,
     ) {
         self.registry
             .renew_lease(strategy_name, now + self.lease_duration);
-        let orphaned = self.registry.remove_holder(strategy_name, topics);
-        self.release(orphaned).await;
+        self.release(strategy_name, topics).await;
     }
 
     pub(crate) async fn expire_leases(&mut self, now: Instant) {
-        let orphaned = self.registry.expire_leases(now);
-        self.release(orphaned).await;
+        for (strategy_name, topics) in self.registry.expire_leases(now) {
+            self.release(&strategy_name, &topics).await;
+        }
     }
 
     pub(crate) fn lease_duration(&self) -> Duration {
         self.lease_duration
     }
 
-    pub(crate) fn statuses(&self) -> HashMap<Topic, TopicStatus> {
-        self.registry.statuses(self.router.root_directory())
+    pub(crate) fn subscribed_topics(&self) -> HashSet<Topic> {
+        self.registry.subscribed_topics()
     }
 
-    /// Moves the strategy's held set to `target`, activating and releasing topics as needed.
-    /// Returns the ring path, or why each requested topic was refused.
+    /// Moves the strategy's held set to `target`. Returns the ring path, or why each requested topic was refused.
     async fn apply(
         &mut self,
-        strategy_name: &str,
+        strategy_name: &StrategyName,
         target: &HashSet<Topic>,
         requested: &HashSet<Topic>,
         now: Instant,
@@ -92,59 +91,50 @@ impl Coordinator {
             .renew_lease(strategy_name, now + self.lease_duration);
         let change = TopicSetChange::between(&self.registry.held_by(strategy_name), target);
 
-        let mut failures: HashMap<Topic, String> = HashMap::new();
-        let mut to_activate: HashSet<Topic> = HashSet::new();
-        for topic in &change.added {
-            if self.registry.is_active(topic) && self.router.is_running(topic.instrument.exchange) {
-                self.registry.add_holder(topic, strategy_name);
-            } else {
-                to_activate.insert(*topic);
-            }
-        }
-        for topic in target {
-            if self.registry.is_active(topic) && !self.router.is_running(topic.instrument.exchange)
-            {
-                to_activate.insert(*topic);
-            }
-        }
+        // A stopped worker took the strategy's rings with it, so its held topics are subscribed again.
+        let to_subscribe: HashSet<Topic> = target
+            .iter()
+            .filter(|topic| {
+                change.added.contains(topic) || !self.router.is_running(topic.instrument.exchange)
+            })
+            .copied()
+            .collect();
+        let failures = self.router.subscribe(strategy_name, &to_subscribe).await;
+        let subscribed: HashSet<Topic> = to_subscribe
+            .into_iter()
+            .filter(|topic| !failures.contains_key(topic))
+            .collect();
+        self.registry.add(strategy_name, &subscribed);
+        self.release(strategy_name, &change.dropped).await;
 
-        if !to_activate.is_empty() {
-            failures.extend(self.router.subscribe(&to_activate).await);
-            for topic in &to_activate {
-                if !failures.contains_key(topic) {
-                    self.registry.add_holder(topic, strategy_name);
-                }
-            }
-        }
-
-        let orphaned = self.registry.remove_holder(strategy_name, &change.dropped);
-        self.release(orphaned).await;
         for (reason, topics) in group_by_reason(&failures) {
             warn!(
                 "{strategy_name} was refused {}: {reason}",
                 format_topics(&topics)
             );
         }
+        let root_directory = self.router.root_directory();
         requested
             .iter()
             .map(|topic| {
                 let subscription_result = match failures.get(topic) {
                     Some(reason) => Err(reason.clone()),
-                    None => Ok(topic.file_path(self.router.root_directory())),
+                    None => Ok(topic.file_path(root_directory, strategy_name)),
                 };
                 (*topic, subscription_result)
             })
             .collect()
     }
 
-    /// Unsubscribes topics that no strategy holds any more.
-    async fn release(&mut self, orphaned: HashSet<Topic>) {
-        let failures = self.router.unsubscribe(&orphaned).await;
-        for topic in &orphaned {
-            match failures.get(topic) {
-                Some(reason) => warn!("failed to unsubscribe {topic}: {reason}"),
-                None => info!("released {topic}, no strategy holds it"),
-            }
+    /// Stops delivering `topics` to the strategy; the exchange stops sending those no strategy holds any more.
+    async fn release(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
+        self.registry.remove(strategy_name, topics);
+        let failures = self.router.unsubscribe(strategy_name, topics).await;
+        for (reason, topics) in group_by_reason(&failures) {
+            warn!(
+                "failed to release {} of {strategy_name}: {reason}",
+                format_topics(&topics)
+            );
         }
     }
 }
@@ -172,11 +162,12 @@ impl TopicSetChange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layline::testing::{test_instrument, test_topic};
     use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
 
     fn topic(exchange: Exchange, market_data_type: MarketDataType) -> Topic {
-        layline::testing::topic(
-            layline::testing::instrument(
+        test_topic(
+            test_instrument(
                 exchange,
                 Currency::Btc,
                 Currency::Usdt,

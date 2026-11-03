@@ -1,7 +1,7 @@
-//! Layout of one topic's ring file; offsets are for x86_64 and aarch64, where bcast pads header fields to 128 bytes.
+//! Layout of one strategy's ring file; offsets are for x86_64 and aarch64, where bcast pads header fields to 128 bytes.
 //!
 //! ```text
-//! offset 0            128          256                                 1280                      1280 + 64 KiB
+//! offset 0            128          256                                 1280                      1280 + 8 MiB
 //!        +------------+------------+-----------------------------------+-------------------------+
 //!        | producer   | ready flag | metadata, 1024 B                  | data: RING_CAPACITY     |
 //!        | position   | (writer    |                                   | bytes of frames         |
@@ -29,11 +29,14 @@
 //! ```
 use std::ops::Range;
 
+use anyhow::{Result, anyhow, ensure};
 use bcast::{HEADER_SIZE, METADATA_BUFFER_SIZE};
 
 use crate::types::MarketDataType;
 
-pub(super) const RING_CAPACITY: usize = 1 << 16;
+// 8 MiB: at the peak rates measured on Binance's busiest pairs, a ring buffers seconds of a stalled
+// reader instead of a tenth of one. tmpfs allocates pages on first touch, so idle rings cost little.
+pub(super) const RING_CAPACITY: usize = 1 << 23;
 
 // Must never change while strategies run: they keep their old mapping and would break.
 pub(super) const RING_FILE_LENGTH: u64 = (HEADER_SIZE + RING_CAPACITY) as u64;
@@ -53,17 +56,21 @@ pub(super) fn write_metadata(metadata: &mut [u8], market_data_type: MarketDataTy
     metadata[METADATA_MARKET_DATA_TYPE_INDEX] = market_data_type as u8;
 }
 
-/// Returns `None` unless the metadata was written by this format version.
-pub(super) fn read_metadata(metadata: &[u8]) -> Option<MarketDataType> {
-    if metadata[METADATA_MAGIC_RANGE] != METADATA_MAGIC
-        || metadata[METADATA_VERSION_RANGE] != FORMAT_VERSION.to_le_bytes()
-    {
-        return None;
-    }
+/// Reads the market data type a ring holds from its metadata; fails unless this format version wrote it.
+pub(super) fn read_market_data_type(metadata: &[u8]) -> Result<MarketDataType> {
+    ensure!(
+        metadata[METADATA_MAGIC_RANGE] == METADATA_MAGIC,
+        "metadata lacks the ring magic"
+    );
+    ensure!(
+        metadata[METADATA_VERSION_RANGE] == FORMAT_VERSION.to_le_bytes(),
+        "metadata is not format version {FORMAT_VERSION}"
+    );
     let code = metadata[METADATA_MARKET_DATA_TYPE_INDEX];
     [MarketDataType::Bbo, MarketDataType::Trade]
         .into_iter()
         .find(|market_data_type| *market_data_type as u8 == code)
+        .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
 }
 
 #[cfg(test)]
@@ -75,23 +82,26 @@ mod tests {
         for market_data_type in [MarketDataType::Bbo, MarketDataType::Trade] {
             let mut metadata = [0; METADATA_BUFFER_SIZE];
             write_metadata(&mut metadata, market_data_type);
-            assert_eq!(Some(market_data_type), read_metadata(&metadata));
+            assert_eq!(
+                market_data_type,
+                read_market_data_type(&metadata).expect("written metadata is expected to be read")
+            );
         }
     }
 
     #[test]
     fn foreign_or_corrupt_metadata_is_refused() {
         let blank = [0; METADATA_BUFFER_SIZE];
-        assert_eq!(None, read_metadata(&blank));
+        assert!(read_market_data_type(&blank).is_err());
 
         let mut wrong_version = [0; METADATA_BUFFER_SIZE];
         write_metadata(&mut wrong_version, MarketDataType::Bbo);
         wrong_version[METADATA_VERSION_RANGE].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
-        assert_eq!(None, read_metadata(&wrong_version));
+        assert!(read_market_data_type(&wrong_version).is_err());
 
         let mut unknown_data_type = [0; METADATA_BUFFER_SIZE];
         write_metadata(&mut unknown_data_type, MarketDataType::Bbo);
         unknown_data_type[METADATA_MARKET_DATA_TYPE_INDEX] = u8::MAX;
-        assert_eq!(None, read_metadata(&unknown_data_type));
+        assert!(read_market_data_type(&unknown_data_type).is_err());
     }
 }

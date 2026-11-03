@@ -47,7 +47,7 @@ fn main() -> ExitCode {
 fn run(demo: bool, report_interval: Duration) -> Result<()> {
     let subscriptions = subscribe(
         DEFAULT_PROVIDER_ADDRESS,
-        STRATEGY_NAME,
+        STRATEGY_NAME.to_owned(),
         demo,
         bench_topics(),
     )?;

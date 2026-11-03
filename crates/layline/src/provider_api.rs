@@ -3,9 +3,9 @@
 //! ```text
 //! POST /subscribe   {"strategy_name": "dummy_strategy", "demo": false,
 //!                    "topics": {"Binance": {"BTC-USDT-SPOT": ["BBO", "TRADE"]}, "OKX": {"BTC-USDT-PERP": ["BBO"]}}}
-//! 200 OK            {"results": {"Binance": {"BTC-USDT-SPOT": {"BBO": {"Ok": "/dev/shm/market_data_provider/Binance/BTC-USDT-SPOT/BBO.dat"},
+//! 200 OK            {"results": {"Binance": {"BTC-USDT-SPOT": {"BBO": {"Ok": "/dev/shm/market_data_provider/dummy_strategy/Binance/SPOT/BBO.dat"},
 //!                                                          "TRADE": {"Err": "reason"}}}}}
-//! GET /subscribed   {"topics": {"Binance": {"BTC-USDT-SPOT": {"BBO": {"path": "...", "strategy_names": ["dummy_strategy"]}}}}}
+//! GET /subscribed   {"topics": {"Binance": {"BTC-USDT-SPOT": ["BBO"]}}}
 //! GET /connected_apis {"Binance": [{"description": "...", "api": "wss://...", "doc": "https://..."}], "OKX": []}
 //! ```
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
-use crate::types::{Exchange, Instrument, MarketDataType, Topic};
+use crate::types::{Exchange, Instrument, MarketDataType, StrategyName, Topic};
 
 pub const DEFAULT_PROVIDER_ADDRESS: SocketAddr =
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6666));
@@ -33,7 +33,7 @@ pub const CONNECTED_APIS_PATH: &str = "/connected_apis";
 /// Body of `/subscribe`, `/resubscribe` and `/unsubscribe`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SubscriptionRequest {
-    pub strategy_name: String,
+    pub strategy_name: StrategyName,
     /// The venues' demo-trading data instead of live; each exchange serves one environment at a time.
     pub demo: bool,
     #[serde(with = "topic_set")]
@@ -63,17 +63,11 @@ pub fn group_by_reason(refusals: &HashMap<Topic, String>) -> BTreeMap<&str, Vec<
     groups
 }
 
-/// Body of `/subscribed`.
+/// Body of `/subscribed`: every topic the provider currently publishes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SubscribedResponse {
-    #[serde(with = "topic_map")]
-    pub topics: HashMap<Topic, TopicStatus>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct TopicStatus {
-    pub path: PathBuf,
-    pub strategy_names: BTreeSet<String>,
+    #[serde(with = "topic_set")]
+    pub topics: HashSet<Topic>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -214,6 +208,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::testing::{test_instrument, test_topic};
     use crate::types::{Currency, MarketDataType, UnderlyingType};
 
     fn topic(
@@ -221,8 +216,8 @@ mod tests {
         underlying_type: UnderlyingType,
         market_data_type: MarketDataType,
     ) -> Topic {
-        crate::testing::topic(
-            crate::testing::instrument(exchange, Currency::Btc, Currency::Usdt, underlying_type),
+        test_topic(
+            test_instrument(exchange, Currency::Btc, Currency::Usdt, underlying_type),
             market_data_type,
         )
     }
@@ -325,24 +320,13 @@ mod tests {
     #[test]
     fn subscribed_response_round_trips() {
         let response = SubscribedResponse {
-            topics: HashMap::from([(
-                topic(
-                    Exchange::Okx,
-                    UnderlyingType::Perpetual,
-                    MarketDataType::Trade,
-                ),
-                TopicStatus {
-                    path: PathBuf::from("/dev/shm/b.dat"),
-                    strategy_names: BTreeSet::from(["first".to_owned(), "second".to_owned()]),
-                },
+            topics: HashSet::from([topic(
+                Exchange::Okx,
+                UnderlyingType::Perpetual,
+                MarketDataType::Trade,
             )]),
         };
-        let expected = json!({
-            "topics": {"OKX": {"BTC-USDT-PERP": {"TRADE": {
-                "path": "/dev/shm/b.dat",
-                "strategy_names": ["first", "second"],
-            }}}},
-        });
+        let expected = json!({"topics": {"OKX": {"BTC-USDT-PERP": ["TRADE"]}}});
         assert_eq!(expected, to_json(&response));
         let decoded: SubscribedResponse =
             serde_json::from_value(expected).expect("deserialization is expected to not fail");

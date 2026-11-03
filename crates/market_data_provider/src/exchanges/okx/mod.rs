@@ -52,10 +52,11 @@ impl ExchangeConnector for OkxConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use layline::testing::test_instrument;
     use layline::types::{Currency, Instrument, MarketDataType, UnderlyingType};
 
     fn instrument(underlying_type: UnderlyingType) -> Instrument {
-        layline::testing::instrument(
+        test_instrument(
             Exchange::Okx,
             Currency::Btc,
             Currency::Usdt,
