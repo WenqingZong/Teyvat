@@ -5,7 +5,9 @@ use std::io::Error as IoError;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
+use serde::de::DeserializeOwned;
+use toml::de::Error as TomlError;
 
 /// Any of these bits set means group or others can access the file; secrets must be chmod 600.
 const GROUP_AND_OTHERS_PERMISSION_BITS: u32 = 0o077;
@@ -16,6 +18,8 @@ pub enum SecretFileError {
     Read { path: PathBuf, source: IoError },
     #[error("{0} must not be readable by group or others (chmod 600)")]
     InsecurePermissions(PathBuf),
+    #[error("invalid {}: {description}", path.display())]
+    InvalidToml { path: PathBuf, description: String },
 }
 
 /// Refuses a file that group or others can access.
@@ -33,34 +37,69 @@ pub fn read_secret_file(path: &Path) -> Result<SecretString, SecretFileError> {
     ))
 }
 
+/// Reads a chmod 600 TOML file into `Config`. A parse error never quotes the file, whose lines
+/// may hold secrets.
+pub fn read_secret_toml<Config: DeserializeOwned>(path: &Path) -> Result<Config, SecretFileError> {
+    let toml_content = read_secret_file(path)?;
+    toml::from_str(toml_content.expose_secret()).map_err(|error| SecretFileError::InvalidToml {
+        path: path.to_owned(),
+        description: describe_without_source(error, toml_content.expose_secret()),
+    })
+}
+
+/// toml's message, the key path and the line number, but not the offending line itself.
+fn describe_without_source(mut error: TomlError, toml_str: &str) -> String {
+    // Without its input, toml leaves out the quoted line and names the key path instead.
+    error.set_input(None);
+    let message = error.to_string().trim_end().replace('\n', " ");
+    match error.span() {
+        Some(span) => format!("line {}: {message}", line_number(toml_str, span.start)),
+        None => message,
+    }
+}
+
+/// 1-based line of `byte_offset` in `text`.
+fn line_number(text: &str, byte_offset: usize) -> usize {
+    text.bytes()
+        .take(byte_offset)
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
 #[cfg(test)]
 mod tests {
-    use std::fs::{Permissions, set_permissions, write};
+    use std::fs::{Permissions, set_permissions};
 
-    use secrecy::ExposeSecret;
+    use serde::Deserialize;
     use tempfile::tempdir;
 
     use super::*;
+    use crate::testing::write_secret_file;
 
-    const OWNER_ONLY_MODE: u32 = 0o600;
     const GROUP_READABLE_MODE: u32 = 0o640;
+    const SECRET_VALUE: &str = "needle";
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Credentials {
+        secret: SecretString,
+    }
 
     #[test]
     fn reads_owner_only_file() {
         let directory = tempdir().expect("temp dir is created");
         let path = directory.path().join("secret.txt");
-        write(&path, "needle").expect("secret file is written");
-        set_permissions(&path, Permissions::from_mode(OWNER_ONLY_MODE))
-            .expect("permissions are set");
+        write_secret_file(&path, SECRET_VALUE);
         let secret = read_secret_file(&path).expect("owner-only file is read");
-        assert_eq!("needle", secret.expose_secret());
+        assert_eq!(SECRET_VALUE, secret.expose_secret());
     }
 
     #[test]
     fn refuses_file_others_can_read() {
         let directory = tempdir().expect("temp dir is created");
         let path = directory.path().join("secret.txt");
-        write(&path, "needle").expect("secret file is written");
+        write_secret_file(&path, SECRET_VALUE);
         set_permissions(&path, Permissions::from_mode(GROUP_READABLE_MODE))
             .expect("permissions are set");
         assert!(matches!(
@@ -76,5 +115,36 @@ mod tests {
             read_secret_file(&directory.path().join("missing.txt")),
             Err(SecretFileError::Read { .. })
         ));
+    }
+
+    #[test]
+    fn reads_owner_only_toml() {
+        let directory = tempdir().expect("temp dir is created");
+        let path = directory.path().join("config.toml");
+        write_secret_file(&path, &format!("secret = \"{SECRET_VALUE}\"\n"));
+        let credentials: Credentials = read_secret_toml(&path).expect("the fields match");
+        assert_eq!(SECRET_VALUE, credentials.secret.expose_secret());
+    }
+
+    #[test]
+    fn invalid_toml_names_line_and_field_but_never_quotes_the_file() {
+        let directory = tempdir().expect("temp dir is created");
+        let path = directory.path().join("config.toml");
+        write_secret_file(
+            &path,
+            &format!("secret = \"{SECRET_VALUE}\"\nmisspelled_secret = \"{SECRET_VALUE}\"\n"),
+        );
+        let error = read_secret_toml::<Credentials>(&path)
+            .expect_err("an unknown field is expected to be refused");
+        let message = error.to_string();
+        assert!(message.contains("line 2"), "{message}");
+        assert!(message.contains("misspelled_secret"), "{message}");
+        assert!(!message.contains(SECRET_VALUE), "{message}");
+    }
+
+    #[test]
+    fn line_numbers_count_from_one() {
+        assert_eq!(1, line_number("first\nsecond", 0));
+        assert_eq!(2, line_number("first\nsecond", "first\n".len()));
     }
 }

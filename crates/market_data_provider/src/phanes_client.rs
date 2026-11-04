@@ -140,7 +140,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fmt::Debug;
-    use std::fs::{Permissions, set_permissions, write};
+    use std::fs::{Permissions, set_permissions};
     use std::num::NonZeroU64;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
@@ -154,10 +154,9 @@ pub(crate) mod tests {
     use layline::api_keys::{BinanceApiKey, BinanceSbeApiKey};
     use layline::gnosis::Responder;
     use layline::noise::encode_key;
-    use layline::testing::test_keypair;
+    use layline::testing::{test_keypair, write_secret_file};
 
     const PHANES_URL: &str = "https://phanes.example";
-    const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;
     /// The live SBE key, granted.
     const GRANTED_KEY_ID: ApiKeyId = ApiKeyId::BinanceSbeReal;
@@ -415,10 +414,7 @@ pub(crate) mod tests {
     fn config_with_key_file(directory: &Path, gnosis_public_key: &str) -> PhanesClientConfig {
         let key_file = directory.join("gnosis.key");
         let (private_key, _) = test_keypair();
-        write(&key_file, encode_key(private_key.expose_secret()))
-            .expect("writing the key file is expected to not fail");
-        set_permissions(&key_file, Permissions::from_mode(OWNER_ONLY_MODE))
-            .expect("setting permissions is expected to not fail");
+        write_secret_file(&key_file, &encode_key(private_key.expose_secret()));
         toml::from_str(&format!(
             "url = \"{PHANES_URL}\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{gnosis_public_key}\"",
             key_file.display()

@@ -867,7 +867,9 @@ dependencies = [
  "anyhow",
  "layline",
  "rust_decimal",
+ "serde",
  "serde_json",
+ "tempfile",
  "tracing",
  "ureq",
 ]

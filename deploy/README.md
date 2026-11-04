@@ -8,6 +8,7 @@
 |---|---|
 | `phanes/` | Phanes 的部署脚本 `phanes.sh`、systemd unit `phanes.service`、配置模板 `phanes.example.toml`（RedmiBook） |
 | `market_data_provider/` | 行情服务的部署脚本 `market_data_provider.sh`、systemd unit `market_data_provider.service`、配置模板 `market_data_provider.example.toml`（Osaka） |
+| `dummy_strategy/` | 占位策略的部署脚本 `dummy_strategy.sh`、systemd unit `dummy_strategy.service`、配置模板 `strategy.example.toml`（Osaka，和行情服务同机） |
 | `clickhouse/` | RedmiBook 上 ClickHouse 的手动安装记录 [`clickhouse.md`](clickhouse/clickhouse.md)（尚未接入代码，见 [`plan/database.md`](../plan/database.md)） |
 
 所有命令都在 **Teyvat 仓库根目录**执行。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），
@@ -209,3 +210,31 @@ deploy/market_data_provider/market_data_provider.sh install
 
 安装时会为该用户开启 linger：否则 systemd-logind 会在该用户最后一个 SSH 会话结束时删掉其 `/dev/shm` 下的 ring 文件，
 而策略还在读它们。
+
+## 占位策略 dummy_strategy（Osaka）
+
+和行情服务在同一台机器、以**同一个用户**部署（它要读行情服务在 `/dev/shm` 里创建的 ring）。在 Teyvat 仓库根目录执行：
+
+```bash
+deploy/dummy_strategy/dummy_strategy.sh install
+```
+
+脚本会编译 release 二进制、安装 systemd unit，并把 `deploy/dummy_strategy/strategy.example.toml` 复制为
+`/etc/dummy_strategy/strategy.toml`（600，已有则保留），然后重启服务，并在几秒后确认它仍在运行。配置无效时进程会退出，日志里有原因。
+
+`strategy.toml` 是所有策略共用的格式：
+
+- `strategy_name`：策略名，也是它在 `/dev/shm/market_data_provider/` 下的 ring 目录名；
+- `provider_address`：行情服务的 HTTP 地址，即 `127.0.0.1:<market_data_provider.toml 的 port>`；
+- `demo`：`true` 表示在交易所的模拟盘交易（行情也来自模拟盘），`false` 为实盘；必须与行情服务配置的 `demo` 一致，否则每个订阅请求都被拒绝（400）；
+- `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`["BBO", "TRADE"]`），与行情服务 HTTP API 的写法相同。
+
+报告间隔是 dummy_strategy 自己的参数，不在 `strategy.toml` 里，写在 unit 的 `ExecStart`（`--report-interval-seconds 60`）。
+
+| 场景 | 命令 |
+|---|---|
+| 代码更新后重新部署 | `git pull && deploy/dummy_strategy/dummy_strategy.sh install`（保留配置） |
+| 修改订阅 | 编辑 `/etc/dummy_strategy/strategy.toml`，`sudo systemctl restart dummy_strategy` |
+| 看延迟报告 | `journalctl --namespace=dummy_strategy -u dummy_strategy -f` |
+| 彻底删除 | `deploy/dummy_strategy/dummy_strategy.sh uninstall`（ring 文件属于行情服务，保留） |
+| 从零重装 | `deploy/dummy_strategy/dummy_strategy.sh reinstall`（配置恢复为模板） |

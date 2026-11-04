@@ -4,15 +4,14 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::DEFAULT_ROOT_DIRECTORY;
 use crate::phanes_client::{PhanesClient, PhanesClientConfig};
 use layline::bark::{BarkConfig, Notifier};
 use layline::build::RELEASE_BUILD;
-use layline::secrets::read_secret_file;
+use layline::secrets::read_secret_toml;
 
 const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(30);
 #[derive(Debug, Deserialize)]
@@ -42,9 +41,7 @@ impl ProviderConfig {
     /// Checks everything up front, so a bad key or a release build without `[bark]` refuses to start.
     /// The file must be chmod 600, since it holds the Bark credentials.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = read_secret_file(path)?;
-        let config: ConfigFile = toml::from_str(text.expose_secret())
-            .with_context(|| format!("invalid config {}", path.display()))?;
+        let config: ConfigFile = read_secret_toml(path)?;
         Ok(Self {
             root_directory: PathBuf::from(DEFAULT_ROOT_DIRECTORY),
             listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, config.port)),
@@ -58,14 +55,14 @@ impl ProviderConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{Permissions, set_permissions, write};
+    use std::fs::{Permissions, set_permissions};
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::{TempDir, tempdir};
 
     use super::*;
+    use layline::testing::write_secret_file;
 
-    const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;
     /// Any 32 bytes, base64-encoded, make a valid X25519 key for parsing.
     const DUMMY_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
@@ -88,9 +85,7 @@ mod tests {
 
         fn write_secret(&self, name: &str, contents: &str) -> PathBuf {
             let path = self.path(name);
-            write(&path, contents).expect("writing is expected to not fail");
-            set_permissions(&path, Permissions::from_mode(OWNER_ONLY_MODE))
-                .expect("setting permissions is expected to not fail");
+            write_secret_file(&path, contents);
             path
         }
 

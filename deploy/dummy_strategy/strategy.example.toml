@@ -1,0 +1,15 @@
+# The config every strategy reads: who it is, where the provider is, which environment, which topics.
+# Copied to /etc/dummy_strategy/strategy.toml (chmod 600, like every service config) by
+# `deploy/dummy_strategy/dummy_strategy.sh install`. For a local run, copy it anywhere, chmod 600 it
+# and start `dummy_strategy --config <file>`.
+strategy_name = "dummy_strategy"
+provider_address = "127.0.0.1:6666"                  # 127.0.0.1:<port> of market_data_provider.toml
+demo = true                                          # trade on the venues' demo accounts; must equal the provider's demo
+
+# Exchange, then instrument (BASE-QUOTE-SPOT or BASE-QUOTE-PERP), then market data types, as in the
+# provider's HTTP API.
+[topics.Binance]
+BTC-USDT-SPOT = ["BBO", "TRADE"]
+BTC-USDT-PERP = ["BBO", "TRADE"]
+ETH-USDT-SPOT = ["BBO", "TRADE"]
+ETH-USDT-PERP = ["BBO", "TRADE"]
