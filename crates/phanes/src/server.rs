@@ -81,7 +81,6 @@ async fn info() -> Json<Info> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr};
 
     use axum::body::Body;
@@ -91,16 +90,18 @@ mod tests {
 
     use super::*;
     use crate::celestia::proto::CELESTIA_PATH;
-    use crate::client_filter::{CLIENT_IP_HEADER, ClientsByIp};
-    use crate::clients::{ClientName, ClientsByPublicKey};
+    use crate::client_filter::CLIENT_IP_HEADER;
+    use crate::clients::tests::test_client;
+    use crate::clients::{ClientName, Clients};
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
+    use crate::gnosis::config::Gnoses;
     use crate::notify::Notification;
     use layline::gnosis::GNOSIS_PATH;
     use layline::testing::test_keypair;
 
     /// Arbitrary documentation addresses (RFC 5737) with no business meaning.
-    const OSAKA_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    const TOKYO_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const TOKYO_IPV4: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
 
     fn phanes_router(
@@ -111,16 +112,13 @@ mod tests {
         let (celestia_private_key, _) = test_keypair();
         let gnosis_state = GnosisState::new(
             gnosis_private_key,
-            ClientsByPublicKey::default(),
-            HashMap::new(),
+            Arc::default(),
+            Gnoses::default(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             notifications.clone(),
         );
-        let celestia_state = CelestiaState::new(
-            celestia_private_key,
-            ClientsByPublicKey::default(),
-            notifications,
-        );
+        let celestia_state =
+            CelestiaState::new(celestia_private_key, Arc::default(), notifications);
         router(
             Arc::new(gnosis_state),
             Arc::new(celestia_state),
@@ -129,11 +127,11 @@ mod tests {
     }
 
     fn client_filter(notifications: &UnboundedSender<Notification>) -> Arc<ClientFilter> {
-        let clients: ClientsByIp = [(OSAKA_IP, "Osaka"), (TOKYO_IP, "Tokyo")]
-            .into_iter()
-            .map(|(address, name)| (address, ClientName::from(name)))
-            .collect();
-        Arc::new(ClientFilter::new(clients, notifications.clone()))
+        let clients = Clients::from([
+            (ClientName::from("Osaka"), test_client(OSAKA_IPV4)),
+            (ClientName::from("Tokyo"), test_client(TOKYO_IPV4)),
+        ]);
+        Arc::new(ClientFilter::new(Arc::new(clients), notifications.clone()))
     }
 
     async fn status(router: &Router, request: HttpRequest<Body>) -> StatusCode {
@@ -179,7 +177,7 @@ mod tests {
         let (notifications, mut receiver) = unbounded_channel();
         let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
         // Past the filter, GET /gnosis is 405 and a plain GET /celestia is not 404.
-        for client_ip in [OSAKA_IP, TOKYO_IP] {
+        for client_ip in [IpAddr::V4(OSAKA_IPV4), IpAddr::V4(TOKYO_IPV4)] {
             assert_eq!(
                 status(&router, get(GNOSIS_PATH, Some(client_ip))).await,
                 StatusCode::METHOD_NOT_ALLOWED

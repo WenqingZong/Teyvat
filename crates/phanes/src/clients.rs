@@ -1,13 +1,63 @@
-//! Who is calling: every service knows its clients by the public key each signs its handshakes
-//! with. In release builds the IP filter also names the client `CF-Connecting-IP` belongs to, and
-//! both must be the same client.
+//! The clients of phanes.toml and who is calling: every service knows a client by the public key
+//! it signs that service's handshakes with. In release builds the IP filter also names the client
+//! `CF-Connecting-IP` belongs to, and both must be the same client. `PhanesConfig::load` has
+//! checked that no address and no public key belongs to two clients.
 
-use secrecy::{ExposeSecret, SecretBox};
+use std::collections::BTreeMap;
+use std::iter::once;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use layline::noise::StaticKey;
+use secrecy::{ExposeSecret, SecretBox, SecretString};
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer};
+
+use crate::service::Service;
+use layline::gnosis::GnosisId;
+use layline::noise::{StaticKey, decode_key};
 
 /// A `[clients.<name>]` table of phanes.toml.
 pub type ClientName = String;
+
+/// Every `[clients.<name>]` table, shared by the IP filter and every service.
+pub type Clients = BTreeMap<ClientName, ClientConfig>;
+
+/// A `[clients.<name>]` table: where the client calls from, the public key it uses for each
+/// service, and the gnoses it may fetch.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientConfig {
+    /// The addresses Cloudflare reports in `CF-Connecting-IP`.
+    pub ipv4: Ipv4Addr,
+    pub ipv6: Option<Ipv6Addr>,
+    #[serde(deserialize_with = "deserialize_public_key")]
+    pub client_gnosis_service_public_key: SecretBox<StaticKey>,
+    #[serde(deserialize_with = "deserialize_public_key")]
+    pub client_celestia_service_public_key: SecretBox<StaticKey>,
+    /// May be empty: such a client only uses Celestia.
+    pub allowed_gnosis_ids: Vec<GnosisId>,
+}
+
+impl ClientConfig {
+    pub fn addresses(&self) -> impl Iterator<Item = IpAddr> {
+        once(IpAddr::V4(self.ipv4)).chain(self.ipv6.map(IpAddr::V6))
+    }
+
+    pub fn public_key(&self, service: Service) -> &SecretBox<StaticKey> {
+        match service {
+            Service::Gnosis => &self.client_gnosis_service_public_key,
+            Service::Celestia => &self.client_celestia_service_public_key,
+        }
+    }
+}
+
+/// A base64 X25519 public key, refused when parsing if it does not decode.
+fn deserialize_public_key<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SecretBox<StaticKey>, D::Error> {
+    let encoded_public_key = SecretString::deserialize(deserializer)?;
+    decode_key(&encoded_public_key)
+        .map_err(|_| DeserializeError::custom("expected a base64 X25519 public key"))
+}
 
 #[derive(Debug, PartialEq, thiserror::Error)]
 pub enum IdentificationError {
@@ -23,96 +73,78 @@ pub enum IdentificationError {
     },
 }
 
-/// The clients of one service, with the public key each uses for it. A handful of clients, so a
-/// lookup just compares every key.
-#[derive(Debug, Default)]
-pub struct ClientsByPublicKey(Vec<(SecretBox<StaticKey>, ClientName)>);
-
-impl ClientsByPublicKey {
-    /// Adds a client. A service tells its clients apart by key, so a key another client already
-    /// holds is refused, with that client's name.
-    pub fn insert(
-        &mut self,
-        public_key: SecretBox<StaticKey>,
-        client_name: ClientName,
-    ) -> Result<(), ClientName> {
-        if let Some(holder_name) = self.holder_of(&public_key) {
-            return Err(holder_name.clone());
-        }
-        self.0.push((public_key, client_name));
-        Ok(())
-    }
-
-    /// The client that holds `public_key`. `ip_client_name_option` is the client the request's
-    /// address belongs to, `None` when no IP filter runs (debug builds).
-    pub fn identify(
-        &self,
-        public_key: &SecretBox<StaticKey>,
-        ip_client_name_option: Option<&ClientName>,
-    ) -> Result<ClientName, IdentificationError> {
-        let key_client_name = self
-            .holder_of(public_key)
-            .ok_or(IdentificationError::UnknownPublicKey)?;
-        match ip_client_name_option {
-            Some(ip_client_name) if ip_client_name != key_client_name => {
-                Err(IdentificationError::AddressOfAnotherClient {
-                    key_client_name: key_client_name.clone(),
-                    ip_client_name: ip_client_name.clone(),
-                })
-            }
-            _ => Ok(key_client_name.clone()),
-        }
-    }
-
-    fn holder_of(&self, public_key: &SecretBox<StaticKey>) -> Option<&ClientName> {
-        self.0
-            .iter()
-            .find(|(client_public_key, _)| {
-                client_public_key.expose_secret() == public_key.expose_secret()
+/// The client that signed with `public_key` for `service`. `ip_client_name_option` is the client
+/// the request's address belongs to, `None` when no IP filter runs (debug builds).
+pub fn identify<'a>(
+    clients: &'a Clients,
+    service: Service,
+    public_key: &SecretBox<StaticKey>,
+    ip_client_name_option: Option<&ClientName>,
+) -> Result<(&'a ClientName, &'a ClientConfig), IdentificationError> {
+    let (key_client_name, client) = clients
+        .iter()
+        .find(|(_, client)| {
+            client.public_key(service).expose_secret() == public_key.expose_secret()
+        })
+        .ok_or(IdentificationError::UnknownPublicKey)?;
+    match ip_client_name_option {
+        Some(ip_client_name) if ip_client_name != key_client_name => {
+            Err(IdentificationError::AddressOfAnotherClient {
+                key_client_name: key_client_name.clone(),
+                ip_client_name: ip_client_name.clone(),
             })
-            .map(|(_, client_name)| client_name)
+        }
+        _ => Ok((key_client_name, client)),
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use layline::noise::copy_key;
     use layline::testing::test_keypair;
 
     const OSAKA: &str = "Osaka";
     const TOKYO: &str = "Tokyo";
+    /// Arbitrary documentation address (RFC 5737) with no business meaning.
+    const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+
+    /// A client at `ipv4` with fresh public keys, allowed no gnosis; tests replace what they need.
+    pub(crate) fn test_client(ipv4: Ipv4Addr) -> ClientConfig {
+        ClientConfig {
+            ipv4,
+            ipv6: None,
+            client_gnosis_service_public_key: test_keypair().1,
+            client_celestia_service_public_key: test_keypair().1,
+            allowed_gnosis_ids: Vec::new(),
+        }
+    }
 
     #[test]
-    fn client_is_known_by_its_key_and_must_match_its_address() {
-        let (_, osaka_public_key) = test_keypair();
-        let (_, stranger_public_key) = test_keypair();
+    fn client_is_known_by_its_key_for_the_service_and_must_match_its_address() {
         let osaka = ClientName::from(OSAKA);
         let tokyo = ClientName::from(TOKYO);
-        let mut clients = ClientsByPublicKey::default();
-        clients
-            .insert(copy_key(&osaka_public_key), osaka.clone())
-            .expect("the first client has a fresh key");
-        assert_eq!(
-            Err(osaka.clone()),
-            clients.insert(copy_key(&osaka_public_key), tokyo.clone())
-        );
+        let clients = Clients::from([(osaka.clone(), test_client(OSAKA_IPV4))]);
+        let gnosis_public_key = clients[OSAKA].public_key(Service::Gnosis);
+        let identified_name = |service, ip_client_name_option| {
+            identify(&clients, service, gnosis_public_key, ip_client_name_option)
+                .map(|(client_name, _)| client_name.clone())
+        };
 
-        assert_eq!(Ok(osaka.clone()), clients.identify(&osaka_public_key, None));
+        assert_eq!(Ok(osaka.clone()), identified_name(Service::Gnosis, None));
         assert_eq!(
             Ok(osaka.clone()),
-            clients.identify(&osaka_public_key, Some(&osaka))
+            identified_name(Service::Gnosis, Some(&osaka))
         );
         assert_eq!(
             Err(IdentificationError::AddressOfAnotherClient {
                 key_client_name: osaka.clone(),
                 ip_client_name: tokyo.clone(),
             }),
-            clients.identify(&osaka_public_key, Some(&tokyo))
+            identified_name(Service::Gnosis, Some(&tokyo))
         );
         assert_eq!(
             Err(IdentificationError::UnknownPublicKey),
-            clients.identify(&stranger_public_key, Some(&osaka))
+            identified_name(Service::Celestia, None)
         );
     }
 }

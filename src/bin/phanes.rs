@@ -171,10 +171,6 @@ async fn supervise(config_path: &Path) -> ExitCode {
 async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<(), ServiceError> {
     let gnosis_private_key = config.load_gnosis_private_key()?;
     let celestia_private_key = config.load_celestia_private_key()?;
-    let clients_by_ip = config.clients_by_ip()?;
-    let gnosis_clients = config.gnosis_clients()?;
-    let celestia_clients = config.celestia_clients()?;
-    let allowed_gnoses = config.allowed_gnoses()?;
     // The IP filter trusts CF-Connecting-IP, which only cloudflared on this machine may set.
     if RELEASE_BUILD && !config.listen_address.ip().is_loopback() {
         return Err(ServiceError::ListenAddressNotLoopback(
@@ -192,20 +188,21 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
     let (notification_sender, notification_receiver) = unbounded_channel();
     spawn(notify::run_dispatcher(notifier, notification_receiver));
 
+    let clients = Arc::new(config.clients);
     let gnosis_state = GnosisState::new(
         gnosis_private_key,
-        gnosis_clients,
-        allowed_gnoses,
+        Arc::clone(&clients),
+        config.gnoses,
         config.max_clock_skew_seconds,
         notification_sender.clone(),
     );
     let celestia_state = CelestiaState::new(
         celestia_private_key,
-        celestia_clients,
+        Arc::clone(&clients),
         notification_sender.clone(),
     );
     let client_filter = Arc::new(ClientFilter::new(
-        clients_by_ip,
+        Arc::clone(&clients),
         notification_sender.clone(),
     ));
     if !RELEASE_BUILD {
@@ -213,7 +210,7 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
     }
 
     let listen_address = config.listen_address;
-    let client_names: Vec<&ClientName> = config.clients.keys().collect();
+    let client_names: Vec<&ClientName> = clients.keys().collect();
     info!("Phanes listening on {listen_address} for clients {client_names:?}");
     if notification_sender
         .send(Notification::Started {

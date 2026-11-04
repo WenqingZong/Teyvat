@@ -212,6 +212,7 @@ async fn handshake(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
     use std::sync::Arc;
 
     use axum::serve;
@@ -223,20 +224,24 @@ mod tests {
     use layline::testing::test_keypair;
     use phanes::celestia::proto::NetworkRate;
     use phanes::celestia::server::{CelestiaState, router};
-    use phanes::clients::{ClientName, ClientsByPublicKey};
+    use phanes::clients::{ClientConfig, ClientName, Clients};
 
     /// A real Phanes Celestia endpoint; returns its URL and the keys a client needs.
     async fn phanes() -> (Url, SecretBox<StaticKey>, SecretBox<StaticKey>) {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
         let (notifications, _) = unbounded_channel();
-        let mut clients = ClientsByPublicKey::default();
-        clients
-            .insert(client_public_key, ClientName::from("Osaka"))
-            .expect("the only client has a fresh key");
+        let client = ClientConfig {
+            ipv4: Ipv4Addr::LOCALHOST,
+            ipv6: None,
+            client_gnosis_service_public_key: test_keypair().1,
+            client_celestia_service_public_key: client_public_key,
+            allowed_gnosis_ids: Vec::new(),
+        };
+        let clients = Clients::from([(ClientName::from("Osaka"), client)]);
         let state = Arc::new(CelestiaState::new(
             celestia_private_key,
-            clients,
+            Arc::new(clients),
             notifications,
         ));
         let listener = TcpListener::bind("127.0.0.1:0")

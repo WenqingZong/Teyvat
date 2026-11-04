@@ -44,15 +44,15 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 ## 代码结构
 
 - 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）以及所有 gnosis 的 id 和 key 类型都在 `layline::gnosis`（`mod.rs` 放协议、`GnosisId` 和 `Gnosis` trait，每个交易所一个文件放它的 key 类型，如 `binance.rs`），这里只有服务端。Celestia 协议目前在本 crate 之外没有客户端，所以 `celestia/proto.rs` 留在这里；等第二个 crate 需要它时再移进 layline。
-- `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`decode_key`（私钥和公钥同一个解码函数，都得到 `SecretBox<StaticKey>`）、`copy_key`（`SecretBox` 无法 clone 字节数组，需要第二份时用它）、`build_initiator(prologue, ..)` / `build_responder(prologue, ..)`、`read_first_message`（服务端读消息 1，得到载荷和客户端公钥；Noise 只在本地用私钥做 DH，消息里只有加密的公钥）、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
-- `src/clients.rs`：`ClientName`（`String` 的类型别名）和 `ClientsByPublicKey`：一个服务的客户端和各自的公钥（客户端只有几个，查找时逐个比较）。`insert` 拒绝已被其他客户端持有的公钥，`identify(公钥, IP 所属的客户端)` 认出客户端，并检查 IP 属于同一个客户端（debug 构建没有 IP，只看公钥）。它是叶子模块。
+- `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`decode_key`（私钥和公钥同一个解码函数，都得到 `SecretBox<StaticKey>`）、`build_initiator(prologue, ..)` / `build_responder(prologue, ..)`、`read_first_message`（服务端读消息 1，得到载荷和客户端公钥；Noise 只在本地用私钥做 DH，消息里只有加密的公钥）、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
+- `src/clients.rs`：`ClientName`（`String` 的类型别名）、`ClientConfig`（一张 `[clients.<名字>]` 表）和 `Clients`（全部客户端，`Arc` 共享给 IP 白名单和各服务，只有这一份，不派生其他表）。`identify(clients, 服务, 公钥, IP 所属的客户端)` 在其中找出持有该服务公钥的客户端（客户端只有几个，逐个比较），并检查 IP 属于同一个客户端（debug 构建没有 IP，只看公钥）。它是叶子模块。
 - `src/gnosis/config.rs`：`Gnoses`（`[gnoses]` 表，每个 `GnosisId` 一个同名字段，类型为该 id 的 key 类型；穷尽的 `match` 保证新增 id 时必须加字段，测试保证字段名和 id 拼写一致）和 `AnyGnosis`（任意一种 key，序列化成 key 本身）。
-- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 按公钥认出客户端（并核对 IP）→ 时间窗口 → nonce 防重放 → 该客户端的 `AllowedGnoses`。gnosis id 是 `layline::gnosis::GnosisId` 枚举：请求里的未知 id 解析失败，按畸形请求拒绝。握手失败或认不出客户端回空 404（推送 10 分钟节流）；认出之后的拒绝回加密的 `Denied{reason}`。
+- `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 按公钥认出客户端（并核对 IP）→ 时间窗口 → nonce 防重放 → 该客户端的 `allowed_gnosis_ids` 里有这个 id，再从 `Gnoses` 取出（`load` 已保证有表）。gnosis id 是 `layline::gnosis::GnosisId` 枚举：请求里的未知 id 解析失败，按畸形请求拒绝。握手失败或认不出客户端回空 404（推送 10 分钟节流）；认出之后的拒绝回加密的 `Denied{reason}`。
 - `src/celestia/`：`proto.rs`（`ProcessSample`/`Batch`/`Ack`、`Initiator`、`Responder`（`read_first_message` → `client_public_key` → `finish`）、`Session`）；`server.rs`（`GET /celestia`：握手并认出客户端 → 解密 → 打日志 → 回 ack；认不出或解密失败断开并节流推送；90 秒没有消息就断开）。
 - `src/service.rs`：`Service` 枚举（Gnosis / Celestia）和 `Language`；`to_string(Language)` 给出英文日志名或中文推送名。它是叶子模块，服务可以引用自己的名字而不必 import `server`，避免循环依赖。
 - `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`，并在服务路由上挂唯一的 `ClientFilter`（为 `None` 时不挂；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build）。
 - `src/client_filter.rs`：IP 白名单中间件 `filter_clients`，全局一个 `ClientFilter`；放行的请求在扩展里带上 IP 所属的 `ClientName`，handler 用 `IpClientName` 取出（没挂中间件时为 `None`）。
-- `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`；`clients_by_ip()`、`gnosis_clients()` / `celestia_clients()`、`allowed_gnoses()` 在启动时生成各服务要用的表，并检查 IP 和公钥不重复、允许的 gnosis 都有表。配置和私钥文件经 `layline::secrets` 读取。
+- `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`。`load` 解析完立刻检查：IP 不重复、所有公钥（跨客户端、跨服务）不重复、允许的 gnosis 都有表；任何一项不过，Phanes 拒绝启动，之后的服务过程都假设配置合法。配置和私钥文件经 `layline::secrets` 读取。
 - `src/request_details.rs`：被拒请求的快照 `RequestDetails`（`RequestHead` 加载荷）；`Display` 输出一行完整日志，`summarize()` 输出推送摘要。
 - `src/notify.rs`：推送事件（启动 / 发放 / 拒绝 / 未认证 / 白名单拦截 / 挂了）及其中文文案；后台任务经 `layline::bark::Notifier` 发送：release 构建走 Bark，缺 `[bark]` 就报错退出；debug 构建（本机开发）不需要 Bark，推送改为 `info!` 日志。未认证的推送按 `Service` 区分，各自有独立的 `UnauthenticatedThrottle`；白名单拦截不分服务，一个节流。
 - `src/bin/phanes.rs`（仓库根目录）：`phanes keygen`、`phanes serve`。serve 由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。

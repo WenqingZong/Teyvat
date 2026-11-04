@@ -50,11 +50,6 @@ pub fn decode_key(encoded: &SecretString) -> Result<SecretBox<StaticKey>, Invali
     Ok(secret_key_from_bytes(bytes.expose_secret()))
 }
 
-/// A second copy of `key`: `SecretBox` cannot clone a byte array on its own.
-pub fn copy_key(key: &SecretBox<StaticKey>) -> SecretBox<StaticKey> {
-    secret_key_from_bytes(key.expose_secret())
-}
-
 /// `bytes` must be `KEY_LENGTH` long.
 fn secret_key_from_bytes(bytes: &[u8]) -> SecretBox<StaticKey> {
     SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(bytes))
@@ -225,11 +220,5 @@ mod tests {
         let truncated = SecretString::from(encode_key(&key.expose_secret()[..31]));
         assert!(decode_key(&truncated).is_err());
         assert!(decode_key(&SecretString::from("not base64!")).is_err());
-    }
-
-    #[test]
-    fn copied_key_is_equal() {
-        let (key, _) = test_keypair();
-        assert_eq!(copy_key(&key).expose_secret(), key.expose_secret());
     }
 }

@@ -16,8 +16,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
 
 use crate::client_filter::IpClientName;
-use crate::clients::{ClientName, ClientsByPublicKey};
-use crate::gnosis::config::AnyGnosis;
+use crate::clients::{ClientConfig, ClientName, Clients, identify};
+use crate::gnosis::config::{AnyGnosis, Gnoses};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
@@ -27,9 +27,6 @@ use layline::time::since_unix_epoch;
 
 /// Noise message 1 carries a small JSON payload; anything bigger is not a real client.
 const MAX_REQUEST_BODY_BYTES: usize = 4096;
-
-/// Client name → the gnoses it may fetch, by id: exactly those its `allowed_gnosis_ids` lists.
-pub type AllowedGnoses = HashMap<ClientName, HashMap<GnosisId, AnyGnosis>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DenialReason {
@@ -47,8 +44,8 @@ pub enum DenialReason {
 
 pub struct GnosisState {
     gnosis_private_key: SecretBox<StaticKey>,
-    clients: ClientsByPublicKey,
-    allowed_gnoses: AllowedGnoses,
+    clients: Arc<Clients>,
+    gnoses: Gnoses,
     max_clock_skew_seconds: u64,
     notifications: UnboundedSender<Notification>,
     /// nonce -> unix second after which the nonce's timestamp is out of window anyway.
@@ -59,15 +56,15 @@ pub struct GnosisState {
 impl GnosisState {
     pub fn new(
         gnosis_private_key: SecretBox<StaticKey>,
-        clients: ClientsByPublicKey,
-        allowed_gnoses: AllowedGnoses,
+        clients: Arc<Clients>,
+        gnoses: Gnoses,
         max_clock_skew_seconds: u64,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
         Self {
             gnosis_private_key,
             clients,
-            allowed_gnoses,
+            gnoses,
             max_clock_skew_seconds,
             notifications,
             seen_nonces: Mutex::default(),
@@ -105,18 +102,20 @@ impl GnosisState {
         StatusCode::NOT_FOUND.into_response()
     }
 
-    fn decide(&self, client: &ClientName, request: &Request) -> Result<AnyGnosis, DenialReason> {
+    fn decide(&self, client: &ClientConfig, request: &Request) -> Result<AnyGnosis, DenialReason> {
         let now = since_unix_epoch().as_secs();
         let skew_seconds = now.abs_diff(request.timestamp);
         if skew_seconds > self.max_clock_skew_seconds {
             return Err(DenialReason::ClockSkew { skew_seconds });
         }
         self.check_and_record_nonce(&request.nonce, request.timestamp, now)?;
-        self.allowed_gnoses
-            .get(client)
-            .and_then(|gnoses| gnoses.get(&request.gnosis_id))
-            .cloned()
-            .ok_or(DenialReason::NotAllowed)
+        if !client.allowed_gnosis_ids.contains(&request.gnosis_id) {
+            return Err(DenialReason::NotAllowed);
+        }
+        Ok(self
+            .gnoses
+            .get(request.gnosis_id)
+            .expect("PhanesConfig::load checked every allowed gnosis has a table"))
     }
 
     fn check_and_record_nonce(
@@ -165,11 +164,13 @@ async fn gnosis(
             return state.reject_unauthenticated(&error.to_string(), request_head, &body);
         }
     };
-    let client = match state.clients.identify(
+    let (client_name, client) = match identify(
+        &state.clients,
+        Service::Gnosis,
         responder.client_public_key(),
         ip_client_name_option.as_ref(),
     ) {
-        Ok(client) => client,
+        Ok(identified) => identified,
         Err(error) => {
             return state.reject_unauthenticated(&error.to_string(), request_head, &body);
         }
@@ -178,26 +179,26 @@ async fn gnosis(
     let request = match responder.parse_request() {
         Ok(request) => request,
         Err(error) => {
-            warn!("client {client} sent a malformed payload: {error}");
-            let (response, notification) = deny(&client, None, &DenialReason::MalformedRequest);
-            return send(&state, responder, &client, &response, notification);
+            warn!("client {client_name} sent a malformed payload: {error}");
+            let (response, notification) = deny(client_name, None, &DenialReason::MalformedRequest);
+            return send(&state, responder, client_name, &response, notification);
         }
     };
     let gnosis_id = request.gnosis_id;
-    let (response, notification) = match state.decide(&client, &request) {
+    let (response, notification) = match state.decide(client, &request) {
         Ok(gnosis) => {
-            info!("granted gnosis {gnosis_id} to client {client}");
+            info!("granted gnosis {gnosis_id} to client {client_name}");
             (
                 Response::Granted { gnosis },
                 Notification::Granted {
-                    client: client.clone(),
+                    client: client_name.clone(),
                     gnosis_id,
                 },
             )
         }
-        Err(reason) => deny(&client, Some(gnosis_id), &reason),
+        Err(reason) => deny(client_name, Some(gnosis_id), &reason),
     };
-    send(&state, responder, &client, &response, notification)
+    send(&state, responder, client_name, &response, notification)
 }
 
 /// The denial for the client and its push. `gnosis_id_option` is `None` when the payload did not parse.
@@ -254,6 +255,8 @@ fn send(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request as HttpRequest};
     use secrecy::ExposeSecret;
@@ -262,6 +265,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::clients::tests::test_client;
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
     use layline::gnosis::binance::BinanceApiKey;
     use layline::gnosis::{GNOSIS_PROLOGUE, Initiator};
@@ -277,6 +281,8 @@ mod tests {
     const NOT_ALLOWED_GNOSIS_ID: GnosisId = GnosisId::BinanceReal;
     const API_KEY: &str = "天上永恒的王座到来";
     const SECRET_KEY: &str = "世界为之焕然一新";
+    /// Arbitrary documentation address (RFC 5737) with no business meaning.
+    const CLIENT_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
     struct Harness {
         app: Router,
@@ -285,31 +291,29 @@ mod tests {
         notifications: UnboundedReceiver<Notification>,
     }
 
-    fn allowed_gnosis() -> AnyGnosis {
-        let binance_api_key: BinanceApiKey = toml::from_str(&format!(
-            "api_key = \"{API_KEY}\"\nsecret_key = \"{SECRET_KEY}\"\n"
+    /// Phanes holds both gnoses; the client may fetch only `ALLOWED_GNOSIS_ID`.
+    fn gnoses() -> Gnoses {
+        toml::from_str(&format!(
+            "[{ALLOWED_GNOSIS_ID}]\napi_key = \"{API_KEY}\"\nsecret_key = \"{SECRET_KEY}\"\n\
+             [{NOT_ALLOWED_GNOSIS_ID}]\napi_key = \"never\"\nsecret_key = \"released\"\n"
         ))
-        .expect("the key parses");
-        AnyGnosis::Binance(binance_api_key)
+        .expect("the gnoses parse")
     }
 
     fn harness() -> Harness {
         let (gnosis_private_key, gnosis_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let client_name = ClientName::from(CLIENT_NAME);
-        let mut clients = ClientsByPublicKey::default();
-        clients
-            .insert(client_public_key, client_name.clone())
-            .expect("the only client has a fresh key");
-        let allowed_gnoses = HashMap::from([(
-            client_name,
-            HashMap::from([(ALLOWED_GNOSIS_ID, allowed_gnosis())]),
-        )]);
+        let client = ClientConfig {
+            client_gnosis_service_public_key: client_public_key,
+            allowed_gnosis_ids: vec![ALLOWED_GNOSIS_ID],
+            ..test_client(CLIENT_IPV4)
+        };
+        let clients = Clients::from([(ClientName::from(CLIENT_NAME), client)]);
         let (sender, notifications) = unbounded_channel();
         let state = GnosisState::new(
             gnosis_private_key,
-            clients,
-            allowed_gnoses,
+            Arc::new(clients),
+            gnoses(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             sender,
         );

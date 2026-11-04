@@ -20,7 +20,7 @@ use tracing::{error, info, warn};
 
 use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder, Session};
 use crate::client_filter::IpClientName;
-use crate::clients::{ClientName, ClientsByPublicKey, IdentificationError};
+use crate::clients::{ClientName, Clients, IdentificationError, identify};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
@@ -32,7 +32,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct CelestiaState {
     celestia_private_key: SecretBox<StaticKey>,
-    clients: ClientsByPublicKey,
+    clients: Arc<Clients>,
     notifications: UnboundedSender<Notification>,
     unauthenticated_throttle: Mutex<UnauthenticatedThrottle>,
 }
@@ -77,7 +77,7 @@ impl ConnectionError {
 impl CelestiaState {
     pub fn new(
         celestia_private_key: SecretBox<StaticKey>,
-        clients: ClientsByPublicKey,
+        clients: Arc<Clients>,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
         Self {
@@ -221,11 +221,13 @@ async fn handshake(
             });
         }
     };
-    let client = match state
-        .clients
-        .identify(responder.client_public_key(), ip_client_name_option)
-    {
-        Ok(client) => client,
+    let client = match identify(
+        &state.clients,
+        Service::Celestia,
+        responder.client_public_key(),
+        ip_client_name_option,
+    ) {
+        Ok((client_name, _)) => client_name.clone(),
         Err(error) => {
             return Err(ConnectionError::Unidentified {
                 error,
@@ -251,6 +253,8 @@ async fn receive(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use axum::serve;
     use futures::{SinkExt, StreamExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -262,6 +266,8 @@ mod tests {
     use super::*;
     use crate::celestia::proto::Initiator;
     use crate::celestia::proto::tests::sample;
+    use crate::clients::ClientConfig;
+    use crate::clients::tests::test_client;
     use layline::testing::test_keypair;
 
     /// Long enough for the server task to push after the socket closes.
@@ -270,6 +276,8 @@ mod tests {
     const FORGED_FRAME_LENGTH: usize = 64;
     const PING_PAYLOAD: &[u8] = b"heartbeat";
     const CLIENT_NAME: &str = "Osaka";
+    /// Arbitrary documentation address (RFC 5737) with no business meaning.
+    const CLIENT_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
     type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -284,11 +292,16 @@ mod tests {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
         let (sender, notifications) = unbounded_channel();
-        let mut clients = ClientsByPublicKey::default();
-        clients
-            .insert(client_public_key, ClientName::from(CLIENT_NAME))
-            .expect("the only client has a fresh key");
-        let state = Arc::new(CelestiaState::new(celestia_private_key, clients, sender));
+        let client = ClientConfig {
+            client_celestia_service_public_key: client_public_key,
+            ..test_client(CLIENT_IPV4)
+        };
+        let clients = Clients::from([(ClientName::from(CLIENT_NAME), client)]);
+        let state = Arc::new(CelestiaState::new(
+            celestia_private_key,
+            Arc::new(clients),
+            sender,
+        ));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener binds");

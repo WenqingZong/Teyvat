@@ -4,7 +4,6 @@
 //! loopback; the client address comes from `CF-Connecting-IP`, which Cloudflare overwrites (unlike
 //! the appendable `X-Forwarded-For`).
 
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -18,14 +17,11 @@ use axum::response::{IntoResponse, Response};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, warn};
 
-use crate::clients::ClientName;
+use crate::clients::{ClientName, Clients};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::RequestDetails;
 
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
-
-/// Client address → its name in `[clients]`.
-pub type ClientsByIp = HashMap<IpAddr, ClientName>;
 
 /// The client the request's address belongs to, as [`filter_clients`] found it; `None` when the
 /// filter is not mounted (debug builds).
@@ -42,13 +38,13 @@ impl<S: Send + Sync> FromRequestParts<S> for IpClientName {
 
 /// The allow list shared by every service.
 pub struct ClientFilter {
-    clients: ClientsByIp,
+    clients: Arc<Clients>,
     notifications: UnboundedSender<Notification>,
     blocked_throttle: Mutex<UnauthenticatedThrottle>,
 }
 
 impl ClientFilter {
-    pub fn new(clients: ClientsByIp, notifications: UnboundedSender<Notification>) -> Self {
+    pub fn new(clients: Arc<Clients>, notifications: UnboundedSender<Notification>) -> Self {
         Self {
             clients,
             notifications,
@@ -89,9 +85,14 @@ pub async fn filter_clients(
         .get(CLIENT_IP_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<IpAddr>().ok());
-    let Some((client_ip, name)) =
-        client_ip.and_then(|address| Some((address, filter.clients.get(&address)?.clone())))
-    else {
+    let Some((client_ip, name)) = client_ip.and_then(|address| {
+        let (name, _) = filter.clients.iter().find(|(_, client)| {
+            client
+                .addresses()
+                .any(|client_address| client_address == address)
+        })?;
+        Some((address, name.clone()))
+    }) else {
         let request = RequestDetails::read_request(request).await;
         warn!("blocked request: {request}");
         filter.notify_blocked(client_ip, request);
@@ -116,12 +117,14 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::clients::ClientConfig;
+    use crate::clients::tests::test_client;
     use crate::request_details::RequestHead;
 
     const PATH: &str = "/whoami";
     /// Arbitrary documentation addresses (RFC 5737 / RFC 3849) with no business meaning.
-    const OSAKA_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    const OSAKA_IPV6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const OSAKA_IPV6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
 
     /// Answers with the client name the filter found, or nothing when no filter runs.
@@ -131,11 +134,12 @@ mod tests {
 
     fn filtered_router() -> (Router, UnboundedReceiver<Notification>) {
         let (sender, notifications) = unbounded_channel();
-        let clients = [OSAKA_IPV4, OSAKA_IPV6]
-            .into_iter()
-            .map(|address| (address, "Osaka".to_owned()))
-            .collect();
-        let filter = Arc::new(ClientFilter::new(clients, sender));
+        let osaka = ClientConfig {
+            ipv6: Some(OSAKA_IPV6),
+            ..test_client(OSAKA_IPV4)
+        };
+        let clients = Clients::from([(ClientName::from("Osaka"), osaka)]);
+        let filter = Arc::new(ClientFilter::new(Arc::new(clients), sender));
         let router = Router::new()
             .route(PATH, get(whoami))
             .layer(from_fn_with_state(filter, filter_clients));
@@ -186,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn allowed_ipv4_and_ipv6_reach_the_handler_with_their_name() {
         let (router, mut notifications) = filtered_router();
-        for address in [OSAKA_IPV4, OSAKA_IPV6] {
+        for address in [IpAddr::V4(OSAKA_IPV4), IpAddr::V6(OSAKA_IPV6)] {
             let response = call(&router, Some(&address.to_string())).await;
             assert_eq!(response, (StatusCode::OK, "Osaka".to_owned()));
         }
