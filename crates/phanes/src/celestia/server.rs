@@ -1,4 +1,5 @@
-//! Phanes side: accepts Osaka's Celestia WebSocket, logs every sample and acks each batch.
+//! Phanes side: accepts a client's Celestia WebSocket, identifies the client by the public key of
+//! its handshake, logs every sample and acks each batch.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,8 +18,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Session, respond};
-use crate::client_filter::ClientName;
+use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder, Session};
+use crate::client_filter::IpClientName;
+use crate::clients::{ClientName, ClientsByPublicKey, IdentificationError};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
@@ -30,7 +32,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct CelestiaState {
     celestia_private_key: SecretBox<StaticKey>,
-    client_public_key: StaticKey,
+    clients: ClientsByPublicKey,
     notifications: UnboundedSender<Notification>,
     unauthenticated_throttle: Mutex<UnauthenticatedThrottle>,
 }
@@ -39,9 +41,15 @@ pub struct CelestiaState {
 enum ConnectionError {
     #[error("websocket: {0}")]
     WebSocket(#[from] AxumError),
-    /// Security events, pushed to the phone with the rejected frame: wrong key or forged frames.
+    /// Security events, pushed to the phone with the rejected frame: a failed handshake, a key of
+    /// no client or of a client the address does not belong to, or a forged frame.
     #[error("unauthenticated: {error}")]
     Unauthenticated { error: CelestiaError, frame: Bytes },
+    #[error("{error}")]
+    Unidentified {
+        error: IdentificationError,
+        frame: Bytes,
+    },
     #[error("frame failed decryption: {error}")]
     Forged { error: NoiseError, frame: Bytes },
     #[error(transparent)]
@@ -58,7 +66,9 @@ impl ConnectionError {
     /// `None` for runtime errors, which are not security events.
     fn get_rejected_frame(&self) -> Option<&[u8]> {
         match self {
-            Self::Unauthenticated { frame, .. } | Self::Forged { frame, .. } => Some(frame),
+            Self::Unauthenticated { frame, .. }
+            | Self::Unidentified { frame, .. }
+            | Self::Forged { frame, .. } => Some(frame),
             _ => None,
         }
     }
@@ -67,12 +77,12 @@ impl ConnectionError {
 impl CelestiaState {
     pub fn new(
         celestia_private_key: SecretBox<StaticKey>,
-        client_public_key: StaticKey,
+        clients: ClientsByPublicKey,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
         Self {
             celestia_private_key,
-            client_public_key,
+            clients,
             notifications,
             unauthenticated_throttle: Mutex::default(),
         }
@@ -106,45 +116,56 @@ pub fn router(state: Arc<CelestiaState>) -> Router {
 
 async fn upgrade(
     State(state): State<Arc<CelestiaState>>,
-    client: ClientName,
+    IpClientName(ip_client_name_option): IpClientName,
     request_head: RequestHead,
     websocket: WebSocketUpgrade,
 ) -> HttpResponse {
     websocket
         .max_message_size(MAX_NOISE_MESSAGE_LENGTH)
-        .on_upgrade(move |socket| async move {
-            match serve_connection(socket, &state, &client).await {
+        .on_upgrade(move |mut socket| async move {
+            let (mut session, client) =
+                match handshake(&mut socket, &state, ip_client_name_option.as_ref()).await {
+                    Ok(established) => established,
+                    Err(error) => {
+                        return report_connection_error(&state, None, request_head, &error);
+                    }
+                };
+            info!("Celestia client {client} connected");
+            match exchange_batches(socket, &mut session, &client).await {
                 Ok(()) => info!("Celestia client {client} disconnected"),
-                Err(error) => report_connection_error(&state, &client, request_head, &error),
+                Err(error) => report_connection_error(&state, Some(&client), request_head, &error),
             }
         })
 }
 
 /// Security events are logged with the whole request and pushed; the rest only logged.
+/// `client_option` is `None` while the handshake has not yet identified the client.
 fn report_connection_error(
     state: &CelestiaState,
-    client: &ClientName,
+    client_option: Option<&ClientName>,
     request_head: RequestHead,
     error: &ConnectionError,
 ) {
+    let caller = client_option.map_or_else(
+        || "an unidentified client".to_owned(),
+        |client| format!("client {client}"),
+    );
     match error.get_rejected_frame() {
         Some(frame) => {
             let request = RequestDetails::new(request_head, frame);
-            warn!("Celestia security event from client {client}: {error}; {request}");
+            warn!("Celestia security event from {caller}: {error}; {request}");
             state.notify_unauthenticated(request);
         }
-        None => warn!("Celestia connection of client {client} ended: {error}"),
+        None => warn!("Celestia connection of {caller} ended: {error}"),
     }
 }
 
 /// Runtime errors only end this connection; the client reconnects and resends unacked batches.
-async fn serve_connection(
+async fn exchange_batches(
     mut socket: WebSocket,
-    state: &CelestiaState,
+    session: &mut Session,
     client: &ClientName,
 ) -> Result<(), ConnectionError> {
-    let mut session = handshake(&mut socket, state).await?;
-    info!("Celestia client {client} connected");
     loop {
         let Some(message) = receive(&mut socket, IDLE_TIMEOUT).await? else {
             return Ok(());
@@ -178,26 +199,43 @@ async fn serve_connection(
     }
 }
 
+/// The session, and the client its key belongs to. `ip_client_name_option` is the client the
+/// address belongs to, `None` in debug builds.
 async fn handshake(
     socket: &mut WebSocket,
     state: &CelestiaState,
-) -> Result<Session, ConnectionError> {
+    ip_client_name_option: Option<&ClientName>,
+) -> Result<(Session, ClientName), ConnectionError> {
     let first_message = match receive(socket, HANDSHAKE_TIMEOUT).await? {
         Some(Message::Binary(first_message)) => first_message,
         Some(Message::Text(_)) => return Err(ConnectionError::UnexpectedText),
         Some(_) | None => return Err(ConnectionError::Closed),
     };
-    let (session, second_message) = respond(
-        &state.celestia_private_key,
-        &state.client_public_key,
-        &first_message,
-    )
-    .map_err(|error| ConnectionError::Unauthenticated {
-        error,
-        frame: first_message,
-    })?;
+    let responder = match Responder::read_first_message(&state.celestia_private_key, &first_message)
+    {
+        Ok(responder) => responder,
+        Err(error) => {
+            return Err(ConnectionError::Unauthenticated {
+                error,
+                frame: first_message,
+            });
+        }
+    };
+    let client = match state
+        .clients
+        .identify(responder.client_public_key(), ip_client_name_option)
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return Err(ConnectionError::Unidentified {
+                error,
+                frame: first_message,
+            });
+        }
+    };
+    let (session, second_message) = responder.finish()?;
     socket.send(Message::Binary(second_message.into())).await?;
-    Ok(session)
+    Ok((session, client))
 }
 
 /// `None` once the client has gone away.
@@ -231,13 +269,14 @@ mod tests {
     /// Longer than the Noise tag, so the server attempts decryption.
     const FORGED_FRAME_LENGTH: usize = 64;
     const PING_PAYLOAD: &[u8] = b"heartbeat";
+    const CLIENT_NAME: &str = "Osaka";
 
     type ClientSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
     struct Harness {
         url: String,
         client_private_key: SecretBox<StaticKey>,
-        celestia_public_key: StaticKey,
+        celestia_public_key: SecretBox<StaticKey>,
         notifications: UnboundedReceiver<Notification>,
     }
 
@@ -245,11 +284,11 @@ mod tests {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
         let (sender, notifications) = unbounded_channel();
-        let state = Arc::new(CelestiaState::new(
-            celestia_private_key,
-            client_public_key,
-            sender,
-        ));
+        let mut clients = ClientsByPublicKey::default();
+        clients
+            .insert(client_public_key, ClientName::from(CLIENT_NAME))
+            .expect("the only client has a fresh key");
+        let state = Arc::new(CelestiaState::new(celestia_private_key, clients, sender));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener binds");
@@ -382,7 +421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_client_key_ends_the_connection_and_notifies() {
+    async fn key_of_no_client_ends_the_connection_and_notifies() {
         let mut harness = harness().await;
         let (impostor_private_key, _) = test_keypair();
         let (mut socket, _) = harness.start(&impostor_private_key).await;

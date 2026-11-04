@@ -15,15 +15,16 @@ secrecy.workspace = true
 serde.workspace = true
 snow.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "signal"] }
-toml.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+strum.workspace = true
 tokio = { workspace = true, features = ["process"] }
 tokio-tungstenite.workspace = true
 tempfile.workspace = true
+toml.workspace = true
 tower.workspace = true
 
 [lints]

@@ -1,7 +1,8 @@
 //! Celestia wire protocol, shared by Phanes (RedmiBook) and its client (Osaka).
 //!
-//! One WebSocket per connection. Binary frames 1 and 2 are the `Noise_KK` handshake with
-//! empty payloads; every later frame is a transport message carrying a postcard-encoded
+//! One WebSocket per connection. Binary frames 1 and 2 are the `Noise_IK` handshake with
+//! empty payloads: frame 1 carries the client's public key, which Phanes checks before it
+//! answers with frame 2. Every later frame is a transport message carrying a postcard-encoded
 //! [`Batch`] (client to server) or [`Ack`] (server to client).
 
 use std::fmt::{Display, Formatter, Result as FormatResult};
@@ -13,7 +14,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snow::{Error as NoiseError, HandshakeState, TransportState};
 
-use layline::noise::{StaticKey, build_handshake, decrypt, encrypt};
+use layline::noise::{
+    StaticKey, build_initiator, build_responder, decrypt, encrypt, read_first_message,
+};
 
 /// Mixed into the handshake hash, so Gnosis messages can't open a Celestia session.
 pub const CELESTIA_PROLOGUE: &[u8] = b"celestia";
@@ -78,14 +81,10 @@ pub struct Initiator(HandshakeState);
 impl Initiator {
     pub fn start(
         client_private_key: &SecretBox<StaticKey>,
-        celestia_public_key: &StaticKey,
+        celestia_public_key: &SecretBox<StaticKey>,
     ) -> Result<(Self, Vec<u8>), CelestiaError> {
-        let mut state = build_handshake(
-            CELESTIA_PROLOGUE,
-            client_private_key,
-            celestia_public_key,
-            true,
-        )?;
+        let mut state =
+            build_initiator(CELESTIA_PROLOGUE, client_private_key, celestia_public_key)?;
         let first_message = encrypt(&mut state, &[])?;
         Ok((Self(state), first_message))
     }
@@ -96,21 +95,38 @@ impl Initiator {
     }
 }
 
-/// Server side. Fails unless `first_message` comes from the holder of `client_public_key`.
-pub fn respond(
-    celestia_private_key: &SecretBox<StaticKey>,
-    client_public_key: &StaticKey,
-    first_message: &[u8],
-) -> Result<(Session, Vec<u8>), CelestiaError> {
-    let mut state = build_handshake(
-        CELESTIA_PROLOGUE,
-        celestia_private_key,
-        client_public_key,
-        false,
-    )?;
-    decrypt(&mut state, first_message)?;
-    let second_message = encrypt(&mut state, &[])?;
-    Ok((Session(state.into_transport_mode()?), second_message))
+/// Server side: read the client's first message, check who it is, then answer.
+pub struct Responder {
+    state: HandshakeState,
+    client_public_key: SecretBox<StaticKey>,
+}
+
+impl Responder {
+    /// Fails unless `first_message` was written for Celestia by the holder of the private half of
+    /// the public key it carries. Whether that key belongs to a known client is for the caller to
+    /// check, before calling `finish`.
+    pub fn read_first_message(
+        celestia_private_key: &SecretBox<StaticKey>,
+        first_message: &[u8],
+    ) -> Result<Self, CelestiaError> {
+        let mut state = build_responder(CELESTIA_PROLOGUE, celestia_private_key)?;
+        let (client_public_key, _empty_payload) = read_first_message(&mut state, first_message)?;
+        Ok(Self {
+            state,
+            client_public_key,
+        })
+    }
+
+    /// The public key the client signed the first message with.
+    pub fn client_public_key(&self) -> &SecretBox<StaticKey> {
+        &self.client_public_key
+    }
+
+    /// The established session, and the second message that completes the client's handshake.
+    pub fn finish(mut self) -> Result<(Session, Vec<u8>), CelestiaError> {
+        let second_message = encrypt(&mut self.state, &[])?;
+        Ok((Session(self.state.into_transport_mode()?), second_message))
+    }
 }
 
 /// An established channel. Frames must be decrypted in the order they were sent.
@@ -136,8 +152,7 @@ impl Session {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use layline::api_keys::ApiKeyId;
-    use layline::gnosis::{Initiator as GnosisInitiator, Request};
+    use layline::gnosis::{GnosisId, Initiator as GnosisInitiator, Request};
     use layline::testing::test_keypair;
     use layline::time::get_current_timestamp_nanoseconds;
 
@@ -158,9 +173,13 @@ pub(crate) mod tests {
         let (client_private_key, client_public_key) = test_keypair();
         let (initiator, first_message) =
             Initiator::start(&client_private_key, &celestia_public_key).expect("client starts");
-        let (server_session, second_message) =
-            respond(&celestia_private_key, &client_public_key, &first_message)
-                .expect("server authenticates client");
+        let responder = Responder::read_first_message(&celestia_private_key, &first_message)
+            .expect("server reads the first message");
+        assert_eq!(
+            client_public_key.expose_secret(),
+            responder.client_public_key().expose_secret()
+        );
+        let (server_session, second_message) = responder.finish().expect("server answers");
         let client_session = initiator
             .finish(&second_message)
             .expect("client finishes handshake");
@@ -193,13 +212,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn unknown_client_is_rejected() {
-        let (celestia_private_key, celestia_public_key) = test_keypair();
-        let (_, client_public_key) = test_keypair();
+    fn message_for_another_server_is_rejected() {
+        let (_, celestia_public_key) = test_keypair();
         let (impostor_private_key, _) = test_keypair();
+        let (client_private_key, _) = test_keypair();
         let (_, first_message) =
-            Initiator::start(&impostor_private_key, &celestia_public_key).expect("impostor starts");
-        assert!(respond(&celestia_private_key, &client_public_key, &first_message).is_err());
+            Initiator::start(&client_private_key, &celestia_public_key).expect("client starts");
+        assert!(Responder::read_first_message(&impostor_private_key, &first_message).is_err());
     }
 
     #[test]
@@ -217,14 +236,14 @@ pub(crate) mod tests {
     #[test]
     fn gnosis_handshake_does_not_open_celestia() {
         let (celestia_private_key, celestia_public_key) = test_keypair();
-        let (client_private_key, client_public_key) = test_keypair();
+        let (client_private_key, _) = test_keypair();
         let (_, gnosis_message) = GnosisInitiator::write_request(
             &client_private_key,
             &celestia_public_key,
-            &Request::new(ApiKeyId::BinanceDemo, get_current_timestamp_nanoseconds()),
+            &Request::new(GnosisId::BinanceDemo, get_current_timestamp_nanoseconds()),
         )
         .expect("gnosis request is written");
-        assert!(respond(&celestia_private_key, &client_public_key, &gnosis_message).is_err());
+        assert!(Responder::read_first_message(&celestia_private_key, &gnosis_message).is_err());
     }
 
     #[test]

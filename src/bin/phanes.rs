@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::future::pending;
 use std::io::{Error as IoError, Write};
@@ -24,18 +23,17 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use layline::api_keys::ApiKeyId;
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;
 use layline::logging::init_tracing;
 use layline::noise::{encode_key, generate_keypair};
 use phanes::celestia::server::CelestiaState;
-use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter, ClientsByIp};
+use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter};
+use phanes::clients::ClientName;
 use phanes::config::{PhanesConfig, PhanesConfigError};
-use phanes::gnosis::server::{self as gnosis_server, GnosisState, KeyFileError};
+use phanes::gnosis::server::GnosisState;
 use phanes::notify::{self, Notification};
-use phanes::server::{self, ClientFilters};
-use phanes::service::Service;
+use phanes::server;
 
 const CRASH_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(15);
 /// Owner read/write only.
@@ -68,8 +66,6 @@ enum Command {
 enum ServiceError {
     #[error(transparent)]
     Config(#[from] PhanesConfigError),
-    #[error(transparent)]
-    KeyFile(#[from] KeyFileError),
     #[error(
         "listen_address {0} is not loopback: LAN devices could bypass Cloudflare and forge {CLIENT_IP_HEADER}"
     )]
@@ -174,26 +170,16 @@ async fn supervise(config_path: &Path) -> ExitCode {
 
 async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<(), ServiceError> {
     let gnosis_private_key = config.load_gnosis_private_key()?;
-    let gnosis_client_public_key = config.parse_gnosis_client_public_key_from_toml()?;
     let celestia_private_key = config.load_celestia_private_key()?;
-    let celestia_client_public_key = config.parse_celestia_client_public_key_from_toml()?;
-    let gnosis_clients = config.parse_gnosis_clients_from_toml()?;
-    let celestia_clients = config.parse_celestia_clients_from_toml()?;
+    let clients_by_ip = config.clients_by_ip()?;
+    let gnosis_clients = config.gnosis_clients()?;
+    let celestia_clients = config.celestia_clients()?;
+    let allowed_gnoses = config.allowed_gnoses()?;
     // The IP filter trusts CF-Connecting-IP, which only cloudflared on this machine may set.
     if RELEASE_BUILD && !config.listen_address.ip().is_loopback() {
         return Err(ServiceError::ListenAddressNotLoopback(
             config.listen_address,
         ));
-    }
-
-    let allowed_key_ids: HashSet<ApiKeyId> = config
-        .gnosis_service_config
-        .allowed_key_ids
-        .iter()
-        .copied()
-        .collect();
-    for key_id in &allowed_key_ids {
-        gnosis_server::check_api_key_file(&config.gnoses_directory, *key_id)?;
     }
 
     let listener = TcpListener::bind(config.listen_address)
@@ -208,31 +194,27 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
 
     let gnosis_state = GnosisState::new(
         gnosis_private_key,
-        gnosis_client_public_key,
-        allowed_key_ids,
-        config.gnoses_directory.clone(),
+        gnosis_clients,
+        allowed_gnoses,
         config.max_clock_skew_seconds,
         notification_sender.clone(),
     );
     let celestia_state = CelestiaState::new(
         celestia_private_key,
-        celestia_client_public_key,
+        celestia_clients,
         notification_sender.clone(),
     );
-    let client_filters = ClientFilters {
-        gnosis: build_client_filter(Service::Gnosis, gnosis_clients, &notification_sender),
-        celestia: build_client_filter(Service::Celestia, celestia_clients, &notification_sender),
-    };
+    let client_filter = Arc::new(ClientFilter::new(
+        clients_by_ip,
+        notification_sender.clone(),
+    ));
     if !RELEASE_BUILD {
         warn!("debug build: client IP filter disabled");
     }
 
     let listen_address = config.listen_address;
-    let gnosis_client_names = &config.gnosis_service_config.allowed_clients;
-    let celestia_client_names = &config.celestia_service_config.allowed_clients;
-    info!(
-        "Phanes listening on {listen_address}: Gnosis for {gnosis_client_names:?}, Celestia for {celestia_client_names:?}"
-    );
+    let client_names: Vec<&ClientName> = config.clients.keys().collect();
+    info!("Phanes listening on {listen_address} for clients {client_names:?}");
     if notification_sender
         .send(Notification::Started {
             listen_address: config.listen_address.to_string(),
@@ -246,22 +228,10 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
         listener,
         Arc::new(gnosis_state),
         Arc::new(celestia_state),
-        RELEASE_BUILD.then_some(client_filters),
+        RELEASE_BUILD.then_some(client_filter),
     )
     .await
     .map_err(ServiceError::Serve)
-}
-
-fn build_client_filter(
-    service: Service,
-    clients: ClientsByIp,
-    notification_sender: &UnboundedSender<Notification>,
-) -> Arc<ClientFilter> {
-    Arc::new(ClientFilter::new(
-        service,
-        clients,
-        notification_sender.clone(),
-    ))
 }
 
 fn install_panic_hook(panic_sender: UnboundedSender<String>) {

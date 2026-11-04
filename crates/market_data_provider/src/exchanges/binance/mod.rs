@@ -24,11 +24,11 @@ use super::websocket::{
 };
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
-use crate::phanes_client::{ApiKeySource, PhanesClient, fetch_api_key_or_panic};
+use crate::phanes_client::{GnosisSource, PhanesClient, fetch_gnosis_or_panic};
 use crate::utils::{Clock, RealClock};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
-use layline::api_keys::BinanceSbeApiKey;
 use layline::bark::Notifier;
+use layline::gnosis::binance::BinanceSbeApiKey;
 use layline::types::ConnectedApi;
 use layline::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
 use message::{
@@ -103,7 +103,7 @@ impl<WebSocket, KeySource, Alerter, TimeSource> ExchangeConnector
     for BinanceConnector<WebSocket, KeySource, Alerter, TimeSource>
 where
     WebSocket: WebSocketClient,
-    KeySource: ApiKeySource,
+    KeySource: GnosisSource,
     Alerter: SendAlert,
     TimeSource: Clock,
 {
@@ -197,7 +197,7 @@ impl<WebSocket, KeySource, Alerter, TimeSource>
     BinanceConnector<WebSocket, KeySource, Alerter, TimeSource>
 where
     WebSocket: WebSocketClient,
-    KeySource: ApiKeySource,
+    KeySource: GnosisSource,
     Alerter: SendAlert,
     TimeSource: Clock,
 {
@@ -398,7 +398,7 @@ where
             return api_key.clone();
         }
         let sbe_api_key: BinanceSbeApiKey =
-            fetch_api_key_or_panic(&self.key_source, &self.alert, self.demo).await;
+            fetch_gnosis_or_panic(&self.key_source, &self.alert, self.demo).await;
         self.sbe_api_key = Some(sbe_api_key.api_key());
         sbe_api_key.api_key()
     }
@@ -633,7 +633,6 @@ mod tests {
     use std::sync::Arc;
 
     use rust_decimal::dec;
-    use secrecy::ExposeSecret;
     use serde_json::{Value, json};
     use strum::IntoEnumIterator;
     use tokio::time::timeout;
@@ -648,25 +647,23 @@ mod tests {
         MockVenue, MockVenueConnection, MockWebSocketClient, Responder, mock_websocket,
     };
     use crate::exit_reason::ExitReason;
-    use crate::phanes_client::tests::MockApiKeySource;
+    use crate::phanes_client::tests::MockGnosisSource;
     use crate::utils::tests::MockClock;
-    use layline::api_keys::{ApiKey, ApiKeyId, parse_api_key};
+    use layline::gnosis::{Gnosis, GnosisId};
     use layline::testing::{test_instrument, test_topic};
     use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
 
     const SBE_API_KEY: &str = "dummy-sbe-api-key";
-    /// Laid out like `gnoses/binance_sbe_{real,demo}.json`; Phanes grants the file as is.
-    const SBE_KEY_FILE: &str = r#"{
-    "api_key": "dummy-sbe-api-key"
-}"#;
+    /// The SBE gnosis as Phanes sends it.
+    const SBE_GNOSIS: &str = r#"{"api_key": "dummy-sbe-api-key"}"#;
     /// 2026-10-24 00:00:00 UTC.
     const NOW_NANOSECONDS: NonZeroU64 =
         NonZeroU64::new(1_792_800_000_000_000_000).expect("not zero");
     const MILLISECOND: Duration = Duration::from_millis(1);
 
     type TestConnector =
-        BinanceConnector<MockWebSocketClient, MockApiKeySource, RecordingAlert, MockClock>;
+        BinanceConnector<MockWebSocketClient, MockGnosisSource, RecordingAlert, MockClock>;
 
     /// The connector wired to a mock venue per endpoint that acknowledges every request, a mock Phanes
     /// granting the SBE key, a recording phone and a mock clock. Tests run on paused tokio time.
@@ -680,9 +677,9 @@ mod tests {
     impl BinanceFixture {
         fn new(demo: bool) -> Self {
             let mut venues = HashMap::new();
-            let key_source = MockApiKeySource {
-                grants: HashMap::from([(sbe_key_id(demo), SBE_KEY_FILE.to_owned())]),
-                ..MockApiKeySource::default()
+            let key_source = MockGnosisSource {
+                grants: HashMap::from([(sbe_gnosis_id(demo), SBE_GNOSIS.to_owned())]),
+                ..MockGnosisSource::default()
             };
             let alert = RecordingAlert::default();
             let connector = BinanceConnector::new(
@@ -762,9 +759,9 @@ mod tests {
             self.expect_connection(BinanceEndpoint::FuturesPublic, None)
         }
 
-        fn expect_phanes_asked_for(&self, key_ids: &[ApiKeyId]) {
-            let requested = self.connector.key_source.requested_key_ids.borrow();
-            assert_eq!(key_ids, requested.as_slice());
+        fn expect_phanes_asked_for(&self, gnosis_ids: &[GnosisId]) {
+            let requested = self.connector.key_source.requested_gnosis_ids.borrow();
+            assert_eq!(gnosis_ids, requested.as_slice());
         }
 
         /// Drives the connector for `duration` of tokio time and returns the data it produced.
@@ -816,8 +813,8 @@ mod tests {
         assert_eq!(expected, params);
     }
 
-    fn sbe_key_id(demo: bool) -> ApiKeyId {
-        BinanceSbeApiKey::key_id(demo)
+    fn sbe_gnosis_id(demo: bool) -> GnosisId {
+        BinanceSbeApiKey::gnosis_id(demo)
     }
 
     fn topic(
@@ -920,7 +917,7 @@ mod tests {
                 &["btcusdt@bookTicker", "ethusdt@bookTicker"],
             );
             fixture.expect_no_new_connection();
-            fixture.expect_phanes_asked_for(&[sbe_key_id(demo)]);
+            fixture.expect_phanes_asked_for(&[sbe_gnosis_id(demo)]);
         }
     }
 
@@ -963,7 +960,7 @@ mod tests {
             assert_eq!(normal_close(), connection.expect_received());
             fixture.subscribe(&[spot_bbo()]).await;
             fixture.expect_spot();
-            fixture.expect_phanes_asked_for(&[sbe_key_id(demo)]);
+            fixture.expect_phanes_asked_for(&[sbe_gnosis_id(demo)]);
             assert!(fixture.alert.alerts().is_empty());
         }
     }
@@ -976,10 +973,10 @@ mod tests {
         let alert = expect_alert_and_panic(
             fixture.connector.subscribe(&topics),
             &fixture.alert,
-            ExitReason::ApiKeyUnavailable,
+            ExitReason::GnosisUnavailable,
         )
         .await;
-        assert!(alert.contains(&sbe_key_id(false).to_string()), "{alert}");
+        assert!(alert.contains(&sbe_gnosis_id(false).to_string()), "{alert}");
         assert!(alert.contains("Phanes is unreachable"), "{alert}");
         fixture.expect_no_new_connection();
     }
@@ -1291,7 +1288,7 @@ mod tests {
         restored.send(book_ticker("btcusdt@bookTicker", 2));
         let produced = fixture.run_for(MILLISECOND).await;
         assert_eq!(vec![perpetual_bbo()], topics_of(&produced));
-        fixture.expect_phanes_asked_for(&[sbe_key_id(false)]);
+        fixture.expect_phanes_asked_for(&[sbe_gnosis_id(false)]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1331,13 +1328,6 @@ mod tests {
                 .restore_plan
                 .is_none()
         );
-    }
-
-    #[test]
-    fn sbe_key_file_holds_only_the_api_key() {
-        let sbe_api_key: BinanceSbeApiKey =
-            parse_api_key(&SecretString::from(SBE_KEY_FILE)).expect("the SBE key file parses");
-        assert_eq!(SBE_API_KEY, sbe_api_key.api_key().expose_secret());
     }
 
     #[tokio::test(start_paused = true)]

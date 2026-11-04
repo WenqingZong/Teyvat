@@ -109,9 +109,9 @@ generate_gnosis_key_pair() {
 }
 
 print_phanes_instructions() {
-    log "on the Phanes host, in [gnosis_service_config] of /etc/phanes/phanes.toml:"
-    log "  public_key = \"$(cat "$GNOSIS_PUBLIC_KEY")\""
-    log "  allowed_key_ids must include binance_sbe_real (live) or binance_sbe_demo (demo)"
+    log "on the Phanes host, in this machine's [clients.<name>] table of /etc/phanes/phanes.toml:"
+    log "  client_gnosis_service_public_key = \"$(cat "$GNOSIS_PUBLIC_KEY")\""
+    log "  allowed_gnosis_ids must include binance_sbe_real (live) or binance_sbe_demo (demo)"
     log "  then: sudo systemctl restart phanes"
 }
 

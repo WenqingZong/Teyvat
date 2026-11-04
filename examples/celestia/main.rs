@@ -22,7 +22,7 @@ use url::Url;
 
 use client::{Outbox, build_celestia_url, run_session};
 use layline::logging::init_tracing;
-use layline::noise::{StaticKey, decode_private_key, decode_public_key};
+use layline::noise::{StaticKey, decode_key};
 use layline::time::since_unix_epoch;
 use phanes::celestia::proto::ProcessSample;
 use sampler::{Sampler, Target};
@@ -43,7 +43,7 @@ struct Arguments {
     #[arg(long)]
     client_private_key_file: PathBuf,
     #[arg(long)]
-    celestia_public_key: String,
+    celestia_public_key: SecretString,
     #[arg(long)]
     process_id: Option<u32>,
     /// Needs `IPAccounting=yes` on the unit for network rates.
@@ -63,8 +63,8 @@ async fn main() -> Result<()> {
     };
     let encoded_private_key =
         SecretString::from(read_to_string(&arguments.client_private_key_file)?);
-    let client_private_key = decode_private_key(&encoded_private_key)?;
-    let celestia_public_key = decode_public_key(&arguments.celestia_public_key)?;
+    let client_private_key = decode_key(&encoded_private_key)?;
+    let celestia_public_key = decode_key(&arguments.celestia_public_key)?;
     let url = build_celestia_url(&arguments.url)?;
 
     let (sender, mut receiver) = channel(BUFFERED_SAMPLES);
@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 async fn reconnect_forever(
     url: &Url,
     client_private_key: &SecretBox<StaticKey>,
-    celestia_public_key: &StaticKey,
+    celestia_public_key: &SecretBox<StaticKey>,
     outbox: &mut Outbox,
     receiver: &mut Receiver<ProcessSample>,
 ) {

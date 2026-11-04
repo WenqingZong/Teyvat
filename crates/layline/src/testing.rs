@@ -72,12 +72,12 @@ pub fn test_trade(instrument: Instrument, sequence: usize) -> Trade {
     }
 }
 
-/// A fresh static X25519 key pair: the private half wrapped as services hold it, and the public half.
-pub fn test_keypair() -> (SecretBox<StaticKey>, StaticKey) {
+/// A fresh static X25519 key pair, private and public half, both wrapped as services hold them.
+pub fn test_keypair() -> (SecretBox<StaticKey>, SecretBox<StaticKey>) {
     let keypair = generate_keypair().expect("keypair generation succeeds");
     (
         SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.private)),
-        keypair.public.try_into().expect("public key is 32 bytes"),
+        SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.public)),
     )
 }
 

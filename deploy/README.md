@@ -23,8 +23,7 @@
 | `/usr/local/bin/phanes` | 二进制 |
 | `/etc/phanes/gnosis.key` / `gnosis.pub` | Gnosis 私钥（600）/ 公钥 |
 | `/etc/phanes/celestia.key` / `celestia.pub` | Celestia 私钥（600）/ 公钥 |
-| `/etc/phanes/phanes.toml` | 配置（600；监听地址、客户端 IP 白名单、Osaka 的两个公钥、允许的 key id、Bark 凭据） |
-| `/etc/phanes/gnoses/<key_id>.json` | 待发放的 key 文件（600），从 `gnoses/` 同步 |
+| `/etc/phanes/phanes.toml` | 配置（600；监听地址、每个客户端的 IP、两个公钥和允许的 gnosis、待发放的 gnosis、Bark 凭据） |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
 ### RedmiBook 部署
@@ -38,25 +37,24 @@ sudo apt install -y build-essential pkg-config cmake curl
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust 可跳过
 ```
 
-`gnoses/<key_id>.json` 是要发放的 key 文件，仓库里提交的是 dummy 值，字段名就是程序要读的字段（如 SBE 只要 `api_key`，交易 key 要 `api_key` 和 `secret_key`）。部署前把其中的 dummy 值换成真实的 key，**换过之后不要提交**。
-
 #### 2. 安装
 
 ```bash
 deploy/phanes/phanes.sh install
 ```
 
-首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、同步 `gnoses/`（为空则报错退出）、生成配置模板、安装 systemd unit，
-然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给 Osaka，也可随时 `cat /etc/phanes/*.pub`）。
+首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、生成配置模板、安装 systemd unit，
+然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给每个客户端，也可随时 `cat /etc/phanes/*.pub`）。
 
 #### 3. 填配置
 
 `/etc/phanes/phanes.toml`：
 
-- `[clients.Osaka]` 填 Osaka 的公网 IP：`ipv4` 必填，`ipv6` 可选（Osaka 有 IPv6，访问 Cloudflare 时可能走 IPv6，记得填上）。
-  各服务的 `allowed_clients` 引用这里的名字；引用不存在的名字、IP 无效或同一 IP 出现在两个名字下，Phanes 拒绝启动。
-- `gnosis_service_config.public_key` 填 Osaka 的 Gnosis 公钥（见下文 Osaka 第 1 步）；`allowed_key_ids` 列出允许 Osaka 取的 key，只能是 `layline::api_keys::ApiKeyId` 里的 id（`binance_real`、`binance_demo`、`binance_sbe_real`、`binance_sbe_demo`），写错则 Phanes 拒绝启动；每个允许的 key 文件必须存在且字段与 `gnoses/` 模板一致。
-- `celestia_service_config.public_key` 填 Osaka 的 Celestia 公钥。
+- 每个客户端一张 `[clients.<名字>]` 表（模板里是 `[clients.Osaka]`）：
+  - `ipv4` 必填，`ipv6` 可选：Cloudflare 看到的公网 IP（Osaka 有 IPv6，访问 Cloudflare 时可能走 IPv6，记得填上）。IP 无效或同一 IP 出现在两个客户端下，Phanes 拒绝启动。
+  - `client_gnosis_service_public_key`、`client_celestia_service_public_key`：该客户端的 Gnosis 和 Celestia 公钥（见下文 Osaka 第 1 步）。Phanes 按公钥认出客户端，所以同一个服务里两个客户端的公钥不能相同；公钥解不出来，Phanes 拒绝启动。
+  - `allowed_gnosis_ids`：该客户端能取的 gnosis，只能是 `layline::gnosis::GnosisId` 里的 id（`binance_real`、`binance_demo`、`binance_sbe_real`、`binance_sbe_demo`），可以为空；写错 id，或引用了下面没有表的 gnosis，Phanes 拒绝启动。
+- 每个要发放的 gnosis 一张 `[gnoses.<gnosis_id>]` 表，字段就是该 key 类型的字段：交易 key（`binance_real`、`binance_demo`）要 `api_key` 和 `secret_key`，SBE key（`binance_sbe_real`、`binance_sbe_demo`）只要 `api_key`。缺字段、多字段、未知 id，Phanes 都拒绝启动，报错只给行号和字段名，不会把 key 打进日志。
 - `[bark]` 的 `device_key`，以及 `encryption_key`（32 位，Bark App 里设为 AES-256-CBC）。
 
 再跑一次 `deploy/phanes/phanes.sh install`，这次会启动服务并检查 `/info`，手机应收到"天理降临"。
@@ -90,14 +88,24 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 | 场景 | 命令 |
 |---|---|
 | 代码更新后重新部署 | `git pull && deploy/phanes/phanes.sh install`（保留密钥和配置） |
-| 修改 key | 改 `gnoses/`，必要时改 `allowed_key_ids`，再 `deploy/phanes/phanes.sh install` |
-| 新增一种 key | 先在 `layline::api_keys` 加 id 和类型，在 `gnoses/` 加模板，再重新部署 Phanes 和用到它的服务 |
+| 修改 gnosis 或授权 | 改 `/etc/phanes/phanes.toml` 的 `[gnoses]` 或客户端的 `allowed_gnosis_ids`，再 `sudo systemctl restart phanes` |
+| 新增客户端 | 在 `/etc/phanes/phanes.toml` 加一张 `[clients.<名字>]` 表，再 `sudo systemctl restart phanes`；Cloudflare WAF 规则也加上它的 IP |
+| 新增一种 gnosis | 先在 `layline::gnosis` 加 id、在该交易所的文件（如 `layline/src/gnosis/binance.rs`，新交易所就新建一个）加类型，在 `phanes::gnosis::config::Gnoses` 加同名字段，在 `deploy/phanes/phanes.example.toml` 加示例，再重新部署 Phanes 和用到它的服务 |
 | 看日志 | `journalctl --namespace=phanes -u phanes -f`（Phanes 使用独立的 journal namespace） |
 | 彻底删除 | `deploy/phanes/phanes.sh uninstall` |
 | 从零重装 | `deploy/phanes/phanes.sh reinstall`（**会生成新 Gnosis 和 Celestia 密钥**，Osaka 要换公钥，`phanes.toml` 要重填） |
 
 `uninstall` 删除上表"部署后的文件"里的所有东西以及 Phanes 的 journal 日志；cloudflared 的 hostname 映射保留。
 `uninstall` / `reinstall` 会先确认，加 `--yes` 跳过。
+
+#### 从旧配置迁移
+
+旧版的 `phanes.toml` 有 `gnoses_directory`、`[gnosis_service_config]`、`[celestia_service_config]`，key 放在 `/etc/phanes/gnoses/<key_id>.json`。新版 Phanes 遇到这些字段会拒绝启动（`install` 也会提示）。迁移：
+
+1. 每个客户端在 `[clients.<名字>]` 里加上 `client_gnosis_service_public_key`（原 `gnosis_service_config.public_key`）、`client_celestia_service_public_key`（原 `celestia_service_config.public_key`）和 `allowed_gnosis_ids`（原 `allowed_key_ids`）。
+2. 把 `/etc/phanes/gnoses/<key_id>.json` 的内容逐个写成 `[gnoses.<key_id>]` 表。
+3. 删掉 `gnoses_directory`、`[gnosis_service_config]`、`[celestia_service_config]`，再 `sudo rm -r /etc/phanes/gnoses`。
+4. 协议从 Noise `KK` 换成了 `IK`：Phanes、行情服务和 examples 要一起更新。
 
 ### Osaka 配置
 
@@ -139,17 +147,18 @@ scp target/release/examples/fetch osaka:~/
 ```bash
 ./fetch --url https://phanes.wenqing.dev \
   --client-private-key-file /etc/phanes-client/gnosis_client.key \
-  --gnosis-public-key "<gnosis.pub 内容>" --key-id binance_demo_trading
+  --gnosis-public-key "<gnosis.pub 内容>" --gnosis-id binance_demo
 ```
 
-成功会打印 `granted <key_id>: <key>`（会打印 key 本身，只用于 dummy key），手机收到"神之心已发放"。
+成功会打印 `granted <gnosis_id>: <gnosis>`（会打印 key 本身，只用于 dummy key），手机收到"神之心已发放"。
 
 | 现象 | 原因 |
 |---|---|
 | `GLIBC_2.xx not found` | Kali 的 glibc 比 Osaka 新。改用 `sudo apt install musl-tools && rustup target add x86_64-unknown-linux-musl && cargo build --release --example fetch --target x86_64-unknown-linux-musl` |
 | 403 + HTML 页面 | Cloudflare Bot Fight Mode / WAF 拦了数据中心 IP，给该 hostname 加 WAF Skip 规则 |
-| 空 404，手机收到"白名单外的降临者被拦截" | 来源 IP 不在该服务的 `allowed_clients` 里。`journalctl` 里的 `blocked ... from cf-connecting-ip` 记录了 Cloudflare 看到的实际 IP，核对 `[clients.<name>]` 的 `ipv4` / `ipv6` |
-| 空 404，手机收到"检测到未授权降临者" | Noise 握手失败：检查两边公钥是否配对、是否填反 |
+| 空 404，手机收到"检测到深渊入侵!!!" | 来源 IP 不属于任何客户端。`journalctl` 里的 `blocked request` 记录了全部 header，其中 `cf-connecting-ip` 是 Cloudflare 看到的实际 IP，核对 `[clients.<name>]` 的 `ipv4` / `ipv6` |
+| 空 404，手机收到"检测到未授权的魔神" | 看 `journalctl` 里 `rejected unauthenticated Gnosis request:` 后面的原因：`public key belongs to no client`（客户端公钥没写进 `phanes.toml`，或填到了另一个服务的字段；公钥不写进日志，对照两边的 `.pub` 文件检查）、`signed with the key of client A but sent from an address of client B`（公钥和 IP 不属于同一个客户端）、`noise: decrypt error`（客户端用的 Phanes 公钥不对） |
+| `denied <gnosis_id>: gnosis not allowed for this client` | 该 id 不在这个客户端的 `allowed_gnosis_ids` 里 |
 | `Denied: timestamp outside allowed clock skew` | 两台机器时钟差超过 60s，检查 NTP |
 
 #### 进程监控（简化版）
@@ -196,8 +205,8 @@ deploy/market_data_provider/market_data_provider.sh install
 - `[bark]` 凭据（release 构建缺少它会拒绝启动）；
 - `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情。
 
-在 Phanes 主机上，把安装时打印的公钥填进 `/etc/phanes/phanes.toml` 的 `[gnosis_service_config] public_key`，
-确认 `allowed_key_ids` 包含 `binance_sbe_real`（实盘）或 `binance_sbe_demo`（demo），然后重启 Phanes。
+在 Phanes 主机上，把安装时打印的公钥填进 `/etc/phanes/phanes.toml` 里这台机器的 `[clients.<名字>]` 表的 `client_gnosis_service_public_key`，
+确认它的 `allowed_gnosis_ids` 包含 `binance_sbe_real`（实盘）或 `binance_sbe_demo`（demo），且 `[gnoses]` 里有这张表，然后重启 Phanes。
 再跑一次 `deploy/market_data_provider/market_data_provider.sh install`：这次会启动服务并检查 `/health`。
 
 | 场景 | 命令 |

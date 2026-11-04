@@ -12,7 +12,6 @@ set -euo pipefail
 
 readonly BINARY=/usr/local/bin/phanes
 readonly CONFIG_DIRECTORY=/etc/phanes
-readonly GNOSES_DIRECTORY=$CONFIG_DIRECTORY/gnoses
 readonly GNOSIS_PRIVATE_KEY=$CONFIG_DIRECTORY/gnosis.key
 readonly GNOSIS_PUBLIC_KEY=$CONFIG_DIRECTORY/gnosis.pub
 readonly CELESTIA_PRIVATE_KEY=$CONFIG_DIRECTORY/celestia.key
@@ -35,22 +34,18 @@ confirm() {
 install_phanes() {
     cd "$REPOSITORY_ROOT"
     command -v cargo >/dev/null || die "cargo not found; install Rust via rustup first"
-    compgen -G "gnoses/*.json" >/dev/null || die "no gnoses/*.json in the repository; nothing to serve"
 
     log "building release binary"
     cargo build --release -p teyvat --bin phanes
     sudo install -m 755 target/release/phanes "$BINARY"
 
     log "preparing $CONFIG_DIRECTORY"
-    sudo mkdir -p "$GNOSES_DIRECTORY"
+    sudo mkdir -p "$CONFIG_DIRECTORY"
     sudo chown -R "$USER:" "$CONFIG_DIRECTORY"
-    chmod 700 "$CONFIG_DIRECTORY" "$GNOSES_DIRECTORY"
+    chmod 700 "$CONFIG_DIRECTORY"
 
     generate_key_pair Gnosis "$GNOSIS_PRIVATE_KEY" "$GNOSIS_PUBLIC_KEY"
     generate_key_pair celestia "$CELESTIA_PRIVATE_KEY" "$CELESTIA_PUBLIC_KEY"
-
-    # log "syncing gnoses/*.json into $GNOSES_DIRECTORY"
-    # install -m 600 gnoses/*.json "$GNOSES_DIRECTORY/"
 
     [[ -f $CONFIG_FILE ]] || install -m 600 deploy/phanes/phanes.example.toml "$CONFIG_FILE"
 
@@ -60,13 +55,12 @@ install_phanes() {
     sudo systemctl enable --quiet phanes
 
     local missing=()
-    grep -q '<base64' "$CONFIG_FILE" && missing+=("Osaka public keys (gnosis / celestia_service_config) in $CONFIG_FILE")
-    grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
+    grep -qE '^(gnoses_directory|\[gnosis_service_config\]|\[celestia_service_config\])' "$CONFIG_FILE" \
+        && missing+=("$CONFIG_FILE still has the old layout; move to [clients.<name>] and [gnoses] (see deploy/README.md)")
     grep -q '<Osaka IP' "$CONFIG_FILE" && missing+=("Osaka's IPv4 in [clients.Osaka] of $CONFIG_FILE, and its IPv6 (or delete that optional line)")
-    grep -q '^\[clients\.' "$CONFIG_FILE" && grep -q '^allowed_clients' "$CONFIG_FILE" && ! grep -q '^name *=' "$CONFIG_FILE" \
-        || missing+=("[clients.<name>] tables and allowed_clients in $CONFIG_FILE (see deploy/phanes/phanes.example.toml)")
-    grep -q '^celestia_private_key_file' "$CONFIG_FILE" && grep -q '^\[celestia_service_config\]' "$CONFIG_FILE" \
-        || missing+=("celestia_private_key_file and [celestia_service_config] in $CONFIG_FILE (see deploy/phanes/phanes.example.toml)")
+    grep -q '<base64' "$CONFIG_FILE" && missing+=("each client's client_gnosis_service_public_key / client_celestia_service_public_key in $CONFIG_FILE")
+    grep -q '<API ' "$CONFIG_FILE" && missing+=("the keys in the [gnoses.<gnosis_id>] tables of $CONFIG_FILE")
+    grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
     if ((${#missing[@]} > 0)); then
         warn "not starting yet; fill in:"
         printf '     - %s\n' "${missing[@]}" >&2
@@ -106,15 +100,15 @@ generate_key_pair() {
 }
 
 print_public_keys() {
-    log "give these to Osaka:"
+    log "give these to every client:"
     log "  Gnosis public key:    $(cat "$GNOSIS_PUBLIC_KEY")"
     log "  Celestia public key: $(cat "$CELESTIA_PUBLIC_KEY")"
 }
 
 uninstall_phanes() {
-    warn "this deletes $CONFIG_DIRECTORY (Gnosis and Celestia keys, config incl. Bark credentials, deployed API keys),"
+    warn "this deletes $CONFIG_DIRECTORY (Gnosis and Celestia keys, config incl. the gnoses and Bark credentials),"
     warn "$BINARY, $UNIT_FILE and the phanes journal logs."
-    warn "Osaka will need the new Gnosis and Celestia public keys after a reinstall."
+    warn "Every client will need the new Gnosis and Celestia public keys after a reinstall."
     confirm "continue?" || die "aborted"
 
     if systemctl list-unit-files phanes.service >/dev/null 2>&1; then
