@@ -21,9 +21,8 @@
 | 路径 | 内容 |
 |---|---|
 | `/usr/local/bin/phanes` | 二进制 |
-| `/etc/phanes/gnosis.key` / `gnosis.pub` | Gnosis 私钥（600）/ 公钥 |
-| `/etc/phanes/celestia.key` / `celestia.pub` | Celestia 私钥（600）/ 公钥 |
-| `/etc/phanes/phanes.toml` | 配置（600；监听地址、每个客户端的 IP、两个公钥和允许的 gnosis、待发放的 gnosis、Bark 凭据） |
+| `/etc/phanes/gnosis.pub` / `celestia.pub` | Gnosis / Celestia 公钥，交给每个客户端 |
+| `/etc/phanes/phanes.toml` | 配置（600；监听地址、Gnosis 和 Celestia 私钥、每个客户端的 IP、两个公钥和允许的 gnosis、待发放的 gnosis、Bark 凭据） |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
 ### RedmiBook 部署
@@ -43,7 +42,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust �
 deploy/phanes/phanes.sh install
 ```
 
-首次运行会：编译、安装二进制、生成 Gnosis 和 Celestia 密钥、生成配置模板、安装 systemd unit，
+首次运行会：编译、安装二进制、生成配置模板并用 openssl 生成 Gnosis 和 Celestia 密钥（私钥直接填进 `phanes.toml`，只有公钥单独存成 `.pub`）、安装 systemd unit，
 然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给每个客户端，也可随时 `cat /etc/phanes/*.pub`）。
 
 #### 3. 填配置
@@ -89,7 +88,7 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 |---|---|
 | 代码更新后重新部署 | `git pull && deploy/phanes/phanes.sh install`（保留密钥和配置） |
 | 修改 gnosis 或授权 | 改 `/etc/phanes/phanes.toml` 的 `[gnoses]` 或客户端的 `allowed_gnosis_ids`，再 `sudo systemctl restart phanes` |
-| 新增客户端 | 在 `/etc/phanes/phanes.toml` 加一张 `[clients.<名字>]` 表，再 `sudo systemctl restart phanes`；Cloudflare WAF 规则也加上它的 IP |
+| 新增客户端 | 每个服务跑一次 `phanes keygen` 生成一对密钥：私钥填进该客户端自己的配置，公钥填进 `/etc/phanes/phanes.toml` 新加的 `[clients.<名字>]` 表，再 `sudo systemctl restart phanes`；Cloudflare WAF 规则也加上它的 IP |
 | 新增一种 gnosis | 先在 `layline::gnosis` 加 id、在该交易所的文件（如 `layline/src/gnosis/binance.rs`，新交易所就新建一个）加类型，在 `phanes::gnosis::config::Gnoses` 加同名字段，在 `deploy/phanes/phanes.example.toml` 加示例，再重新部署 Phanes 和用到它的服务 |
 | 看日志 | `journalctl --namespace=phanes -u phanes -f`（Phanes 使用独立的 journal namespace） |
 | 彻底删除 | `deploy/phanes/phanes.sh uninstall` |
@@ -105,7 +104,8 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 1. 每个客户端在 `[clients.<名字>]` 里加上 `client_gnosis_service_public_key`（原 `gnosis_service_config.public_key`）、`client_celestia_service_public_key`（原 `celestia_service_config.public_key`）和 `allowed_gnosis_ids`（原 `allowed_key_ids`）。
 2. 把 `/etc/phanes/gnoses/<key_id>.json` 的内容逐个写成 `[gnoses.<key_id>]` 表。
 3. 删掉 `gnoses_directory`、`[gnosis_service_config]`、`[celestia_service_config]`，再 `sudo rm -r /etc/phanes/gnoses`。
-4. 协议从 Noise `KK` 换成了 `IK`：Phanes、行情服务和 examples 要一起更新。
+4. `gnosis_private_key_file` / `celestia_private_key_file` 换成 `gnosis_private_key = "<gnosis.key 的内容>"` / `celestia_private_key = "<celestia.key 的内容>"`，再删掉 `/etc/phanes/*.key`。行情服务同理：`[phanes]` 里的 `gnosis_private_key_file` 换成 `gnosis_private_key = "<gnosis_client.key 的内容>"`，再删掉 `/etc/market_data_provider/gnosis_client.key`。
+5. 协议从 Noise `KK` 换成了 `IK`：Phanes、行情服务和 examples 要一起更新。
 
 ### Osaka 配置
 
@@ -197,8 +197,9 @@ RedmiBook 的日志里每秒一行 `Osaka #<sequence>: time .. ms, cpu ..%, memo
 deploy/market_data_provider/market_data_provider.sh install
 ```
 
-首次运行会：编译 release 二进制、安装 systemd unit、创建 `/etc/market_data_provider/`（含 Gnosis 客户端密钥对，
-以及从 `deploy/market_data_provider/market_data_provider.example.toml` 复制的配置），然后停下，列出
+首次运行会：编译 release 二进制、安装 systemd unit、创建 `/etc/market_data_provider/`（从
+`deploy/market_data_provider/market_data_provider.example.toml` 复制的配置，以及用 openssl 生成的 Gnosis 客户端密钥：
+私钥直接填进配置的 `gnosis_private_key`，公钥存成 `gnosis_client.pub`），然后停下，列出
 `/etc/market_data_provider/market_data_provider.toml` 里待填的占位符：
 
 - `[phanes]` 的 `url` 和 `gnosis_public_key`（即 Phanes 主机上 `/etc/phanes/gnosis.pub` 的内容）；

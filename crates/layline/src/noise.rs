@@ -7,6 +7,8 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox, SecretString};
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer};
 use snow::params::NoiseParams;
 use snow::{Builder, Error as NoiseError, HandshakeState, Keypair, TransportState};
 
@@ -51,6 +53,15 @@ pub fn decode_key(encoded: &SecretString) -> Result<SecretBox<StaticKey>, Invali
 }
 
 /// `bytes` must be `KEY_LENGTH` long.
+/// For `#[serde(deserialize_with = "deserialize_key")]`: a base64 key, private or public, written
+/// in a config; one that does not decode fails the parse.
+pub fn deserialize_key<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<SecretBox<StaticKey>, D::Error> {
+    let encoded_key = SecretString::deserialize(deserializer)?;
+    decode_key(&encoded_key).map_err(|_| DeserializeError::custom("expected a base64 X25519 key"))
+}
+
 fn secret_key_from_bytes(bytes: &[u8]) -> SecretBox<StaticKey> {
     SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(bytes))
 }

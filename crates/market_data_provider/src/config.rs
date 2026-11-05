@@ -39,7 +39,7 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     /// Checks everything up front, so a bad key or a release build without `[bark]` refuses to start.
-    /// The file must be chmod 600, since it holds the Bark credentials.
+    /// The file must be chmod 600, since it holds the Gnosis private key and the Bark credentials.
     pub fn load(path: &Path) -> Result<Self> {
         let config: ConfigFile = read_secret_toml(path)?;
         Ok(Self {
@@ -47,7 +47,7 @@ impl ProviderConfig {
             listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, config.port)),
             lease_duration: DEFAULT_LEASE_DURATION,
             demo: config.demo,
-            phanes_client: PhanesClient::new(&config.phanes)?,
+            phanes_client: PhanesClient::new(config.phanes)?,
             notifier: Notifier::new(RELEASE_BUILD, config.bark)?,
         })
     }
@@ -73,10 +73,9 @@ mod tests {
 
     impl ConfigFixture {
         fn new() -> Self {
-            let directory = tempdir().expect("temp dir creation is expected to not fail");
-            let fixture = Self { directory };
-            fixture.write_secret("gnosis.key", DUMMY_KEY);
-            fixture
+            Self {
+                directory: tempdir().expect("temp dir creation is expected to not fail"),
+            }
         }
 
         fn path(&self, name: &str) -> PathBuf {
@@ -91,8 +90,7 @@ mod tests {
 
         fn valid_text(&self) -> String {
             format!(
-                "port = 6666\ndemo = false\n\n[phanes]\nurl = \"https://phanes.example\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n",
-                self.path("gnosis.key").display()
+                "port = 6666\ndemo = false\n\n[phanes]\nurl = \"https://phanes.example\"\ngnosis_private_key = \"{DUMMY_KEY}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n"
             )
         }
 

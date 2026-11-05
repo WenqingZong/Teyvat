@@ -7,13 +7,12 @@ use std::collections::BTreeMap;
 use std::iter::once;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use secrecy::{ExposeSecret, SecretBox, SecretString};
-use serde::de::Error as DeserializeError;
-use serde::{Deserialize, Deserializer};
+use secrecy::{ExposeSecret, SecretBox};
+use serde::Deserialize;
 
 use crate::service::Service;
 use layline::gnosis::GnosisId;
-use layline::noise::{StaticKey, decode_key};
+use layline::noise::{StaticKey, deserialize_key};
 
 /// A `[clients.<name>]` table of phanes.toml.
 pub type ClientName = String;
@@ -29,9 +28,9 @@ pub struct ClientConfig {
     /// The addresses Cloudflare reports in `CF-Connecting-IP`.
     pub ipv4: Ipv4Addr,
     pub ipv6: Option<Ipv6Addr>,
-    #[serde(deserialize_with = "deserialize_public_key")]
+    #[serde(deserialize_with = "deserialize_key")]
     pub client_gnosis_service_public_key: SecretBox<StaticKey>,
-    #[serde(deserialize_with = "deserialize_public_key")]
+    #[serde(deserialize_with = "deserialize_key")]
     pub client_celestia_service_public_key: SecretBox<StaticKey>,
     /// May be empty: such a client only uses Celestia.
     pub allowed_gnosis_ids: Vec<GnosisId>,
@@ -48,15 +47,6 @@ impl ClientConfig {
             Service::Celestia => &self.client_celestia_service_public_key,
         }
     }
-}
-
-/// A base64 X25519 public key, refused when parsing if it does not decode.
-fn deserialize_public_key<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<SecretBox<StaticKey>, D::Error> {
-    let encoded_public_key = SecretString::deserialize(deserializer)?;
-    decode_key(&encoded_public_key)
-        .map_err(|_| DeserializeError::custom("expected a base64 X25519 public key"))
 }
 
 #[derive(Debug, PartialEq, thiserror::Error)]

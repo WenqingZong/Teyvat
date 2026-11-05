@@ -39,7 +39,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - **Celestia 的安全事件**：上面的未认证情况，以及某帧解密失败（伪造帧），断开连接并 Bark 推送（10 分钟节流）。其他运行时错误（断线、超时、载荷格式错）只断开当前连接、记日志，不推送，由客户端重连补发。
 - 客户端只在启动时取一次 key，之后常驻内存。
 - 每次发放或拒绝 gnosis，都通过 Bark 加密推送（`layline::bark`，AES-256-CBC）通知手机。Bark 凭据放在 `phanes.toml` 的 `[bark]` 表（`device_key` / `encryption_key`，可选 `server`）。所有配置只从 `phanes.toml` 读，该文件必须是 600 权限，不入库；解析错误只报 toml 的错误信息、key 路径和行号，不引用原文，所以字段名写错也不会把 gnosis 打进日志。
-- 每个服务用自己的密钥对和命名（Gnosis：`gnosis.key` / `gnosis.pub`、`gnosis_private_key`；Celestia：`celestia.key` / `celestia.pub`、`celestia_private_key`），不用泛泛的 `server_*`。
+- 每个服务用自己的密钥对和命名（Gnosis：`phanes.toml` 的 `gnosis_private_key`、公钥 `gnosis.pub`；Celestia：`celestia_private_key`、`celestia.pub`），不用泛泛的 `server_*`。私钥和其他配置一样直接写在 `phanes.toml` 里（base64），不在配置里放指向其他文件的路径；部署脚本首次安装时用 openssl 生成，直接填进配置。
 
 ## 代码结构
 
@@ -55,7 +55,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`。`load` 解析完立刻检查：IP 不重复、所有公钥（跨客户端、跨服务）不重复、允许的 gnosis 都有表；任何一项不过，Phanes 拒绝启动，之后的服务过程都假设配置合法。配置和私钥文件经 `layline::secrets` 读取。
 - `src/request_details.rs`：被拒请求的快照 `RequestDetails`（`RequestHead` 加载荷）；`Display` 输出一行完整日志，`summarize()` 输出推送摘要。
 - `src/notify.rs`：推送事件（启动 / 发放 / 拒绝 / 未认证 / 白名单拦截 / 挂了）及其中文文案；后台任务经 `layline::bark::Notifier` 发送：release 构建走 Bark，缺 `[bark]` 就报错退出；debug 构建（本机开发）不需要 Bark，推送改为 `info!` 日志。未认证的推送按 `Service` 区分，各自有独立的 `UnauthenticatedThrottle`；白名单拦截不分服务，一个节流。
-- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen`、`phanes serve`。serve 由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
+- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen` 向终端打印一对新的 base64 密钥（不写文件，也不进日志，私钥只应填进它主人的配置），用于新客户端或换密钥；`phanes serve --config <phanes.toml>` 由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
 - 仓库根目录的 `examples/`（只给测试用的代码放这里，不放进 crate）：`fetch.rs` 模拟客户端取 gnosis（按任意 id 取，所以把 gnosis 当 JSON 打出来）；`bark_push.rs` 发一条 Bark 推送；`celestia/` 是简化版的客户端进程监控（`client.rs` 内存 `Outbox`、重连补发、30 秒心跳；`sampler.rs` 读 `/proc` 和 `systemctl show`，拿不到网络数据时填 0）。celestia example 的测试经根 `Cargo.toml` 的 `test = true` 随 `cargo test --workspace` 运行。
 
 ## Celestia 简化版的现状

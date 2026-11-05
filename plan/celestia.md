@@ -93,7 +93,7 @@ Celestia 出任何错（断线、磁盘满、编码失败）都只能**降级**�
 ### 6.1 Phanes 的 Celestia 模块（D8）
 
 - 集成在 `phanes` 进程里，和 Gnosis 共用 axum 监听地址（`127.0.0.1:8888`）和 hostname `phanes.wenqing.dev`。
-- 配置：`phanes.toml` 的 `celestia_private_key_file`，每个客户端的 Celestia 公钥在它的 `[clients.<名字>]` 表里（`client_celestia_service_public_key`）；之后加 ClickHouse 地址等。私钥由部署脚本调 `phanes keygen` 生成。
+- 配置：`phanes.toml` 的 `celestia_private_key`，每个客户端的 Celestia 公钥在它的 `[clients.<名字>]` 表里（`client_celestia_service_public_key`）；之后加 ClickHouse 地址等。私钥由部署脚本调 `phanes keygen` 生成。
 - **故障隔离**：同一进程意味着 Celestia 出问题会波及 Gnosis。约定如下：
   - Noise 握手或解密失败是安全事件，断开并 Bark 推送（节流）。其他运行时错误（ClickHouse 写失败、断线、超时、载荷解码失败）只记日志、断开当前连接或不回 ack，由 Osaka 重发，不推送、不上报 supervisor。
   - panic 仍按现有规则处理：整个 Phanes 退出并推送"Phanes 挂了"，由 systemd 拉起。因此 Celestia 代码同样禁止 `unwrap()`，不能有可能 panic 的路径。
@@ -145,7 +145,7 @@ Bark 和 `Notifier` 在 `layline::bark`。
 
 1. **【已完成】** 改造为 workspace，把共用协议抽出来：Teyvat workspace，Noise 层和 Gnosis 协议在 `layline`。Gnosis 的行为不变，测试全过。
 2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/phanes/src/celestia/proto.rs`。
-3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、每个客户端的 Celestia 公钥、密钥由 `phanes keygen` 生成，均已完成；写 ClickHouse、去重未做。
+3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、每个客户端的 Celestia 公钥、密钥由部署脚本用 openssl 生成并写进 `phanes.toml`，均已完成；写 ClickHouse、去重未做。
 4. 写 `celestia-client`：采集（含 systemd `IPAccounting` 进程口径网络）、spool、发送、重连、限速补发。
 5. **【部分完成】** 写 `examples/`：模拟 Osaka 程序（`examples/celestia/`，内存缓存、重连补发）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
 6. 部署：ClickHouse、Grafana、systemd unit，扩展部署脚本，配置 cloudflared 路由和 Cloudflare Access。

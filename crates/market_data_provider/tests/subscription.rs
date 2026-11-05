@@ -79,12 +79,9 @@ fn topics() -> HashSet<Topic> {
 /// Listens on a free port; the `[phanes]` table only has to parse, since OKX never asks for a key.
 fn config(root_directory: &Path, lease_duration: Duration, demo: bool) -> ProviderConfig {
     let directory = tempdir().expect("temp dir creation is expected to not fail");
-    let key_file = directory.path().join("gnosis.key");
-    write_secret_file(&key_file, DUMMY_KEY);
     let config_file = directory.path().join("market_data_provider.toml");
     let text = format!(
-        "port = 0\ndemo = {demo}\n\n[phanes]\nurl = \"https://phanes.invalid\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n",
-        key_file.display()
+        "port = 0\ndemo = {demo}\n\n[phanes]\nurl = \"https://phanes.invalid\"\ngnosis_private_key = \"{DUMMY_KEY}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n"
     );
     write_secret_file(&config_file, &text);
     let mut config = ProviderConfig::load(&config_file).expect("the config is expected to load");

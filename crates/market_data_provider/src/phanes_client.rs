@@ -1,13 +1,12 @@
 //! Client of Phanes Gnosis, which releases gnoses (API keys) over an end-to-end encrypted HTTP
 //! round trip.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use reqwest::{Client, StatusCode};
-use secrecy::{SecretBox, SecretString};
+use secrecy::SecretBox;
 use serde::Deserialize;
 use tracing::info;
 use url::Url;
@@ -16,8 +15,7 @@ use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::utils::{Clock, RealClock};
 use layline::gnosis::{GNOSIS_PATH, Gnosis, Initiator, Request, Response};
-use layline::noise::{StaticKey, decode_key};
-use layline::secrets::read_secret_file;
+use layline::noise::{StaticKey, deserialize_key};
 
 const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -26,10 +24,12 @@ const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 #[serde(deny_unknown_fields)]
 pub(crate) struct PhanesClientConfig {
     url: Url,
-    /// Base64 X25519 private key this client authenticates to Gnosis with, from `phanes keygen`; chmod 600.
-    gnosis_private_key_file: PathBuf,
+    /// Base64 X25519 private key this client authenticates to Gnosis with.
+    #[serde(deserialize_with = "deserialize_key")]
+    gnosis_private_key: SecretBox<StaticKey>,
     /// Base64 X25519 public key of Phanes Gnosis.
-    gnosis_public_key: SecretString,
+    #[serde(deserialize_with = "deserialize_key")]
+    gnosis_public_key: SecretBox<StaticKey>,
 }
 
 /// Where gnoses come from; the connector asks only when a topic needs one.
@@ -91,19 +91,13 @@ pub(crate) struct PhanesClient<Http = ReqwestGnosisHttp, TimeSource = RealClock>
 }
 
 impl PhanesClient {
-    /// Reads the private key and checks both keys, so a bad `[phanes]` table stops the provider at startup.
-    pub(crate) fn new(config: &PhanesClientConfig) -> Result<Self> {
-        let key_file = &config.gnosis_private_key_file;
-        let encoded_private_key = read_secret_file(key_file)?;
-        let gnosis_private_key = decode_key(&encoded_private_key)
-            .with_context(|| format!("invalid private key in {}", key_file.display()))?;
-        let gnosis_public_key =
-            decode_key(&config.gnosis_public_key).context("invalid phanes.gnosis_public_key")?;
+    /// Both keys were checked when the config was parsed.
+    pub(crate) fn new(config: PhanesClientConfig) -> Result<Self> {
         let client = Client::builder().timeout(GNOSIS_REQUEST_TIMEOUT).build()?;
         Ok(Self {
-            url: config.url.clone(),
-            gnosis_private_key: Arc::new(gnosis_private_key),
-            gnosis_public_key: Arc::new(gnosis_public_key),
+            url: config.url,
+            gnosis_private_key: Arc::new(config.gnosis_private_key),
+            gnosis_public_key: Arc::new(config.gnosis_public_key),
             http: ReqwestGnosisHttp { client },
             clock: RealClock,
         })
@@ -136,14 +130,11 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fmt::Debug;
-    use std::fs::{Permissions, set_permissions};
     use std::num::NonZeroU64;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
 
     use secrecy::ExposeSecret;
     use serde_json::{Value, from_str};
-    use tempfile::tempdir;
+    use toml::de::Error as TomlError;
 
     use super::*;
     use crate::alert::tests::{RecordingAlert, expect_alert_and_panic};
@@ -151,10 +142,9 @@ pub(crate) mod tests {
     use layline::gnosis::binance::{BinanceApiKey, BinanceSbeApiKey};
     use layline::gnosis::{GnosisId, Responder};
     use layline::noise::encode_key;
-    use layline::testing::{test_keypair, write_secret_file};
+    use layline::testing::test_keypair;
 
     const PHANES_URL: &str = "https://phanes.example";
-    const WORLD_READABLE_MODE: u32 = 0o644;
     const GRANTED_SECRET: &str = "dummy-granted-secret";
     /// The live SBE gnosis, granted as `GRANTED_GNOSIS`.
     const GRANTED_GNOSIS_ID: GnosisId = GnosisId::BinanceSbeReal;
@@ -413,52 +403,34 @@ pub(crate) mod tests {
         assert!(!alert.contains("dummy-misnamed-secret"), "{alert}");
     }
 
-    /// Writes a chmod 600 private key and returns the `[phanes]` table that points at it.
-    fn config_with_key_file(directory: &Path, gnosis_public_key: &str) -> PhanesClientConfig {
-        let key_file = directory.join("gnosis.key");
-        let (private_key, _) = test_keypair();
-        write_secret_file(&key_file, &encode_key(private_key.expose_secret()));
+    /// The `[phanes]` table holding `gnosis_private_key` and `gnosis_public_key`, as written.
+    fn phanes_table(
+        gnosis_private_key: &str,
+        gnosis_public_key: &str,
+    ) -> Result<PhanesClientConfig, TomlError> {
         toml::from_str(&format!(
-            "url = \"{PHANES_URL}\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{gnosis_public_key}\"",
-            key_file.display()
+            "url = \"{PHANES_URL}\"\ngnosis_private_key = \"{gnosis_private_key}\"\ngnosis_public_key = \"{gnosis_public_key}\""
         ))
-        .expect("the [phanes] table is expected to parse")
     }
 
     #[test]
-    fn client_reads_its_key_file_and_checks_both_keys() {
-        let directory = tempdir().expect("temp dir creation is expected to not fail");
-        let (_, gnosis_public_key) = test_keypair();
-        let config = config_with_key_file(
-            directory.path(),
-            &encode_key(gnosis_public_key.expose_secret()),
-        );
-        let client = PhanesClient::new(&config).expect("the config is valid");
+    fn table_holds_both_keys_and_refuses_invalid_ones() {
+        let (private_key, _) = test_keypair();
+        let (_, public_key) = test_keypair();
+        let encoded_private_key = encode_key(private_key.expose_secret());
+        let encoded_public_key = encode_key(public_key.expose_secret());
+        let config = phanes_table(&encoded_private_key, &encoded_public_key)
+            .expect("the [phanes] table is expected to parse");
+        let client = PhanesClient::new(config).expect("the config is valid");
         assert_eq!(
-            gnosis_public_key.expose_secret(),
+            private_key.expose_secret(),
+            client.gnosis_private_key.expose_secret()
+        );
+        assert_eq!(
+            public_key.expose_secret(),
             client.gnosis_public_key.expose_secret()
         );
-
-        let invalid_public_key = config_with_key_file(directory.path(), "not base64!");
-        assert!(PhanesClient::new(&invalid_public_key).is_err());
-
-        set_permissions(
-            &config.gnosis_private_key_file,
-            Permissions::from_mode(WORLD_READABLE_MODE),
-        )
-        .expect("setting permissions is expected to not fail");
-        let error = PhanesClient::new(&config)
-            .err()
-            .expect("a world-readable key file is expected to be refused");
-        assert!(error.to_string().contains("chmod 600"), "{error}");
-    }
-
-    #[test]
-    fn missing_key_file_is_refused() {
-        let config: PhanesClientConfig = toml::from_str(&format!(
-            "url = \"{PHANES_URL}\"\ngnosis_private_key_file = \"/nonexistent/gnosis.key\"\ngnosis_public_key = \"\""
-        ))
-        .expect("the [phanes] table is expected to parse");
-        assert!(PhanesClient::new(&config).is_err());
+        assert!(phanes_table("not base64!", &encoded_public_key).is_err());
+        assert!(phanes_table(&encoded_private_key, "not base64!").is_err());
     }
 }

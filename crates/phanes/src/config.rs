@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretBox};
 use serde::Deserialize;
@@ -14,8 +14,8 @@ use crate::gnosis::config::Gnoses;
 use crate::service::Service;
 use layline::bark::BarkConfig;
 use layline::gnosis::GnosisId;
-use layline::noise::{StaticKey, decode_key};
-use layline::secrets::{SecretFileError, read_secret_file, read_secret_toml};
+use layline::noise::{StaticKey, deserialize_key};
+use layline::secrets::{SecretFileError, read_secret_toml};
 
 pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 
@@ -23,8 +23,6 @@ pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 pub enum PhanesConfigError {
     #[error(transparent)]
     SecretFile(#[from] SecretFileError),
-    #[error("invalid key in {0}")]
-    InvalidKey(String),
     #[error("{address} is listed under both clients {first} and {second}")]
     DuplicateClientIp {
         address: IpAddr,
@@ -51,8 +49,11 @@ pub enum PhanesConfigError {
 #[serde(deny_unknown_fields)]
 pub struct PhanesConfig {
     pub listen_address: SocketAddr,
-    pub gnosis_private_key_file: PathBuf,
-    pub celestia_private_key_file: PathBuf,
+    /// Base64, like every key in this file.
+    #[serde(deserialize_with = "deserialize_key")]
+    pub gnosis_private_key: SecretBox<StaticKey>,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub celestia_private_key: SecretBox<StaticKey>,
     #[serde(default = "default_max_clock_skew_seconds")]
     pub max_clock_skew_seconds: u64,
     pub clients: Clients,
@@ -69,21 +70,14 @@ fn default_max_clock_skew_seconds() -> u64 {
 
 impl PhanesConfig {
     /// Parses the file and checks it, so the services can take a loaded config as valid. It holds
-    /// the gnoses and Bark credentials, so it must be chmod 600; parse errors never quote it.
+    /// the private keys, the gnoses and the Bark credentials, so it must be chmod 600; parse
+    /// errors never quote it.
     pub fn load(path: &Path) -> Result<Self, PhanesConfigError> {
         let config: Self = read_secret_toml(path)?;
         config.check_addresses_are_distinct()?;
         config.check_public_keys_are_distinct()?;
         config.check_allowed_gnoses_exist()?;
         Ok(config)
-    }
-
-    pub fn load_gnosis_private_key(&self) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-        load_private_key(&self.gnosis_private_key_file)
-    }
-
-    pub fn load_celestia_private_key(&self) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-        load_private_key(&self.celestia_private_key_file)
     }
 
     fn check_addresses_are_distinct(&self) -> Result<(), PhanesConfigError> {
@@ -138,24 +132,16 @@ impl PhanesConfig {
     }
 }
 
-fn load_private_key(path: &Path) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-    let encoded = read_secret_file(path)?;
-    decode_key(&encoded).map_err(|_| PhanesConfigError::InvalidKey(path.display().to_string()))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs::{Permissions, set_permissions};
-    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
-    use secrecy::ExposeSecret;
     use tempfile::{TempDir, tempdir};
 
     use super::*;
     use layline::noise::encode_key;
     use layline::testing::{test_keypair, write_secret_file};
 
-    const WORLD_READABLE_MODE: u32 = 0o644;
     /// Arbitrary documentation addresses (RFC 5737 / RFC 3849) with no business meaning.
     const OSAKA_IPV4: &str = "192.0.2.1";
     const OSAKA_IPV6: &str = "2001:db8::1";
@@ -165,9 +151,11 @@ mod tests {
     const GNOSIS_API_KEY: &str = "天上永恒的王座到来";
     const GNOSIS_SECRET_KEY: &str = "世界为之焕然一新";
 
-    /// Private key files on disk, and the public keys of two clients.
+    /// Where phanes.toml is written, Phanes' private keys, and the public keys of two clients.
     struct Fixture {
         directory: TempDir,
+        gnosis_private_key: SecretBox<StaticKey>,
+        celestia_private_key: SecretBox<StaticKey>,
         osaka_gnosis_public_key: SecretBox<StaticKey>,
         osaka_celestia_public_key: SecretBox<StaticKey>,
         tokyo_gnosis_public_key: SecretBox<StaticKey>,
@@ -176,16 +164,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let directory = tempdir().expect("temporary directory is created");
-            for name in ["gnosis.key", "celestia.key"] {
-                let (private_key, _) = test_keypair();
-                write_secret_file(
-                    &directory.path().join(name),
-                    &encode_key(private_key.expose_secret()),
-                );
-            }
             Self {
-                directory,
+                directory: tempdir().expect("temporary directory is created"),
+                gnosis_private_key: test_keypair().0,
+                celestia_private_key: test_keypair().0,
                 osaka_gnosis_public_key: test_keypair().1,
                 osaka_celestia_public_key: test_keypair().1,
                 tokyo_gnosis_public_key: test_keypair().1,
@@ -202,8 +184,8 @@ mod tests {
             format!(
                 r#"
 listen_address = "127.0.0.1:8888"
-gnosis_private_key_file = "{}"
-celestia_private_key_file = "{}"
+gnosis_private_key = "{}"
+celestia_private_key = "{}"
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"
@@ -226,8 +208,8 @@ secret_key = "{GNOSIS_SECRET_KEY}"
 api_key = "never"
 secret_key = "released"
 "#,
-                self.path("gnosis.key").display(),
-                self.path("celestia.key").display(),
+                encode_key(self.gnosis_private_key.expose_secret()),
+                encode_key(self.celestia_private_key.expose_secret()),
                 encode_key(self.osaka_gnosis_public_key.expose_secret()),
                 encode_key(self.osaka_celestia_public_key.expose_secret()),
                 encode_key(self.tokyo_gnosis_public_key.expose_secret()),
@@ -276,10 +258,14 @@ secret_key = "released"
             DEFAULT_MAX_CLOCK_SKEW_SECONDS
         );
         assert!(config.bark.is_none());
-        config.load_gnosis_private_key().expect("gnosis key loads");
-        config
-            .load_celestia_private_key()
-            .expect("celestia key loads");
+        assert_eq!(
+            fixture.gnosis_private_key.expose_secret(),
+            config.gnosis_private_key.expose_secret()
+        );
+        assert_eq!(
+            fixture.celestia_private_key.expose_secret(),
+            config.celestia_private_key.expose_secret()
+        );
     }
 
     #[test]
@@ -331,7 +317,7 @@ secret_key = "released"
     }
 
     #[test]
-    fn malformed_client_tables_are_rejected() {
+    fn malformed_values_are_rejected() {
         /// The last octet is out of range.
         const INVALID_IPV4: &str = "198.51.100.300";
         let fixture = Fixture::new();
@@ -350,6 +336,10 @@ secret_key = "released"
             ),
             (
                 encode_key(fixture.tokyo_gnosis_public_key.expose_secret()),
+                "not a key".to_owned(),
+            ),
+            (
+                encode_key(fixture.celestia_private_key.expose_secret()),
                 "not a key".to_owned(),
             ),
             (
@@ -375,23 +365,6 @@ secret_key = "released"
         let message = fixture.expect_invalid_toml(&text);
         assert!(message.contains("secret_kye"), "{message}");
         assert!(!message.contains(GNOSIS_SECRET_KEY), "{message}");
-    }
-
-    #[test]
-    fn world_readable_private_key_is_rejected() {
-        let fixture = Fixture::new();
-        let config = fixture.load_valid();
-        set_permissions(
-            fixture.path("celestia.key"),
-            Permissions::from_mode(WORLD_READABLE_MODE),
-        )
-        .expect("permissions are set");
-        assert!(matches!(
-            config.load_celestia_private_key(),
-            Err(PhanesConfigError::SecretFile(
-                SecretFileError::InsecurePermissions(_)
-            ))
-        ));
     }
 
     #[test]
