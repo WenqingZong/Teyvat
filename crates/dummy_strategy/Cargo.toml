@@ -9,6 +9,7 @@ authors.workspace = true
 layline.workspace = true
 anyhow.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 

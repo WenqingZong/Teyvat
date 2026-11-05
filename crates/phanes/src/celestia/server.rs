@@ -44,7 +44,7 @@ enum ConnectionError {
     #[error("{reason}")]
     Rejected { reason: String, frame: Bytes },
     #[error(transparent)]
-    Celestia(#[from] CelestiaError),
+    Celestia(CelestiaError),
     #[error("no message within {0:?}")]
     Timeout(Duration),
     #[error("client closed the connection during the handshake")]
@@ -150,7 +150,9 @@ async fn exchange_batches(
                 for sample in &batch.samples {
                     info!("{client} #{sequence}: {sample}");
                 }
-                let ack = session.encrypt(&Ack { sequence })?;
+                let ack = session
+                    .encrypt(&Ack { sequence })
+                    .expect("an ack always encrypts");
                 socket.send(Message::Binary(ack.into())).await?;
             }
             // tungstenite queues the pong / close reply itself but only sends it on the next
@@ -202,7 +204,9 @@ async fn handshake(
             });
         }
     };
-    let (session, second_message) = responder.finish()?;
+    let (session, second_message) = responder
+        .finish()
+        .expect("an empty Noise message 2 always encrypts");
     socket.send(Message::Binary(second_message.into())).await?;
     Ok((session, client))
 }

@@ -10,7 +10,7 @@ use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use super::ExchangeConnector;
 use layline::shared_memory::{MarketDataWriter, SerializedMarketData};
@@ -239,13 +239,7 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
 
     /// Serializes once, then writes the same bytes into the ring of every strategy that reads the topic.
     fn publish(&self, data: &MarketData) {
-        let serialized = match SerializedMarketData::new(data) {
-            Ok(serialized) => serialized,
-            Err(error) => {
-                error!("failed to serialize {}: {error:#}", data.topic());
-                return;
-            }
-        };
+        let serialized = SerializedMarketData::new(data);
         let topic = serialized.topic();
         for rings in self
             .strategies

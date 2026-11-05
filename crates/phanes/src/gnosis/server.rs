@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::post;
 use secrecy::SecretBox;
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::client_filter::IpClientName;
 use crate::clients::{ClientConfig, Clients, identify};
@@ -202,27 +202,17 @@ async fn gnosis(
         }
     };
 
+    // A small JSON payload in Noise message 2 cannot fail to encrypt, so a failure is a bug.
+    let second_message = responder
+        .write_response(&response)
+        .expect("a Gnosis response always encrypts");
     // The push goes out only once the response is on its way.
-    match responder.write_response(&response) {
-        Ok(second_message) => {
-            enqueue(&state.notification_sender, notification);
-            (
-                [(header::CONTENT_TYPE, "application/octet-stream")],
-                second_message,
-            )
-                .into_response()
-        }
-        Err(error) => {
-            error!("failed to encrypt response: {error}");
-            let notification = Notification::Denied {
-                client: client_name.clone(),
-                gnosis_id: None,
-                reason: format!("server failed to encrypt response: {error}"),
-            };
-            enqueue(&state.notification_sender, notification);
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    enqueue(&state.notification_sender, notification);
+    (
+        [(header::CONTENT_TYPE, "application/octet-stream")],
+        second_message,
+    )
+        .into_response()
 }
 
 #[cfg(test)]

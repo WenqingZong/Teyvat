@@ -19,24 +19,25 @@ pub struct SerializedMarketData {
 
 impl SerializedMarketData {
     /// Stamps the provider write time first, so serialization and every ring copy count as transport.
-    pub fn new(data: &MarketData) -> Result<Self> {
+    /// Panics if serialization fails: a `Bbo` or `Trade` always fits, so a failure is a bug.
+    pub fn new(data: &MarketData) -> Self {
         let provider_write_time_nanoseconds = get_current_timestamp_nanoseconds();
         let bytes = match *data {
             MarketData::Bbo(mut bbo) => {
                 bbo.latency_metric.provider_write_time_nanoseconds =
                     provider_write_time_nanoseconds;
-                rkyv::to_bytes::<RkyvError>(&bbo)?
+                rkyv::to_bytes::<RkyvError>(&bbo).expect("a Bbo always serializes")
             }
             MarketData::Trade(mut trade) => {
                 trade.latency_metric.provider_write_time_nanoseconds =
                     provider_write_time_nanoseconds;
-                rkyv::to_bytes::<RkyvError>(&trade)?
+                rkyv::to_bytes::<RkyvError>(&trade).expect("a Trade always serializes")
             }
         };
-        Ok(Self {
+        Self {
             topic: data.topic(),
             bytes,
-        })
+        }
     }
 
     pub fn topic(&self) -> Topic {
@@ -205,7 +206,7 @@ mod tests {
     }
 
     fn serialized(data: &MarketData) -> SerializedMarketData {
-        SerializedMarketData::new(data).expect("serialization is expected to not fail")
+        SerializedMarketData::new(data)
     }
 
     fn poll(market_data_reader: &MarketDataReader, collector: &mut Collector) -> usize {

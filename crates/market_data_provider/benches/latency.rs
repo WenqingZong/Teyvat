@@ -131,8 +131,7 @@ fn market_data(topic: Topic, sequence: usize) -> MarketData {
 
 /// Serializes, then writes into the ring, as the exchange worker does for each message.
 fn publish(writer: &MarketDataWriter, data: &MarketData) {
-    let serialized =
-        SerializedMarketData::new(data).expect("serialization is expected to not fail");
+    let serialized = SerializedMarketData::new(data);
     writer.publish(&serialized);
 }
 

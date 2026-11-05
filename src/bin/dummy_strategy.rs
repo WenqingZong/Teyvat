@@ -1,10 +1,13 @@
+use std::panic::set_hook;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::exit;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use tracing::error;
+use tracing_appender::non_blocking::WorkerGuard;
 
 use dummy_strategy::client::subscribe;
 use dummy_strategy::config::StrategyConfig;
@@ -12,6 +15,11 @@ use dummy_strategy::latency_bench::LatencyBench;
 use dummy_strategy::strategy::Strategy;
 use layline::logging::init_tracing;
 use layline::shared_memory::MarketDataReader;
+
+const FAILURE_EXIT_CODE: i32 = 1;
+
+/// Dropping the guard flushes buffered log lines; `exit` runs no destructors, so it is dropped by hand.
+static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 
 #[derive(Parser)]
 #[command(
@@ -26,19 +34,32 @@ struct Arguments {
     report_interval_seconds: u64,
 }
 
-fn main() -> ExitCode {
+fn main() {
     let arguments = Arguments::parse();
-    let _guard = init_tracing(); // 持有 WorkerGuard，确保退出前 flush
-    match run(
-        &arguments.config,
-        Duration::from_secs(arguments.report_interval_seconds),
-    ) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            error!("fatal: {error:?}"); // {:?} 保留完整 context 链
-            ExitCode::FAILURE
-        }
+    *LOG_GUARD
+        .lock()
+        .expect("nothing panics while holding LOG_GUARD") = Some(init_tracing());
+    exit_on_panic();
+    let report_interval = Duration::from_secs(arguments.report_interval_seconds);
+    if let Err(error) = run(&arguments.config, report_interval) {
+        // `{:?}` keeps the whole context chain.
+        exit_with_error(&format!("fatal: {error:?}"));
     }
+}
+
+/// A panic on any thread, such as the resubscribing or the reporting one, stops the whole strategy.
+fn exit_on_panic() {
+    set_hook(Box::new(|panic_info| {
+        exit_with_error(&format!("fatal panic: {panic_info}"))
+    }));
+}
+
+fn exit_with_error(message: &str) -> ! {
+    error!("{message}");
+    if let Ok(mut log_guard_option) = LOG_GUARD.lock() {
+        drop(log_guard_option.take());
+    }
+    exit(FAILURE_EXIT_CODE);
 }
 
 fn run(config_path: &Path, report_interval: Duration) -> Result<()> {

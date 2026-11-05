@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use tracing::{debug, error, warn};
 use ureq::Agent;
+use ureq::http::StatusCode;
 
 use layline::backoff::exponential_backoff;
 use layline::provider_api::{
@@ -46,6 +47,8 @@ fn subscribe_with_resubscribe_interval(
     let session = ProviderSession {
         agent: Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
+            // `post` reads the body of an error answer, which carries the provider's reason.
+            .http_status_as_error(false)
             .build()
             .into(),
         base_url: format!("http://{provider_address}"),
@@ -56,7 +59,7 @@ fn subscribe_with_resubscribe_interval(
         },
         resubscribe_interval,
     };
-    let subscriptions = extract_successful_subscriptions(session.post_with_retry(SUBSCRIBE_PATH))?;
+    let subscriptions = extract_successful_subscriptions(session.post_with_retry(SUBSCRIBE_PATH)?)?;
     let renewed_subscriptions = subscriptions.clone();
     thread::Builder::new()
         .name("provider-session".to_owned())
@@ -73,20 +76,29 @@ struct ProviderSession {
 
 impl ProviderSession {
     fn post(&self, path: &str) -> Result<HashMap<Topic, SubscriptionResult>> {
-        let response: SubscriptionResponse = self
+        let mut response = self
             .agent
             .post(&format!("{}{path}", self.base_url))
-            .send_json(&self.request)?
-            .body_mut()
-            .read_json()?;
+            .send_json(&self.request)?;
+        let status = response.status();
+        if !status.is_success() {
+            let reason = response.body_mut().read_to_string()?;
+            if status.is_client_error() {
+                return Err(Refusal { status, reason }.into());
+            }
+            bail!("provider answered {status}: {reason}");
+        }
+        let response: SubscriptionResponse = response.body_mut().read_json()?;
         Ok(response.results)
     }
 
-    fn post_with_retry(&self, path: &str) -> HashMap<Topic, SubscriptionResult> {
+    /// Retries until the provider answers, unless it refuses the request itself.
+    fn post_with_retry(&self, path: &str) -> Result<HashMap<Topic, SubscriptionResult>> {
         let mut failures = 0;
         loop {
             match self.post(path) {
-                Ok(results) => return results,
+                Ok(results) => return Ok(results),
+                Err(error) if error.is::<Refusal>() => return Err(error),
                 Err(error) => {
                     failures += 1;
                     let delay = exponential_backoff(failures, INITIAL_RETRY_DELAY, MAX_RETRY_DELAY);
@@ -105,10 +117,21 @@ impl ProviderSession {
             thread::sleep(self.resubscribe_interval);
             match self.post(RESUBSCRIBE_PATH) {
                 Ok(results) => report_changes(subscriptions, &results),
+                Err(error) if error.is::<Refusal>() => {
+                    panic!("provider refused to resubscribe: {error:#}")
+                }
                 Err(error) => warn!("resubscribing failed: {error:#}"),
             }
         }
     }
+}
+
+/// A 4xx answer, such as a `demo` the provider does not serve: sending the request again cannot help.
+#[derive(Debug, thiserror::Error)]
+#[error("provider refused the request with {status}: {reason}")]
+struct Refusal {
+    status: StatusCode,
+    reason: String,
 }
 
 fn extract_successful_subscriptions(
@@ -150,19 +173,18 @@ fn describe_rejections(rejections: &HashMap<Topic, String>) -> String {
 fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, SubscriptionResult>) {
     for subscription in subscriptions {
         match results.get(&subscription.topic) {
-            Some(Ok(path)) if *path == subscription.path => {}
-            Some(Ok(path)) => error!(
-                "provider moved {} to {}, still reading {}",
-                subscription.topic,
-                path.display(),
-                subscription.path.display()
+            // The provider derives ring paths from the strategy and the topic, so they never move.
+            Some(Ok(path)) => assert_eq!(
+                subscription.path, *path,
+                "provider moved {}",
+                subscription.topic
             ),
             Some(Err(reason)) => error!(
                 "provider rejected {} on resubscription: {reason}",
                 subscription.topic
             ),
-            None => error!(
-                "provider did not answer for {} on resubscription",
+            None => panic!(
+                "provider answers every topic, but not {} on resubscription",
                 subscription.topic
             ),
         }
@@ -357,14 +379,13 @@ mod tests {
     }
 
     #[test]
-    fn changed_or_rejected_resubscription_is_reported() {
+    fn unchanged_or_rejected_resubscription_keeps_running() {
         let subscriptions = [Subscription {
             topic: topic(),
             path: PathBuf::from("/dev/shm/old.dat"),
         }];
         for subscription_result in [
             Ok(PathBuf::from("/dev/shm/old.dat")),
-            Ok(PathBuf::from("/dev/shm/new.dat")),
             Err("gone".to_owned()),
         ] {
             report_changes(
@@ -372,6 +393,101 @@ mod tests {
                 &HashMap::from([(topic(), subscription_result)]),
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "provider moved")]
+    fn moved_ring_path_panics() {
+        let subscriptions = [Subscription {
+            topic: topic(),
+            path: PathBuf::from("/dev/shm/old.dat"),
+        }];
+        let results = HashMap::from([(topic(), Ok(PathBuf::from("/dev/shm/new.dat")))]);
+        report_changes(&subscriptions, &results);
+    }
+
+    #[test]
+    #[should_panic(expected = "provider answers every topic")]
+    fn unanswered_topic_panics() {
+        let subscriptions = [Subscription {
+            topic: topic(),
+            path: PathBuf::from("/dev/shm/old.dat"),
+        }];
         report_changes(&subscriptions, &HashMap::new());
+    }
+
+    /// Answers one request with `status_line` and a plain-text `reason`, as the provider refuses one.
+    fn answer_with_status(listener: &TcpListener, status_line: &str, reason: &str) {
+        let (stream, _) = listener.accept().expect("accept is expected to not fail");
+        read_request(&stream);
+        write!(
+            &stream,
+            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
+            reason.len()
+        )
+        .expect("write is expected to not fail");
+    }
+
+    #[test]
+    fn client_error_fails_subscribe_with_the_providers_reason() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind is expected to not fail");
+        let address = listener
+            .local_addr()
+            .expect("local address is expected to be known");
+        // Answers only once: a retry would block on a connection nobody accepts.
+        let provider = thread::spawn(move || {
+            answer_with_status(
+                &listener,
+                "400 Bad Request",
+                "provider serves demo data, not live",
+            );
+        });
+
+        let error = subscribe(
+            address,
+            STRATEGY_NAME.to_owned(),
+            false,
+            HashSet::from([topic()]),
+        )
+        .expect_err("a refused subscription is expected to fail");
+        assert!(error.is::<Refusal>(), "{error:#}");
+        assert!(
+            error
+                .to_string()
+                .contains("provider serves demo data, not live"),
+            "{error:#}"
+        );
+        provider
+            .join()
+            .expect("provider thread is expected to not panic");
+    }
+
+    #[test]
+    fn server_error_is_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind is expected to not fail");
+        let address = listener
+            .local_addr()
+            .expect("local address is expected to be known");
+        let subscription_result = Ok(PathBuf::from("/dev/shm/TRADE.dat"));
+        let (requests, _received) = channel();
+        let provider = thread::spawn(move || {
+            answer_with_status(&listener, "500 Internal Server Error", "busy");
+            for _ in 0..2 {
+                answer(&listener, &subscription_result, &requests);
+            }
+        });
+
+        let subscriptions = subscribe_with_resubscribe_interval(
+            address,
+            STRATEGY_NAME.to_owned(),
+            true,
+            HashSet::from([topic()]),
+            TEST_RESUBSCRIBE_INTERVAL,
+        )
+        .expect("subscribe is expected to succeed once the provider recovers");
+        assert_eq!(1, subscriptions.len());
+        provider
+            .join()
+            .expect("provider thread is expected to not panic");
     }
 }

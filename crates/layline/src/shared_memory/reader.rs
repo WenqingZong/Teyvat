@@ -2,12 +2,12 @@ use std::fs::OpenOptions;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use bcast::error::Error::Overrun;
 use bcast::{Reader, RingBuffer};
 use memmap2::{Mmap, MmapOptions};
 use rkyv::rancor::Error as RkyvError;
-use tracing::{error, warn};
+use tracing::warn;
 
 use super::MAX_PAYLOAD_LENGTH;
 use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_market_data_type};
@@ -78,10 +78,8 @@ impl RingReader {
                     self.reader.reset();
                     break;
                 }
-                Err(error) => {
-                    error!("dropping a message of {}: {error}", self.path.display());
-                    continue;
-                }
+                // Only `InsufficientBufferSize` is left: no Bbo or Trade is that large.
+                Err(error) => bail!("cannot read a message of {}: {error}", self.path.display()),
             };
             let received_at_nanoseconds = get_current_timestamp_nanoseconds();
             let payload = &buffer.0[..length];

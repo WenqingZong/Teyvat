@@ -5,7 +5,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::Duration;
 
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::strategy::Strategy;
 use layline::time::get_current_timestamp_nanoseconds;
@@ -89,9 +89,9 @@ impl LatencyBench {
                 window,
                 samples: take(&mut self.samples),
             };
-            if self.reports.send(report).is_err() {
-                warn!("the latency reporter has stopped; dropping this window");
-            }
+            self.reports
+                .send(report)
+                .expect("the reporter thread runs as long as the process");
             self.window_start_nanoseconds = handled_at_nanoseconds;
         }
     }
@@ -295,13 +295,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_reporter_drops_the_window() {
+    #[should_panic(expected = "the reporter thread runs as long as the process")]
+    fn a_stopped_reporter_panics() {
         let (reports, receiver) = channel();
         drop(receiver);
         let mut bench = LatencyBench::reporting_to(Duration::ZERO, reports);
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 1, 1)), now);
-        assert!(bench.samples.is_empty());
     }
 
     #[test]
