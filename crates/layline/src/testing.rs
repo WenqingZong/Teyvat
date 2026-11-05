@@ -1,7 +1,8 @@
 //! Fixtures and checks for the tests of every crate, so each test does not spell out the same
 //! instrument. Production code never calls these.
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{read_dir, read_to_string};
+use std::fs::{Permissions, read_dir, read_to_string, set_permissions, write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use rust_decimal::dec;
@@ -71,13 +72,23 @@ pub fn test_trade(instrument: Instrument, sequence: usize) -> Trade {
     }
 }
 
-/// A fresh static X25519 key pair: the private half wrapped as services hold it, and the public half.
-pub fn test_keypair() -> (SecretBox<StaticKey>, StaticKey) {
+/// A fresh static X25519 key pair, private and public half, both wrapped as services hold them.
+pub fn test_keypair() -> (SecretBox<StaticKey>, SecretBox<StaticKey>) {
     let keypair = generate_keypair().expect("keypair generation succeeds");
     (
         SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.private)),
-        keypair.public.try_into().expect("public key is 32 bytes"),
+        SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.public)),
     )
+}
+
+/// The mode `crate::secrets` requires of config and key files.
+const OWNER_ONLY_MODE: u32 = 0o600;
+
+/// Writes `content` to `path` as a chmod 600 file, as configs and private keys must be.
+pub fn write_secret_file(path: &Path, content: &str) {
+    write(path, content).expect("writing the secret file is expected to not fail");
+    set_permissions(path, Permissions::from_mode(OWNER_ONLY_MODE))
+        .expect("setting permissions is expected to not fail");
 }
 
 /// Panics if the top-level modules of the crate at `manifest_directory` import each other in a

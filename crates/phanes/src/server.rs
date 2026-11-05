@@ -30,34 +30,24 @@ pub struct Info {
     pub build: String,
 }
 
-/// One IP allow list per service. `GET /info` is never filtered.
-pub struct ClientFilters {
-    pub gnosis: Arc<ClientFilter>,
-    pub celestia: Arc<ClientFilter>,
-}
-
-/// `client_filters` is `None` in debug builds, where local tests connect without Cloudflare.
+/// One IP allow list in front of every service; `GET /info` is never filtered. `client_filter` is
+/// `None` in debug builds, where local tests connect without Cloudflare.
 pub fn router(
     gnosis_state: Arc<GnosisState>,
     celestia_state: Arc<CelestiaState>,
-    client_filters: Option<ClientFilters>,
+    client_filter: Option<Arc<ClientFilter>>,
 ) -> Router {
-    let gnosis = gnosis_server::router(gnosis_state);
-    let celestia = celestia_server::router(celestia_state);
-    let services = match client_filters {
-        Some(filters) => apply_client_filter(gnosis, filters.gnosis)
-            .merge(apply_client_filter(celestia, filters.celestia)),
-        None => gnosis.merge(celestia),
+    let services =
+        gnosis_server::router(gnosis_state).merge(celestia_server::router(celestia_state));
+    let services = match client_filter {
+        // `route_layer`, not `layer`: the latter also wraps the fallback, which would report
+        // every unknown path as a blocked request.
+        Some(filter) => services.route_layer(from_fn_with_state(filter, filter_clients)),
+        None => services,
     };
     services
         .route(INFO_PATH, get(info))
         .fallback(log_unknown_path)
-}
-
-/// `route_layer`, not `layer`: the latter also wraps the fallback, which would report every
-/// unknown path as a blocked request to this service.
-fn apply_client_filter(router: Router, filter: Arc<ClientFilter>) -> Router {
-    router.route_layer(from_fn_with_state(filter, filter_clients))
 }
 
 /// Unknown paths belong to no service: logged in full for later analysis, never pushed.
@@ -71,11 +61,11 @@ pub async fn run(
     listener: TcpListener,
     gnosis_state: Arc<GnosisState>,
     celestia_state: Arc<CelestiaState>,
-    client_filters: Option<ClientFilters>,
+    client_filter: Option<Arc<ClientFilter>>,
 ) -> IoResult<()> {
     serve(
         listener,
-        router(gnosis_state, celestia_state, client_filters),
+        router(gnosis_state, celestia_state, client_filter),
     )
     .await
 }
@@ -91,9 +81,7 @@ async fn info() -> Json<Info> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::path::PathBuf;
 
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
@@ -102,61 +90,48 @@ mod tests {
 
     use super::*;
     use crate::celestia::proto::CELESTIA_PATH;
-    use crate::client_filter::{CLIENT_IP_HEADER, ClientsByIp};
+    use crate::client_filter::CLIENT_IP_HEADER;
+    use crate::clients::tests::test_client;
+    use crate::clients::{ClientName, Clients};
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
+    use crate::gnosis::config::Gnoses;
     use crate::notify::Notification;
-    use crate::service::Service;
     use layline::gnosis::GNOSIS_PATH;
     use layline::testing::test_keypair;
 
     /// Arbitrary documentation addresses (RFC 5737) with no business meaning.
-    const OSAKA_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    const TOKYO_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const TOKYO_IPV4: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
 
     fn phanes_router(
         notifications: UnboundedSender<Notification>,
-        client_filters: Option<ClientFilters>,
+        client_filter: Option<Arc<ClientFilter>>,
     ) -> Router {
         let (gnosis_private_key, _) = test_keypair();
         let (celestia_private_key, _) = test_keypair();
-        let (_, client_public_key) = test_keypair();
         let gnosis_state = GnosisState::new(
             gnosis_private_key,
-            client_public_key,
-            HashSet::new(),
-            PathBuf::new(),
+            Arc::default(),
+            Gnoses::default(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             notifications.clone(),
         );
         let celestia_state =
-            CelestiaState::new(celestia_private_key, client_public_key, notifications);
+            CelestiaState::new(celestia_private_key, Arc::default(), notifications);
         router(
             Arc::new(gnosis_state),
             Arc::new(celestia_state),
-            client_filters,
+            client_filter,
         )
     }
 
-    /// Osaka may use Gnosis, Tokyo only celestia.
-    fn client_filters(notifications: &UnboundedSender<Notification>) -> ClientFilters {
-        let clients = |entries: &[(IpAddr, &str)]| -> ClientsByIp {
-            entries
-                .iter()
-                .map(|(address, name)| (*address, (*name).to_owned()))
-                .collect()
-        };
-        let filter = |service, entries: &[(IpAddr, &str)]| {
-            Arc::new(ClientFilter::new(
-                service,
-                clients(entries),
-                notifications.clone(),
-            ))
-        };
-        ClientFilters {
-            gnosis: filter(Service::Gnosis, &[(OSAKA_IP, "Osaka")]),
-            celestia: filter(Service::Celestia, &[(TOKYO_IP, "Tokyo")]),
-        }
+    fn client_filter(notifications: &UnboundedSender<Notification>) -> Arc<ClientFilter> {
+        let clients = Clients::from([
+            (ClientName::from("Osaka"), test_client(OSAKA_IPV4)),
+            (ClientName::from("Tokyo"), test_client(TOKYO_IPV4)),
+        ]);
+        Arc::new(ClientFilter::new(Arc::new(clients), notifications.clone()))
     }
 
     async fn status(router: &Router, request: HttpRequest<Body>) -> StatusCode {
@@ -198,71 +173,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn each_service_admits_only_its_own_clients() {
+    async fn every_client_reaches_every_service_and_strangers_none() {
         let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filters(&notifications)));
+        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
         // Past the filter, GET /gnosis is 405 and a plain GET /celestia is not 404.
-        assert_eq!(
-            status(&router, get(GNOSIS_PATH, Some(OSAKA_IP))).await,
-            StatusCode::METHOD_NOT_ALLOWED
-        );
-        assert_ne!(
-            status(&router, get(CELESTIA_PATH, Some(TOKYO_IP))).await,
-            StatusCode::NOT_FOUND
-        );
+        for client_ip in [IpAddr::V4(OSAKA_IPV4), IpAddr::V4(TOKYO_IPV4)] {
+            assert_eq!(
+                status(&router, get(GNOSIS_PATH, Some(client_ip))).await,
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+            assert_ne!(
+                status(&router, get(CELESTIA_PATH, Some(client_ip))).await,
+                StatusCode::NOT_FOUND
+            );
+        }
         assert!(receiver.try_recv().is_err());
 
         assert_eq!(
-            status(&router, get(GNOSIS_PATH, Some(TOKYO_IP))).await,
+            status(&router, get(CELESTIA_PATH, Some(STRANGER_IP))).await,
             StatusCode::NOT_FOUND
         );
-        assert_eq!(
-            status(&router, get(CELESTIA_PATH, Some(OSAKA_IP))).await,
-            StatusCode::NOT_FOUND
-        );
-        assert_blocked(
-            receiver.try_recv().ok(),
-            Service::Gnosis,
-            TOKYO_IP,
-            GNOSIS_PATH,
-        );
-        assert_blocked(
-            receiver.try_recv().ok(),
-            Service::Celestia,
-            OSAKA_IP,
-            CELESTIA_PATH,
-        );
-    }
-
-    /// The recorded request itself is covered by the `client_filter` tests.
-    fn assert_blocked(
-        notification: Option<Notification>,
-        expected_service: Service,
-        expected_client_ip: IpAddr,
-        expected_path: &str,
-    ) {
         let Some(Notification::Blocked {
-            service,
             client_ip,
             request,
             suppressed,
-        }) = notification
+        }) = receiver.try_recv().ok()
         else {
-            panic!("expected a blocked notification, got {notification:?}");
+            panic!("expected a blocked notification");
         };
-        assert_eq!(
-            (service, client_ip, suppressed),
-            (expected_service, Some(expected_client_ip), 0)
-        );
-        assert_eq!(request.head.uri.path(), expected_path);
+        assert_eq!((client_ip, suppressed), (Some(STRANGER_IP), 0));
+        assert_eq!(request.head.uri.path(), CELESTIA_PATH);
     }
 
     #[tokio::test]
-    async fn unknown_paths_are_not_blamed_on_a_service() {
+    async fn unknown_paths_are_not_blocked_requests() {
         /// Arbitrary paths a scanner might try.
         const UNKNOWN_PATHS: [&str; 2] = ["/", "/.env"];
         let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filters(&notifications)));
+        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
         for path in UNKNOWN_PATHS {
             assert_eq!(
                 status(&router, get(path, Some(STRANGER_IP))).await,
@@ -275,7 +223,7 @@ mod tests {
     #[tokio::test]
     async fn info_is_open_to_everyone() {
         let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filters(&notifications)));
+        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
         for client_ip in [Some(STRANGER_IP), None] {
             assert_eq!(
                 status(&router, get(INFO_PATH, client_ip)).await,

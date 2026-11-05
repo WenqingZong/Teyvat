@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{Permissions, set_permissions, write};
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::thread::sleep;
@@ -21,6 +19,7 @@ use layline::provider_api::{
     UNSUBSCRIBE_PATH,
 };
 use layline::shared_memory::MarketDataReader;
+use layline::testing::write_secret_file;
 use layline::types::{
     Currency, Exchange, Instrument, MarketData, MarketDataType, StrategyName, Topic, UnderlyingType,
 };
@@ -34,7 +33,6 @@ const SHORT_LEASE: Duration = Duration::from_millis(1);
 const EXPIRY_WAIT: Duration = Duration::from_millis(1500);
 const FIRST_STRATEGY_NAME: &str = "first_strategy";
 const SECOND_STRATEGY_NAME: &str = "second_strategy";
-const OWNER_ONLY_MODE: u32 = 0o600;
 /// Any 32 bytes, base64-encoded, make a valid X25519 key for parsing.
 const DUMMY_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
 
@@ -78,23 +76,14 @@ fn topics() -> HashSet<Topic> {
     ])
 }
 
-fn write_secret(path: &Path, contents: &str) {
-    write(path, contents).expect("writing is expected to not fail");
-    set_permissions(path, Permissions::from_mode(OWNER_ONLY_MODE))
-        .expect("setting permissions is expected to not fail");
-}
-
-/// Listens on a free port; the `[phanes]` table only has to parse, since OKX never asks for a key.
+/// Listens on a free port; the `[phanes_client]` table only has to parse, since OKX never asks for a key.
 fn config(root_directory: &Path, lease_duration: Duration, demo: bool) -> ProviderConfig {
     let directory = tempdir().expect("temp dir creation is expected to not fail");
-    let key_file = directory.path().join("gnosis.key");
-    write_secret(&key_file, DUMMY_KEY);
     let config_file = directory.path().join("market_data_provider.toml");
     let text = format!(
-        "port = 0\ndemo = {demo}\n\n[phanes]\nurl = \"https://phanes.invalid\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n",
-        key_file.display()
+        "port = 0\ndemo = {demo}\n\n[phanes_client]\nurl = \"https://phanes.invalid\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
     );
-    write_secret(&config_file, &text);
+    write_secret_file(&config_file, &text);
     let mut config = ProviderConfig::load(&config_file).expect("the config is expected to load");
     config.root_directory = root_directory.to_owned();
     config.lease_duration = lease_duration;

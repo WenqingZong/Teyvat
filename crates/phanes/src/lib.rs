@@ -1,5 +1,6 @@
 pub mod celestia;
 pub mod client_filter;
+pub mod clients;
 pub mod config;
 pub mod gnosis;
 pub mod notify;

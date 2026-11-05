@@ -22,7 +22,6 @@ serde_json.workspace = true
 strum.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
-toml.workspace = true
 tracing.workspace = true
 url.workspace = true
 
@@ -31,6 +30,7 @@ criterion.workspace = true
 tempfile.workspace = true
 # Paused tokio time, so heartbeat tests take no wall time.
 tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
 ureq.workspace = true
 
 [[bench]]

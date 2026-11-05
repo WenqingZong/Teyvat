@@ -1,11 +1,8 @@
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::collections::HashSet;
-use std::fs::OpenOptions;
 use std::future::pending;
-use std::io::{Error as IoError, Write};
+use std::io::{Error as IoError, Write, stdout};
 use std::net::SocketAddr;
-use std::os::unix::fs::OpenOptionsExt;
 use std::panic::set_hook;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -24,22 +21,19 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
 use tracing::{error, info, warn};
 
-use layline::api_keys::ApiKeyId;
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;
 use layline::logging::init_tracing;
 use layline::noise::{encode_key, generate_keypair};
 use phanes::celestia::server::CelestiaState;
-use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter, ClientsByIp};
-use phanes::config::{PhanesConfig, PhanesConfigError};
-use phanes::gnosis::server::{self as gnosis_server, GnosisState, KeyFileError};
+use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter};
+use phanes::clients::ClientName;
+use phanes::config::PhanesConfig;
+use phanes::gnosis::server::GnosisState;
 use phanes::notify::{self, Notification};
-use phanes::server::{self, ClientFilters};
-use phanes::service::Service;
+use phanes::server;
 
 const CRASH_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(15);
-/// Owner read/write only.
-const PRIVATE_KEY_FILE_MODE: u32 = 0o600;
 
 #[derive(Parser)]
 #[command(about = "Phanes, the Control Center of a Quant Trading Bot")]
@@ -53,23 +47,17 @@ enum Command {
     /// Run Phanes. Release builds push through the `[bark]` section of the config;
     /// debug builds log notifications instead.
     Serve {
+        /// TOML config, chmod 600: it holds the private keys, the gnoses and the Bark credentials.
         #[arg(long, default_value = "phanes.toml")]
         config: PathBuf,
     },
-    /// Generate a static X25519 key pair: the private key is written to a new file
-    /// (mode 600), the public key is logged.
-    Keygen {
-        #[arg(long)]
-        private_key_file: PathBuf,
-    },
+    /// Print a fresh static X25519 key pair in base64, as configs hold keys: the private key goes
+    /// into its owner's config only, the public key to whoever talks to it.
+    Keygen,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum ServiceError {
-    #[error(transparent)]
-    Config(#[from] PhanesConfigError),
-    #[error(transparent)]
-    KeyFile(#[from] KeyFileError),
     #[error(
         "listen_address {0} is not loopback: LAN devices could bypass Cloudflare and forge {CLIENT_IP_HEADER}"
     )]
@@ -88,7 +76,7 @@ enum ServiceError {
 fn main() -> ExitCode {
     let _log_guard = init_tracing();
     match Cli::parse().command {
-        Command::Keygen { private_key_file } => match generate_key_file(&private_key_file) {
+        Command::Keygen => match print_key_pair() {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 error!("keygen failed: {error}");
@@ -108,21 +96,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn generate_key_file(path: &Path) -> Result<()> {
+/// Written to the terminal, not logged: logs must never hold a private key.
+fn print_key_pair() -> Result<()> {
     let keypair = generate_keypair()?;
     let private_key = SecretSlice::from(keypair.private);
     let encoded_private_key = SecretString::from(encode_key(private_key.expose_secret()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE_KEY_FILE_MODE)
-        .open(path)?;
-    let encoded_private_key = encoded_private_key.expose_secret();
-    writeln!(file, "{encoded_private_key}")?;
-    let printable_path = path.display();
-    info!("private key written to {printable_path}");
     let encoded_public_key = encode_key(&keypair.public);
-    info!("public key: {encoded_public_key}");
+    let mut terminal = stdout().lock();
+    writeln!(
+        terminal,
+        "private key: {}",
+        encoded_private_key.expose_secret()
+    )?;
+    writeln!(terminal, "public key:  {encoded_public_key}")?;
     Ok(())
 }
 
@@ -173,27 +159,11 @@ async fn supervise(config_path: &Path) -> ExitCode {
 }
 
 async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<(), ServiceError> {
-    let gnosis_private_key = config.load_gnosis_private_key()?;
-    let gnosis_client_public_key = config.parse_gnosis_client_public_key_from_toml()?;
-    let celestia_private_key = config.load_celestia_private_key()?;
-    let celestia_client_public_key = config.parse_celestia_client_public_key_from_toml()?;
-    let gnosis_clients = config.parse_gnosis_clients_from_toml()?;
-    let celestia_clients = config.parse_celestia_clients_from_toml()?;
     // The IP filter trusts CF-Connecting-IP, which only cloudflared on this machine may set.
     if RELEASE_BUILD && !config.listen_address.ip().is_loopback() {
         return Err(ServiceError::ListenAddressNotLoopback(
             config.listen_address,
         ));
-    }
-
-    let allowed_key_ids: HashSet<ApiKeyId> = config
-        .gnosis_service_config
-        .allowed_key_ids
-        .iter()
-        .copied()
-        .collect();
-    for key_id in &allowed_key_ids {
-        gnosis_server::check_api_key_file(&config.gnoses_directory, *key_id)?;
     }
 
     let listener = TcpListener::bind(config.listen_address)
@@ -206,33 +176,30 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
     let (notification_sender, notification_receiver) = unbounded_channel();
     spawn(notify::run_dispatcher(notifier, notification_receiver));
 
+    let clients = Arc::new(config.clients);
     let gnosis_state = GnosisState::new(
-        gnosis_private_key,
-        gnosis_client_public_key,
-        allowed_key_ids,
-        config.gnoses_directory.clone(),
+        config.gnosis_private_key,
+        Arc::clone(&clients),
+        config.gnoses,
         config.max_clock_skew_seconds,
         notification_sender.clone(),
     );
     let celestia_state = CelestiaState::new(
-        celestia_private_key,
-        celestia_client_public_key,
+        config.celestia_private_key,
+        Arc::clone(&clients),
         notification_sender.clone(),
     );
-    let client_filters = ClientFilters {
-        gnosis: build_client_filter(Service::Gnosis, gnosis_clients, &notification_sender),
-        celestia: build_client_filter(Service::Celestia, celestia_clients, &notification_sender),
-    };
+    let client_filter = Arc::new(ClientFilter::new(
+        Arc::clone(&clients),
+        notification_sender.clone(),
+    ));
     if !RELEASE_BUILD {
         warn!("debug build: client IP filter disabled");
     }
 
     let listen_address = config.listen_address;
-    let gnosis_client_names = &config.gnosis_service_config.allowed_clients;
-    let celestia_client_names = &config.celestia_service_config.allowed_clients;
-    info!(
-        "Phanes listening on {listen_address}: Gnosis for {gnosis_client_names:?}, Celestia for {celestia_client_names:?}"
-    );
+    let client_names: Vec<&ClientName> = clients.keys().collect();
+    info!("Phanes listening on {listen_address} for clients {client_names:?}");
     if notification_sender
         .send(Notification::Started {
             listen_address: config.listen_address.to_string(),
@@ -246,22 +213,10 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
         listener,
         Arc::new(gnosis_state),
         Arc::new(celestia_state),
-        RELEASE_BUILD.then_some(client_filters),
+        RELEASE_BUILD.then_some(client_filter),
     )
     .await
     .map_err(ServiceError::Serve)
-}
-
-fn build_client_filter(
-    service: Service,
-    clients: ClientsByIp,
-    notification_sender: &UnboundedSender<Notification>,
-) -> Arc<ClientFilter> {
-    Arc::new(ClientFilter::new(
-        service,
-        clients,
-        notification_sender.clone(),
-    ))
 }
 
 fn install_panic_hook(panic_sender: UnboundedSender<String>) {

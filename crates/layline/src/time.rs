@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 
+pub const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
 /// UTC, e.g. `2026-10-15 13:30:05.123 UTC`. Only humans read it, through `GET /info`.
 const SERVER_TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S%.3f UTC";
 

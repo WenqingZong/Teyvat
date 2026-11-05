@@ -119,7 +119,7 @@ pub fn build_celestia_url(base_url: &Url) -> Result<Url, CelestiaUrlError> {
 pub async fn run_session(
     url: &Url,
     client_private_key: &SecretBox<StaticKey>,
-    celestia_public_key: &StaticKey,
+    celestia_public_key: &SecretBox<StaticKey>,
     outbox: &mut Outbox,
     samples: &mut Receiver<ProcessSample>,
 ) -> Result<(), ClientError> {
@@ -195,7 +195,7 @@ async fn drain(
 async fn handshake(
     socket: &mut Socket,
     client_private_key: &SecretBox<StaticKey>,
-    celestia_public_key: &StaticKey,
+    celestia_public_key: &SecretBox<StaticKey>,
 ) -> Result<Session, ClientError> {
     let (initiator, first_message) = Initiator::start(client_private_key, celestia_public_key)?;
     socket.send(Message::Binary(first_message.into())).await?;
@@ -212,6 +212,7 @@ async fn handshake(
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
     use std::sync::Arc;
 
     use axum::serve;
@@ -220,26 +221,27 @@ mod tests {
     use tokio::sync::mpsc::{channel, unbounded_channel};
 
     use super::*;
-    use layline::noise::generate_keypair;
+    use layline::testing::test_keypair;
     use phanes::celestia::proto::NetworkRate;
     use phanes::celestia::server::{CelestiaState, router};
-
-    fn keypair() -> (SecretBox<StaticKey>, StaticKey) {
-        let keypair = generate_keypair().expect("keypair generation succeeds");
-        (
-            SecretBox::init_with_mut(|key: &mut StaticKey| key.copy_from_slice(&keypair.private)),
-            keypair.public.try_into().expect("public key is 32 bytes"),
-        )
-    }
+    use phanes::clients::{ClientConfig, ClientName, Clients};
 
     /// A real Phanes Celestia endpoint; returns its URL and the keys a client needs.
-    async fn phanes() -> (Url, SecretBox<StaticKey>, StaticKey) {
-        let (celestia_private_key, celestia_public_key) = keypair();
-        let (client_private_key, client_public_key) = keypair();
+    async fn phanes() -> (Url, SecretBox<StaticKey>, SecretBox<StaticKey>) {
+        let (celestia_private_key, celestia_public_key) = test_keypair();
+        let (client_private_key, client_public_key) = test_keypair();
         let (notifications, _) = unbounded_channel();
+        let client = ClientConfig {
+            ipv4: Ipv4Addr::LOCALHOST,
+            ipv6: None,
+            client_gnosis_service_public_key: test_keypair().1,
+            client_celestia_service_public_key: client_public_key,
+            allowed_gnosis_ids: Vec::new(),
+        };
+        let clients = Clients::from([(ClientName::from("Osaka"), client)]);
         let state = Arc::new(CelestiaState::new(
             celestia_private_key,
-            client_public_key,
+            Arc::new(clients),
             notifications,
         ));
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -277,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_key_fails_the_session() {
         let (url, _, celestia_public_key) = phanes().await;
-        let (impostor_private_key, _) = keypair();
+        let (impostor_private_key, _) = test_keypair();
         let (_sender, mut receiver) = channel(1);
         let result = run_session(
             &url,
@@ -292,7 +294,7 @@ mod tests {
 
     #[tokio::test]
     async fn unreachable_server_is_an_error() {
-        let (client_private_key, celestia_public_key) = keypair();
+        let (client_private_key, celestia_public_key) = test_keypair();
         let (_sender, mut receiver) = channel(1);
         let result = run_session(
             &url("ws://127.0.0.1:1/celestia"),

@@ -9,16 +9,12 @@
 //! GET /connected_apis {"Binance": [{"description": "...", "api": "wss://...", "doc": "https://..."}], "OKX": []}
 //! ```
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
 use crate::types::{Exchange, Instrument, MarketDataType, StrategyName, Topic};
-
-pub const DEFAULT_PROVIDER_ADDRESS: SocketAddr =
-    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 6666));
 
 pub const HEALTH_PATH: &str = "/health";
 pub const INFO_PATH: &str = "/info";
@@ -148,8 +144,9 @@ where
     Ok(values)
 }
 
-/// `HashSet<Topic>` as `{exchange: {instrument: [market_data_type, ...]}}`.
-mod topic_set {
+/// `HashSet<Topic>` as `{exchange: {instrument: [market_data_type, ...]}}`, for
+/// `#[serde(with = "topic_set")]`; strategy configs list their topics the same way.
+pub mod topic_set {
     use std::collections::{BTreeSet, HashSet};
 
     use serde::de::Error as DeserializeError;
@@ -158,7 +155,7 @@ mod topic_set {
     use super::{TopicTree, nest, unnest};
     use crate::types::{MarketDataType, Topic};
 
-    pub(super) fn serialize<S: Serializer>(
+    pub fn serialize<S: Serializer>(
         topics: &HashSet<Topic>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
@@ -167,7 +164,7 @@ mod topic_set {
         tree.serialize(serializer)
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<HashSet<Topic>, D::Error> {
         let tree = TopicTree::<BTreeSet<MarketDataType>>::deserialize(deserializer)?;

@@ -15,7 +15,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | fetches API keys from Gnosis at startup                    |
 | process metrics (Celestia; only examples/celestia so far)  |
 +----+-------------------------------------------------------+
-     | HTTPS; Noise_KK end to end, Cloudflare sees only ciphertext
+     | HTTPS; Noise_IK end to end, Cloudflare sees only ciphertext
      v
  Cloudflare --tunnel--> cloudflared
                              |
@@ -54,13 +54,13 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 只有**当前**被两个及以上 crate 用到的代码才放进 layline；只有一个 crate 用到的代码留在那个 crate，等第二个使用者出现再移进来。layline 是一个 crate，不用 feature 拆分。顶层模块：
 
 - **行情契约**：`types`（一个类型一个文件：`Instrument`、`Topic`、`Bbo`、`Trade` 等）、`shared_memory`（每个策略自己的 ring：文件格式、`MarketDataReader`、`MarketDataWriter`、`SerializedMarketData`）、`provider_api`（行情服务对策略的 HTTP 契约）。
-- **Phanes 协议**：`noise`（Noise_KK 加密层）、`gnosis`（API Key 协议的服务端和客户端两半都在这里，两端不会走样）、`api_keys`（Phanes 能发放的全部 key：`ApiKeyId` 枚举，每个 id 对应一个 key 类型，如 `BinanceApiKey { api_key, secret_key }`、`BinanceSbeApiKey { api_key }`，都 `deny_unknown_fields`，测试遍历全部 id 确认这一点；`ApiKey` trait 由类型给出它的实盘和 demo key id，客户端按类型取 key，不会配错 id；`parse_api_key` 的错误只列出文件里的字段名，从不引用值。新增一种 key 要改这里，并重新部署 Phanes 和用到它的服务）。
-- **服务基础设施**：`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`）、`time`（墙钟时间、`/info` 的时间格式）、`backoff`（指数退避）。
-- **`testing`**：所有 crate 的测试共用的 fixture 和检查（`test_keypair`、`test_instrument`、`test_topic`、`test_bbo`、`assert_acyclic_modules`、`assert_grouped_imports` 等）。它是 public 的，因为其他 crate 的测试要用（`#[cfg(test)]` 只对 layline 自己的测试生效），所以生产代码不调用它只靠约定。`MarketDataWriter` 同理：只有行情服务的交易所 worker 会创建它，也是约定。
+- **Phanes 协议**：`noise`（Noise_IK 加密层：客户端在消息 1 里带上自己的公钥，服务按公钥认出客户端；公钥和私钥一样放在 `SecretBox` 里）、`gnosis`（目录：`mod.rs` 是协议的服务端和客户端两半，两端不会走样，以及 Phanes 能发放的全部 gnosis 的 `GnosisId` 枚举；每个交易所一个文件放它的 key 类型，如 `gnosis/binance.rs`。每个 id 对应一个 `deny_unknown_fields` 的 key 类型，如 `BinanceApiKey { api_key, secret_key }`、`BinanceSbeApiKey { api_key }`；`Gnosis` trait 由类型给出它的实盘和 demo id，客户端按类型取 gnosis，不会配错 id，收到的 gnosis 直接按该类型解析。新增一种 gnosis 要改这里和 Phanes 的 `[gnoses]`，并重新部署 Phanes 和用到它的服务）。
+- **服务基础设施**：`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件；`read_secret_toml` 读取并解析 600 的 TOML 配置，解析错误不引用原文）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`）、`time`（墙钟时间、`NANOSECONDS_PER_SECOND`、`/info` 的时间格式）、`backoff`（指数退避）。
+- **`testing`**：所有 crate 的测试共用的 fixture 和检查（`test_keypair`、`test_instrument`、`test_topic`、`test_bbo`、`write_secret_file`、`assert_acyclic_modules`、`assert_grouped_imports` 等）。它是 public 的，因为其他 crate 的测试要用（`#[cfg(test)]` 只对 layline 自己的测试生效），所以生产代码不调用它只靠约定。`MarketDataWriter` 同理：只有行情服务的交易所 worker 会创建它，也是约定。
 
 ## 公共约定
 
-- **配置**：每个服务的全部配置来自一个 TOML 文件（权限 600），不读环境变量。
+- **配置**：每个服务的全部配置来自一个 TOML 文件（权限 600，经 `layline::secrets::read_secret_toml` 读取），不读环境变量。
 - **日志**：只用 `tracing`；二进制和 example 调用一次 `layline::logging::init_tracing()`，并持有返回的 guard 直到退出（drop 时 flush）。每行是 `时间 级别 文件:行号: 消息`，不打印模块路径（文件和行号已经定位）。
 - **推送**：release 构建通过 Bark 推送到手机，缺少 `[bark]` 配置就拒绝启动；debug 构建不需要 Bark，推送改为 `info!` 日志。
 - **时间**：墙钟时间统一来自 `layline::time::get_current_timestamp_nanoseconds()`（`SystemTime`，`NonZeroU64` 纳秒）；热路径只用整数，不格式化日期。

@@ -1,17 +1,21 @@
-use std::collections::{BTreeMap, HashMap};
-use std::iter::once;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+//! phanes.toml, read once at startup; see `deploy/phanes/phanes.example.toml`. Every Rust field
+//! is named as its TOML key.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretBox};
 use serde::Deserialize;
-use toml::de::Error as TomlError;
+use strum::IntoEnumIterator;
 
-use crate::client_filter::ClientsByIp;
-use layline::api_keys::ApiKeyId;
+use crate::clients::{ClientName, Clients};
+use crate::gnosis::config::Gnoses;
+use crate::service::Service;
 use layline::bark::BarkConfig;
-use layline::noise::{StaticKey, decode_private_key, decode_public_key};
-use layline::secrets::{SecretFileError, read_secret_file};
+use layline::gnosis::GnosisId;
+use layline::noise::{StaticKey, deserialize_key};
+use layline::secrets::{SecretFileError, read_secret_toml};
 
 pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 
@@ -19,67 +23,45 @@ pub const DEFAULT_MAX_CLOCK_SKEW_SECONDS: u64 = 60;
 pub enum PhanesConfigError {
     #[error(transparent)]
     SecretFile(#[from] SecretFileError),
-    #[error("invalid config {path}: {source}")]
-    Parse { path: PathBuf, source: TomlError },
-    #[error("invalid key in {0}")]
-    InvalidKey(String),
     #[error("{address} is listed under both clients {first} and {second}")]
     DuplicateClientIp {
         address: IpAddr,
-        first: String,
-        second: String,
+        first: ClientName,
+        second: ClientName,
     },
-    #[error("{field} names client {name:?}, which is not in [clients]")]
-    UnknownClient { field: String, name: String },
-    #[error("{0} is empty")]
-    NoAllowedClients(String),
+    #[error(
+        "client {second} reuses a public key of client {first}; every client needs its own key for each service"
+    )]
+    DuplicatePublicKey {
+        first: ClientName,
+        second: ClientName,
+    },
+    #[error(
+        "clients.{client}.allowed_gnosis_ids lists {gnosis_id}, but [gnoses.{gnosis_id}] is missing"
+    )]
+    MissingGnosis {
+        client: ClientName,
+        gnosis_id: GnosisId,
+    },
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PhanesConfig {
     pub listen_address: SocketAddr,
-    pub gnosis_private_key_file: PathBuf,
-    pub celestia_private_key_file: PathBuf,
-    /// `<gnoses_directory>/<key_id>.json` holds the key file of `key_id`.
-    pub gnoses_directory: PathBuf,
+    /// Base64, like every key in this file.
+    #[serde(deserialize_with = "deserialize_key")]
+    pub gnosis_private_key: SecretBox<StaticKey>,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub celestia_private_key: SecretBox<StaticKey>,
     #[serde(default = "default_max_clock_skew_seconds")]
     pub max_clock_skew_seconds: u64,
-    /// Client name → the addresses Cloudflare may report for it.
-    pub clients: BTreeMap<String, ClientAddresses>,
-    pub gnosis_service_config: GnosisServiceConfig,
-    pub celestia_service_config: CelestiaServiceConfig,
+    pub clients: Clients,
+    /// Phanes may hold gnoses no client is allowed yet.
+    #[serde(default)]
+    pub gnoses: Gnoses,
     /// Required by release builds only; debug builds log notifications instead.
     pub bark: Option<BarkConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientAddresses {
-    pub ipv4: Ipv4Addr,
-    pub ipv6: Option<Ipv6Addr>,
-}
-
-impl ClientAddresses {
-    fn iter(&self) -> impl Iterator<Item = IpAddr> {
-        once(IpAddr::V4(self.ipv4)).chain(self.ipv6.map(IpAddr::V6))
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GnosisServiceConfig {
-    pub public_key: String,
-    /// An id Phanes does not know fails to parse, so the config is refused.
-    pub allowed_key_ids: Vec<ApiKeyId>,
-    pub allowed_clients: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CelestiaServiceConfig {
-    pub public_key: String,
-    pub allowed_clients: Vec<String>,
 }
 
 fn default_max_clock_skew_seconds() -> u64 {
@@ -87,137 +69,109 @@ fn default_max_clock_skew_seconds() -> u64 {
 }
 
 impl PhanesConfig {
-    /// The config holds Bark credentials, so it must be chmod 600 like the private key.
+    /// Parses the file and checks it, so the services can take a loaded config as valid. It holds
+    /// the private keys, the gnoses and the Bark credentials, so it must be chmod 600; parse
+    /// errors never quote it.
     pub fn load(path: &Path) -> Result<Self, PhanesConfigError> {
-        let text = read_secret_file(path)?;
-        toml::from_str(text.expose_secret()).map_err(|source| PhanesConfigError::Parse {
-            path: path.to_owned(),
-            source,
-        })
+        let config: Self = read_secret_toml(path)?;
+        config.check_addresses_are_distinct()?;
+        config.check_public_keys_are_distinct()?;
+        config.check_allowed_gnoses_exist()?;
+        Ok(config)
     }
 
-    pub fn load_gnosis_private_key(&self) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-        load_private_key(&self.gnosis_private_key_file)
-    }
-
-    pub fn load_celestia_private_key(&self) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-        load_private_key(&self.celestia_private_key_file)
-    }
-
-    pub fn parse_gnosis_client_public_key_from_toml(&self) -> Result<StaticKey, PhanesConfigError> {
-        decode_client_public_key(
-            &self.gnosis_service_config.public_key,
-            "gnosis_service_config.public_key",
-        )
-    }
-
-    pub fn parse_celestia_client_public_key_from_toml(
-        &self,
-    ) -> Result<StaticKey, PhanesConfigError> {
-        decode_client_public_key(
-            &self.celestia_service_config.public_key,
-            "celestia_service_config.public_key",
-        )
-    }
-
-    /// Every client in `[clients]`; rejects an address listed under two names.
-    fn parse_all_clients_from_toml(&self) -> Result<ClientsByIp, PhanesConfigError> {
-        let mut clients_by_ip = HashMap::new();
-        for (name, addresses) in &self.clients {
-            for address in addresses.iter() {
-                if let Some(first) = clients_by_ip.insert(address, name.clone()) {
+    fn check_addresses_are_distinct(&self) -> Result<(), PhanesConfigError> {
+        let mut clients_by_address = HashMap::new();
+        for (name, client) in &self.clients {
+            for address in client.addresses() {
+                if let Some(first) = clients_by_address.insert(address, name) {
                     return Err(PhanesConfigError::DuplicateClientIp {
                         address,
-                        first,
+                        first: first.clone(),
                         second: name.clone(),
                     });
                 }
             }
         }
-        Ok(clients_by_ip)
+        Ok(())
     }
 
-    pub fn parse_gnosis_clients_from_toml(&self) -> Result<ClientsByIp, PhanesConfigError> {
-        self.parse_allowed_clients_from_toml(
-            &self.gnosis_service_config.allowed_clients,
-            "gnosis_service_config.allowed_clients",
-        )
-    }
-
-    pub fn parse_celestia_clients_from_toml(&self) -> Result<ClientsByIp, PhanesConfigError> {
-        self.parse_allowed_clients_from_toml(
-            &self.celestia_service_config.allowed_clients,
-            "celestia_service_config.allowed_clients",
-        )
-    }
-
-    fn parse_allowed_clients_from_toml(
-        &self,
-        names: &[String],
-        field: &str,
-    ) -> Result<ClientsByIp, PhanesConfigError> {
-        if names.is_empty() {
-            return Err(PhanesConfigError::NoAllowedClients(field.to_owned()));
+    /// Across clients and services alike, so a key names one client of one service.
+    fn check_public_keys_are_distinct(&self) -> Result<(), PhanesConfigError> {
+        let mut seen_public_keys: Vec<(&StaticKey, &ClientName)> = Vec::new();
+        for (name, client) in &self.clients {
+            for service in Service::iter() {
+                let public_key = client.public_key(service).expose_secret();
+                if let Some((_, first)) = seen_public_keys
+                    .iter()
+                    .find(|(seen, _)| *seen == public_key)
+                {
+                    return Err(PhanesConfigError::DuplicatePublicKey {
+                        first: (*first).clone(),
+                        second: name.clone(),
+                    });
+                }
+                seen_public_keys.push((public_key, name));
+            }
         }
-        if let Some(name) = names.iter().find(|name| !self.clients.contains_key(*name)) {
-            return Err(PhanesConfigError::UnknownClient {
-                field: field.to_owned(),
-                name: name.clone(),
-            });
-        }
-        let mut clients_by_ip = self.parse_all_clients_from_toml()?;
-        clients_by_ip.retain(|_, name| names.contains(name));
-        Ok(clients_by_ip)
+        Ok(())
     }
-}
 
-fn load_private_key(path: &Path) -> Result<SecretBox<StaticKey>, PhanesConfigError> {
-    let encoded = read_secret_file(path)?;
-    decode_private_key(&encoded)
-        .map_err(|_| PhanesConfigError::InvalidKey(path.display().to_string()))
-}
-
-fn decode_client_public_key(encoded: &str, field: &str) -> Result<StaticKey, PhanesConfigError> {
-    decode_public_key(encoded).map_err(|_| PhanesConfigError::InvalidKey(field.to_owned()))
+    fn check_allowed_gnoses_exist(&self) -> Result<(), PhanesConfigError> {
+        for (name, client) in &self.clients {
+            for &gnosis_id in &client.allowed_gnosis_ids {
+                if self.gnoses.get(gnosis_id).is_none() {
+                    return Err(PhanesConfigError::MissingGnosis {
+                        client: name.clone(),
+                        gnosis_id,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{Permissions, set_permissions, write};
-    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     use tempfile::{TempDir, tempdir};
 
     use super::*;
     use layline::noise::encode_key;
-    use layline::testing::test_keypair;
+    use layline::testing::{test_keypair, write_secret_file};
 
-    const OWNER_ONLY_MODE: u32 = 0o600;
-    const WORLD_READABLE_MODE: u32 = 0o644;
     /// Arbitrary documentation addresses (RFC 5737 / RFC 3849) with no business meaning.
     const OSAKA_IPV4: &str = "192.0.2.1";
     const OSAKA_IPV6: &str = "2001:db8::1";
     const TOKYO_IPV4: &str = "198.51.100.7";
+    const OSAKA: &str = "Osaka";
+    const TOKYO: &str = "Tokyo";
+    const GNOSIS_API_KEY: &str = "天上永恒的王座到来";
+    const GNOSIS_SECRET_KEY: &str = "世界为之焕然一新";
 
+    /// Where phanes.toml is written, Phanes' private keys, and the public keys of two clients.
     struct Fixture {
         directory: TempDir,
-        client_public_key: StaticKey,
+        gnosis_private_key: SecretBox<StaticKey>,
+        celestia_private_key: SecretBox<StaticKey>,
+        osaka_gnosis_public_key: SecretBox<StaticKey>,
+        osaka_celestia_public_key: SecretBox<StaticKey>,
+        tokyo_gnosis_public_key: SecretBox<StaticKey>,
+        tokyo_celestia_public_key: SecretBox<StaticKey>,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let directory = tempdir().expect("temporary directory is created");
-            for name in ["gnosis.key", "celestia.key"] {
-                let (private_key, _) = test_keypair();
-                write_secret(
-                    &directory.path().join(name),
-                    &encode_key(private_key.expose_secret()),
-                );
-            }
-            let (_, client_public_key) = test_keypair();
             Self {
-                directory,
-                client_public_key,
+                directory: tempdir().expect("temporary directory is created"),
+                gnosis_private_key: test_keypair().0,
+                celestia_private_key: test_keypair().0,
+                osaka_gnosis_public_key: test_keypair().1,
+                osaka_celestia_public_key: test_keypair().1,
+                tokyo_gnosis_public_key: test_keypair().1,
+                tokyo_celestia_public_key: test_keypair().1,
             }
         }
 
@@ -225,189 +179,153 @@ mod tests {
             self.directory.path().join(name)
         }
 
-        fn config_text(&self, celestia_public_key: &str) -> String {
+        /// Osaka may fetch binance_demo; Tokyo only uses Celestia. binance_real is held for nobody.
+        fn valid_text(&self) -> String {
             format!(
                 r#"
 listen_address = "127.0.0.1:8888"
-gnosis_private_key_file = "{}"
-celestia_private_key_file = "{}"
-gnoses_directory = "{}"
+gnosis_private_key = "{}"
+celestia_private_key = "{}"
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"
 ipv6 = "{OSAKA_IPV6}"
+client_gnosis_service_public_key = "{}"
+client_celestia_service_public_key = "{}"
+allowed_gnosis_ids = ["binance_demo"]
 
 [clients.Tokyo]
 ipv4 = "{TOKYO_IPV4}"
+client_gnosis_service_public_key = "{}"
+client_celestia_service_public_key = "{}"
+allowed_gnosis_ids = []
 
-[gnosis_service_config]
-public_key = "{}"
-allowed_key_ids = ["binance_demo"]
-allowed_clients = ["Osaka"]
+[gnoses.binance_demo]
+api_key = "{GNOSIS_API_KEY}"
+secret_key = "{GNOSIS_SECRET_KEY}"
 
-[celestia_service_config]
-public_key = "{celestia_public_key}"
-allowed_clients = ["Osaka", "Tokyo"]
+[gnoses.binance_real]
+api_key = "never"
+secret_key = "released"
 "#,
-                self.path("gnosis.key").display(),
-                self.path("celestia.key").display(),
-                self.directory.path().display(),
-                encode_key(&self.client_public_key),
+                encode_key(self.gnosis_private_key.expose_secret()),
+                encode_key(self.celestia_private_key.expose_secret()),
+                encode_key(self.osaka_gnosis_public_key.expose_secret()),
+                encode_key(self.osaka_celestia_public_key.expose_secret()),
+                encode_key(self.tokyo_gnosis_public_key.expose_secret()),
+                encode_key(self.tokyo_celestia_public_key.expose_secret()),
             )
         }
 
         fn load(&self, text: &str) -> Result<PhanesConfig, PhanesConfigError> {
             let path = self.path("phanes.toml");
-            write_secret(&path, text);
+            write_secret_file(&path, text);
             PhanesConfig::load(&path)
+        }
+
+        fn load_valid(&self) -> PhanesConfig {
+            self.load(&self.valid_text()).expect("config loads")
+        }
+
+        /// Expects `text` to fail parsing, and returns the message.
+        fn expect_invalid_toml(&self, text: &str) -> String {
+            let error = self.load(text).expect_err("config is refused");
+            assert!(
+                matches!(
+                    error,
+                    PhanesConfigError::SecretFile(SecretFileError::InvalidToml { .. })
+                ),
+                "{error}"
+            );
+            error.to_string()
         }
     }
 
-    fn write_secret(path: &Path, contents: &str) {
-        write(path, contents).expect("file is written");
-        set_permissions(path, Permissions::from_mode(OWNER_ONLY_MODE))
-            .expect("permissions are set");
-    }
-
     #[test]
-    fn loads_both_services() {
+    fn loads_clients_keys_and_defaults() {
         let fixture = Fixture::new();
-        let encoded_client_key = encode_key(&fixture.client_public_key);
-        let config = fixture
-            .load(&fixture.config_text(&encoded_client_key))
-            .expect("config loads");
+        let config = fixture.load_valid();
+        assert_eq!(
+            vec![OSAKA, TOKYO],
+            config
+                .clients
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             config.max_clock_skew_seconds,
             DEFAULT_MAX_CLOCK_SKEW_SECONDS
         );
         assert!(config.bark.is_none());
-        config.load_gnosis_private_key().expect("gnosis key loads");
-        config
-            .load_celestia_private_key()
-            .expect("celestia key loads");
         assert_eq!(
-            config
-                .parse_gnosis_client_public_key_from_toml()
-                .expect("gnosis client key"),
-            fixture.client_public_key
+            fixture.gnosis_private_key.expose_secret(),
+            config.gnosis_private_key.expose_secret()
         );
         assert_eq!(
-            config
-                .parse_celestia_client_public_key_from_toml()
-                .expect("celestia client key"),
-            fixture.client_public_key
-        );
-    }
-
-    fn address(text: &str) -> IpAddr {
-        text.parse().expect("test address is valid")
-    }
-
-    fn valid_config(fixture: &Fixture) -> String {
-        fixture.config_text(&encode_key(&fixture.client_public_key))
-    }
-
-    #[test]
-    fn each_service_gets_its_allowed_clients() {
-        let fixture = Fixture::new();
-        let config = fixture.load(&valid_config(&fixture)).expect("config loads");
-        let osaka_only: ClientsByIp = [OSAKA_IPV4, OSAKA_IPV6]
-            .into_iter()
-            .map(|text| (address(text), "Osaka".to_owned()))
-            .collect();
-        let mut everyone = osaka_only.clone();
-        everyone.insert(address(TOKYO_IPV4), "Tokyo".to_owned());
-        assert_eq!(
-            config
-                .parse_gnosis_clients_from_toml()
-                .expect("gnosis clients"),
-            osaka_only
-        );
-        assert_eq!(
-            config
-                .parse_celestia_clients_from_toml()
-                .expect("celestia clients"),
-            everyone
-        );
-        assert_eq!(
-            config.parse_all_clients_from_toml().expect("all clients"),
-            everyone
+            fixture.celestia_private_key.expose_secret(),
+            config.celestia_private_key.expose_secret()
         );
     }
 
     #[test]
-    fn unknown_allowed_client_is_rejected() {
-        /// Any name missing from `[clients]`.
-        const UNKNOWN_CLIENT: &str = "Kyoto";
+    fn allowed_gnosis_without_a_table_is_rejected() {
         let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
-            r#"allowed_clients = ["Osaka"]"#,
-            &format!(r#"allowed_clients = ["Osaka", "{UNKNOWN_CLIENT}"]"#),
+        let text = fixture.valid_text().replace(
+            "allowed_gnosis_ids = []",
+            "allowed_gnosis_ids = [\"binance_sbe_demo\"]",
         );
-        let config = fixture.load(&text).expect("config parses");
         assert!(matches!(
-            config.parse_gnosis_clients_from_toml(),
-            Err(PhanesConfigError::UnknownClient { field, name })
-                if field == "gnosis_service_config.allowed_clients" && name == UNKNOWN_CLIENT
+            fixture.load(&text),
+            Err(PhanesConfigError::MissingGnosis { ref client, gnosis_id: GnosisId::BinanceSbeDemo })
+                if client == TOKYO
         ));
     }
 
     #[test]
-    fn empty_allowed_clients_is_rejected() {
+    fn public_key_reused_by_another_client_or_service_is_rejected() {
         let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
-            r#"allowed_clients = ["Osaka", "Tokyo"]"#,
-            "allowed_clients = []",
-        );
-        let config = fixture.load(&text).expect("config parses");
-        assert!(matches!(
-            config.parse_celestia_clients_from_toml(),
-            Err(PhanesConfigError::NoAllowedClients(field))
-                if field == "celestia_service_config.allowed_clients"
-        ));
+        let osaka_celestia_public_key =
+            encode_key(fixture.osaka_celestia_public_key.expose_secret());
+        for reused_by in [
+            &fixture.tokyo_celestia_public_key,
+            &fixture.osaka_gnosis_public_key,
+        ] {
+            let text = fixture.valid_text().replace(
+                &encode_key(reused_by.expose_secret()),
+                &osaka_celestia_public_key,
+            );
+            assert!(matches!(
+                fixture.load(&text),
+                Err(PhanesConfigError::DuplicatePublicKey { .. })
+            ));
+        }
     }
 
     #[test]
     fn address_shared_by_two_clients_is_rejected() {
         let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
+        let text = fixture.valid_text().replace(
             &format!("ipv4 = \"{TOKYO_IPV4}\"\n"),
             &format!("ipv4 = \"{TOKYO_IPV4}\"\nipv6 = \"{OSAKA_IPV6}\"\n"),
         );
-        let config = fixture.load(&text).expect("config parses");
         assert!(matches!(
-            config.parse_gnosis_clients_from_toml(),
-            Err(PhanesConfigError::DuplicateClientIp { address: duplicate, .. })
-                if duplicate == address(OSAKA_IPV6)
+            fixture.load(&text),
+            Err(PhanesConfigError::DuplicateClientIp { address, .. })
+                if address == OSAKA_IPV6.parse::<IpAddr>().expect("test address is valid")
         ));
     }
 
     #[test]
-    fn invalid_client_address_is_rejected() {
+    fn malformed_values_are_rejected() {
         /// The last octet is out of range.
         const INVALID_IPV4: &str = "198.51.100.300";
         let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(TOKYO_IPV4, INVALID_IPV4);
-        assert!(matches!(
-            fixture.load(&text),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn client_without_ipv4_is_rejected() {
-        let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(&format!("ipv4 = \"{TOKYO_IPV4}\"\n"), "");
-        assert!(matches!(
-            fixture.load(&text),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn address_of_the_wrong_family_is_rejected() {
-        let fixture = Fixture::new();
-        let swaps = [
+        let valid_text = fixture.valid_text();
+        let without_ipv4 = valid_text.replace(&format!("ipv4 = \"{TOKYO_IPV4}\"\n"), "");
+        let without_allowed_gnosis_ids = valid_text.replace("allowed_gnosis_ids = []\n", "");
+        let replacements = [
+            (TOKYO_IPV4.to_owned(), INVALID_IPV4.to_owned()),
             (
                 format!("ipv4 = \"{OSAKA_IPV4}\""),
                 format!("ipv4 = \"{OSAKA_IPV6}\""),
@@ -416,99 +334,37 @@ allowed_clients = ["Osaka", "Tokyo"]
                 format!("ipv6 = \"{OSAKA_IPV6}\""),
                 format!("ipv6 = \"{OSAKA_IPV4}\""),
             ),
+            (
+                encode_key(fixture.tokyo_gnosis_public_key.expose_secret()),
+                "not a key".to_owned(),
+            ),
+            (
+                encode_key(fixture.celestia_private_key.expose_secret()),
+                "not a key".to_owned(),
+            ),
+            (
+                "[\"binance_demo\"]".to_owned(),
+                "[\"binance_demo_trading\"]".to_owned(),
+            ),
+            (
+                "[clients.Tokyo]\n".to_owned(),
+                "[clients.Tokyo]\nname = \"Tokyo\"\n".to_owned(),
+            ),
         ];
-        for (valid, wrong_family) in swaps {
-            let text = valid_config(&fixture).replace(&valid, &wrong_family);
-            assert!(matches!(
-                fixture.load(&text),
-                Err(PhanesConfigError::Parse { .. })
-            ));
+        for (valid, invalid) in replacements {
+            fixture.expect_invalid_toml(&valid_text.replace(&valid, &invalid));
         }
+        fixture.expect_invalid_toml(&without_ipv4);
+        fixture.expect_invalid_toml(&without_allowed_gnosis_ids);
     }
 
     #[test]
-    fn address_list_instead_of_table_is_rejected() {
+    fn misnamed_gnosis_field_is_rejected_without_quoting_the_secret() {
         let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
-            &format!("[clients.Tokyo]\nipv4 = \"{TOKYO_IPV4}\"\n"),
-            &format!("[clients]\nTokyo = [\"{TOKYO_IPV4}\"]\n"),
-        );
-        assert!(matches!(
-            fixture.load(&text),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn unknown_key_id_is_rejected() {
-        let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
-            "allowed_key_ids = [\"binance_demo\"]",
-            "allowed_key_ids = [\"binance_demo_trading\"]",
-        );
-        assert!(matches!(
-            fixture.load(&text),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn name_field_in_service_config_is_rejected() {
-        let fixture = Fixture::new();
-        let text = valid_config(&fixture).replace(
-            "[gnosis_service_config]\n",
-            "[gnosis_service_config]\nname = \"Osaka\"\n",
-        );
-        assert!(matches!(
-            fixture.load(&text),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn missing_celestia_section_is_rejected() {
-        let fixture = Fixture::new();
-        let text = fixture.config_text("unused");
-        let without_celestia = text
-            .split("[celestia_service_config]")
-            .next()
-            .expect("split yields the first part");
-        assert!(matches!(
-            fixture.load(without_celestia),
-            Err(PhanesConfigError::Parse { .. })
-        ));
-    }
-
-    #[test]
-    fn invalid_celestia_public_key_is_rejected() {
-        let fixture = Fixture::new();
-        let config = fixture
-            .load(&fixture.config_text("not a key"))
-            .expect("config parses");
-        assert!(matches!(
-            config.parse_celestia_client_public_key_from_toml(),
-            Err(PhanesConfigError::InvalidKey(field)) if field == "celestia_service_config.public_key"
-        ));
-    }
-
-    #[test]
-    fn world_readable_private_key_is_rejected() {
-        let fixture = Fixture::new();
-        let encoded_client_key = encode_key(&fixture.client_public_key);
-        let config = fixture
-            .load(&fixture.config_text(&encoded_client_key))
-            .expect("config loads");
-        set_permissions(
-            fixture.path("celestia.key"),
-            Permissions::from_mode(WORLD_READABLE_MODE),
-        )
-        .expect("permissions are set");
-        assert!(matches!(
-            config.load_celestia_private_key(),
-            Err(PhanesConfigError::SecretFile(
-                SecretFileError::InsecurePermissions(_)
-            ))
-        ));
+        let text = fixture.valid_text().replacen("secret_key", "secret_kye", 1);
+        let message = fixture.expect_invalid_toml(&text);
+        assert!(message.contains("secret_kye"), "{message}");
+        assert!(!message.contains(GNOSIS_SECRET_KEY), "{message}");
     }
 
     #[test]

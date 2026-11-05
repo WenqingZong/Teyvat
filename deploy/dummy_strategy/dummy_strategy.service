@@ -1,0 +1,24 @@
+# /etc/systemd/system/dummy_strategy.service
+[Unit]
+Description=Dummy Strategy (development stand-in strategy, logs market data latency)
+After=network-online.target market_data_provider.service
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+# The same user as the market data provider, so it can map the rings the provider creates in /dev/shm.
+User=<your user>
+ExecStart=/usr/local/bin/dummy_strategy --config /etc/dummy_strategy/strategy.toml --report-interval-seconds 60
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# No PrivateDevices or PrivateIPC: it reads the provider's rings in /dev/shm/market_data_provider.
+# Own journal namespace so uninstall can delete its logs only: journalctl --namespace=dummy_strategy
+LogNamespace=dummy_strategy
+
+[Install]
+WantedBy=multi-user.target

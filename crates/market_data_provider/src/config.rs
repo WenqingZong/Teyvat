@@ -4,15 +4,14 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use anyhow::Result;
 use serde::Deserialize;
 
 use crate::DEFAULT_ROOT_DIRECTORY;
 use crate::phanes_client::{PhanesClient, PhanesClientConfig};
 use layline::bark::{BarkConfig, Notifier};
 use layline::build::RELEASE_BUILD;
-use layline::secrets::read_secret_file;
+use layline::secrets::read_secret_toml;
 
 const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(30);
 #[derive(Debug, Deserialize)]
@@ -22,7 +21,7 @@ struct ConfigFile {
     port: u16,
     /// Serve the venues' demo-trading data; every subscription request must ask for the same environment.
     demo: bool,
-    phanes: PhanesClientConfig,
+    phanes_client: PhanesClientConfig,
     /// Required by release builds only; debug builds log alerts instead.
     bark: Option<BarkConfig>,
 }
@@ -40,17 +39,15 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     /// Checks everything up front, so a bad key or a release build without `[bark]` refuses to start.
-    /// The file must be chmod 600, since it holds the Bark credentials.
+    /// The file must be chmod 600, since it holds the Gnosis private key and the Bark credentials.
     pub fn load(path: &Path) -> Result<Self> {
-        let text = read_secret_file(path)?;
-        let config: ConfigFile = toml::from_str(text.expose_secret())
-            .with_context(|| format!("invalid config {}", path.display()))?;
+        let config: ConfigFile = read_secret_toml(path)?;
         Ok(Self {
             root_directory: PathBuf::from(DEFAULT_ROOT_DIRECTORY),
             listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, config.port)),
             lease_duration: DEFAULT_LEASE_DURATION,
             demo: config.demo,
-            phanes_client: PhanesClient::new(&config.phanes)?,
+            phanes_client: PhanesClient::new(config.phanes_client)?,
             notifier: Notifier::new(RELEASE_BUILD, config.bark)?,
         })
     }
@@ -58,14 +55,14 @@ impl ProviderConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{Permissions, set_permissions, write};
+    use std::fs::{Permissions, set_permissions};
     use std::os::unix::fs::PermissionsExt;
 
     use tempfile::{TempDir, tempdir};
 
     use super::*;
+    use layline::testing::write_secret_file;
 
-    const OWNER_ONLY_MODE: u32 = 0o600;
     const WORLD_READABLE_MODE: u32 = 0o644;
     /// Any 32 bytes, base64-encoded, make a valid X25519 key for parsing.
     const DUMMY_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
@@ -76,10 +73,9 @@ mod tests {
 
     impl ConfigFixture {
         fn new() -> Self {
-            let directory = tempdir().expect("temp dir creation is expected to not fail");
-            let fixture = Self { directory };
-            fixture.write_secret("gnosis.key", DUMMY_KEY);
-            fixture
+            Self {
+                directory: tempdir().expect("temp dir creation is expected to not fail"),
+            }
         }
 
         fn path(&self, name: &str) -> PathBuf {
@@ -88,16 +84,13 @@ mod tests {
 
         fn write_secret(&self, name: &str, contents: &str) -> PathBuf {
             let path = self.path(name);
-            write(&path, contents).expect("writing is expected to not fail");
-            set_permissions(&path, Permissions::from_mode(OWNER_ONLY_MODE))
-                .expect("setting permissions is expected to not fail");
+            write_secret_file(&path, contents);
             path
         }
 
         fn valid_text(&self) -> String {
             format!(
-                "port = 6666\ndemo = false\n\n[phanes]\nurl = \"https://phanes.example\"\ngnosis_private_key_file = \"{}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n",
-                self.path("gnosis.key").display()
+                "port = 6666\ndemo = false\n\n[phanes_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
             )
         }
 
@@ -133,8 +126,8 @@ mod tests {
     fn invalid_phanes_key_is_refused() {
         let fixture = ConfigFixture::new();
         let text = fixture.valid_text().replace(
-            &format!("gnosis_public_key = \"{DUMMY_KEY}\""),
-            "gnosis_public_key = \"short\"",
+            &format!("phanes_gnosis_public_key = \"{DUMMY_KEY}\""),
+            "phanes_gnosis_public_key = \"short\"",
         );
         assert!(fixture.load(&text).is_err());
     }

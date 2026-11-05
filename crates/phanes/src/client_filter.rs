@@ -1,10 +1,10 @@
-//! IP allow list in front of every service. Production traffic arrives through cloudflared,
-//! so the socket peer is always loopback; the client address comes from `CF-Connecting-IP`,
-//! which Cloudflare overwrites (unlike the appendable `X-Forwarded-For`).
+//! IP allow list in front of every service: any address of a `[clients.<name>]` table may call any
+//! service, and the service then checks that the address and the handshake's key belong to the
+//! same client. Production traffic arrives through cloudflared, so the socket peer is always
+//! loopback; the client address comes from `CF-Connecting-IP`, which Cloudflare overwrites (unlike
+//! the appendable `X-Forwarded-For`).
 
-use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -17,55 +17,35 @@ use axum::response::{IntoResponse, Response};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, warn};
 
+use crate::clients::{ClientName, Clients};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::RequestDetails;
-use crate::service::{Language, Service};
 
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
-/// Client name seen by handlers when the filter is not mounted (debug builds).
-pub const UNFILTERED_CLIENT_NAME: &str = "unfiltered";
 
-/// Client address → its name in `[clients]`.
-pub type ClientsByIp = HashMap<IpAddr, String>;
-
-/// Name of the client that passed [`filter_clients`], for logs and notifications.
+/// The client the request's address belongs to, as [`filter_clients`] found it; `None` when the
+/// filter is not mounted (debug builds).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClientName(pub String);
+pub struct IpClientName(pub Option<ClientName>);
 
-impl Display for ClientName {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl<S: Send + Sync> FromRequestParts<S> for ClientName {
+impl<S: Send + Sync> FromRequestParts<S> for IpClientName {
     type Rejection = Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        Ok(parts
-            .extensions
-            .get::<Self>()
-            .cloned()
-            .unwrap_or_else(|| Self(UNFILTERED_CLIENT_NAME.to_owned())))
+        Ok(Self(parts.extensions.get::<ClientName>().cloned()))
     }
 }
 
-/// The allow list of one service.
+/// The allow list shared by every service.
 pub struct ClientFilter {
-    service: Service,
-    clients: ClientsByIp,
+    clients: Arc<Clients>,
     notifications: UnboundedSender<Notification>,
     blocked_throttle: Mutex<UnauthenticatedThrottle>,
 }
 
 impl ClientFilter {
-    pub fn new(
-        service: Service,
-        clients: ClientsByIp,
-        notifications: UnboundedSender<Notification>,
-    ) -> Self {
+    pub fn new(clients: Arc<Clients>, notifications: UnboundedSender<Notification>) -> Self {
         Self {
-            service,
             clients,
             notifications,
             blocked_throttle: Mutex::default(),
@@ -82,7 +62,6 @@ impl ClientFilter {
             return;
         };
         let notification = Notification::Blocked {
-            service: self.service,
             client_ip,
             request,
             suppressed,
@@ -93,9 +72,9 @@ impl ClientFilter {
     }
 }
 
-/// Middleware: lets allowed clients through with their [`ClientName`], answers everyone
-/// else (including a missing or unparsable header) with an empty 404 after logging the
-/// whole request.
+/// Middleware: lets allowed clients through with their [`ClientName`] (read it with
+/// [`IpClientName`]), answers everyone else (including a missing or unparsable header) with an
+/// empty 404 after logging the whole request.
 pub async fn filter_clients(
     State(filter): State<Arc<ClientFilter>>,
     mut request: Request,
@@ -106,18 +85,22 @@ pub async fn filter_clients(
         .get(CLIENT_IP_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<IpAddr>().ok());
-    let Some((client_ip, name)) =
-        client_ip.and_then(|address| Some((address, filter.clients.get(&address)?.clone())))
-    else {
-        let service = filter.service.to_string(Language::English);
+    let Some((client_ip, name)) = client_ip.and_then(|address| {
+        let (name, _) = filter.clients.iter().find(|(_, client)| {
+            client
+                .addresses()
+                .any(|client_address| client_address == address)
+        })?;
+        Some((address, name.clone()))
+    }) else {
         let request = RequestDetails::read_request(request).await;
-        warn!("blocked {service} request: {request}");
+        warn!("blocked request: {request}");
         filter.notify_blocked(client_ip, request);
         return StatusCode::NOT_FOUND.into_response();
     };
     let path = request.uri().path();
     debug!("allowed client {name} ({client_ip}) to {path}");
-    request.extensions_mut().insert(ClientName(name));
+    request.extensions_mut().insert(name);
     next.run(request).await
 }
 
@@ -134,25 +117,29 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::clients::ClientConfig;
+    use crate::clients::tests::test_client;
     use crate::request_details::RequestHead;
 
     const PATH: &str = "/whoami";
     /// Arbitrary documentation addresses (RFC 5737 / RFC 3849) with no business meaning.
-    const OSAKA_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
-    const OSAKA_IPV6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const OSAKA_IPV6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
 
-    async fn whoami(client: ClientName) -> String {
-        client.0
+    /// Answers with the client name the filter found, or nothing when no filter runs.
+    async fn whoami(IpClientName(ip_client_name_option): IpClientName) -> String {
+        ip_client_name_option.unwrap_or_default()
     }
 
     fn filtered_router() -> (Router, UnboundedReceiver<Notification>) {
         let (sender, notifications) = unbounded_channel();
-        let clients = [OSAKA_IPV4, OSAKA_IPV6]
-            .into_iter()
-            .map(|address| (address, "Osaka".to_owned()))
-            .collect();
-        let filter = Arc::new(ClientFilter::new(Service::Gnosis, clients, sender));
+        let osaka = ClientConfig {
+            ipv6: Some(OSAKA_IPV6),
+            ..test_client(OSAKA_IPV4)
+        };
+        let clients = Clients::from([(ClientName::from("Osaka"), osaka)]);
+        let filter = Arc::new(ClientFilter::new(Arc::new(clients), sender));
         let router = Router::new()
             .route(PATH, get(whoami))
             .layer(from_fn_with_state(filter, filter_clients));
@@ -194,7 +181,6 @@ mod tests {
             headers,
         };
         Notification::Blocked {
-            service: Service::Gnosis,
             client_ip,
             request: RequestDetails::new(head, &[]),
             suppressed: 0,
@@ -204,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn allowed_ipv4_and_ipv6_reach_the_handler_with_their_name() {
         let (router, mut notifications) = filtered_router();
-        for address in [OSAKA_IPV4, OSAKA_IPV6] {
+        for address in [IpAddr::V4(OSAKA_IPV4), IpAddr::V6(OSAKA_IPV6)] {
             let response = call(&router, Some(&address.to_string())).await;
             assert_eq!(response, (StatusCode::OK, "Osaka".to_owned()));
         }
@@ -238,12 +224,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unfiltered_handler_sees_the_placeholder_name() {
+    async fn unfiltered_handler_sees_no_client_name() {
         let router = Router::new().route(PATH, get(whoami));
         let response = call(&router, None).await;
-        assert_eq!(
-            response,
-            (StatusCode::OK, UNFILTERED_CLIENT_NAME.to_owned())
-        );
+        assert_eq!(response, (StatusCode::OK, String::new()));
     }
 }

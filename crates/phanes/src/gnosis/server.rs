@@ -1,9 +1,7 @@
-//! Phanes side of Gnosis: authenticates the client and releases API key files from disk.
+//! Phanes side of Gnosis: identifies the client by the public key of its handshake and releases
+//! the gnoses its `allowed_gnosis_ids` lists.
 
-use std::collections::{HashMap, HashSet};
-use std::fs::read_to_string as read_file_to_string;
-use std::io::Error as IoError;
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,17 +11,17 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response as HttpResponse};
 use axum::routing::post;
-use secrecy::{SecretBox, SecretString};
-use tokio::fs::read_to_string;
+use secrecy::SecretBox;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
 
-use crate::client_filter::ClientName;
+use crate::client_filter::IpClientName;
+use crate::clients::{ClientConfig, ClientName, Clients, identify};
+use crate::gnosis::config::{AnyGnosis, Gnoses};
 use crate::notify::{Notification, UnauthenticatedThrottle};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
-use layline::api_keys::{ApiKeyFormatError, ApiKeyId};
-use layline::gnosis::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
+use layline::gnosis::{GNOSIS_PATH, GnosisId, NONCE_LENGTH, Request, Responder, Response};
 use layline::noise::StaticKey;
 use layline::time::since_unix_epoch;
 
@@ -40,50 +38,16 @@ pub enum DenialReason {
     MalformedNonce,
     #[error("replayed nonce")]
     Replay,
-    #[error("key id not allowed for this client")]
+    #[error("gnosis not allowed for this client")]
     NotAllowed,
-    #[error("key not found on server")]
-    KeyNotFound,
-}
-
-/// Why an allowed key's file fails the startup check. Never quotes the file content.
-#[derive(Debug, thiserror::Error)]
-pub enum KeyFileError {
-    #[error("cannot read key file {}: {source}", path.display())]
-    Unreadable { path: PathBuf, source: IoError },
-    #[error("key file {} does not match its key id: {source}", path.display())]
-    Mismatched {
-        path: PathBuf,
-        source: ApiKeyFormatError,
-    },
-}
-
-/// `<gnoses_directory>/<key_id>.json`.
-pub fn api_key_file_path(gnoses_directory: &Path, key_id: ApiKeyId) -> PathBuf {
-    gnoses_directory.join(key_id.file_name())
-}
-
-/// Startup check of an allowed key's file: it exists and holds the fields of `key_id`'s type.
-pub fn check_api_key_file(gnoses_directory: &Path, key_id: ApiKeyId) -> Result<(), KeyFileError> {
-    let path = api_key_file_path(gnoses_directory, key_id);
-    let key_file = SecretString::from(read_file_to_string(&path).map_err(|source| {
-        KeyFileError::Unreadable {
-            path: path.clone(),
-            source,
-        }
-    })?);
-    key_id
-        .check_key_file(&key_file)
-        .map_err(|source| KeyFileError::Mismatched { path, source })
 }
 
 pub struct GnosisState {
-    pub gnosis_private_key: SecretBox<StaticKey>,
-    pub client_public_key: StaticKey,
-    pub allowed_key_ids: HashSet<ApiKeyId>,
-    pub gnoses_directory: PathBuf,
-    pub max_clock_skew_seconds: u64,
-    pub notifications: UnboundedSender<Notification>,
+    gnosis_private_key: SecretBox<StaticKey>,
+    clients: Arc<Clients>,
+    gnoses: Gnoses,
+    max_clock_skew_seconds: u64,
+    notifications: UnboundedSender<Notification>,
     /// nonce -> unix second after which the nonce's timestamp is out of window anyway.
     seen_nonces: Mutex<HashMap<String, u64>>,
     unauthenticated_throttle: Mutex<UnauthenticatedThrottle>,
@@ -92,17 +56,15 @@ pub struct GnosisState {
 impl GnosisState {
     pub fn new(
         gnosis_private_key: SecretBox<StaticKey>,
-        client_public_key: StaticKey,
-        allowed_key_ids: HashSet<ApiKeyId>,
-        gnoses_directory: PathBuf,
+        clients: Arc<Clients>,
+        gnoses: Gnoses,
         max_clock_skew_seconds: u64,
         notifications: UnboundedSender<Notification>,
     ) -> Self {
         Self {
             gnosis_private_key,
-            client_public_key,
-            allowed_key_ids,
-            gnoses_directory,
+            clients,
+            gnoses,
             max_clock_skew_seconds,
             notifications,
             seen_nonces: Mutex::default(),
@@ -116,39 +78,44 @@ impl GnosisState {
         }
     }
 
-    fn notify_unauthenticated(&self, request: RequestDetails) {
-        let suppressed = self
+    /// Logs the whole request, pushes (throttled) and answers with an empty 404.
+    fn reject_unauthenticated(
+        &self,
+        reason: &str,
+        request_head: RequestHead,
+        body: &[u8],
+    ) -> HttpResponse {
+        let request = RequestDetails::new(request_head, body);
+        warn!("rejected unauthenticated Gnosis request: {reason}; {request}");
+        let suppressed_option = self
             .unauthenticated_throttle
             .lock()
             .expect("unauthenticated throttle mutex is not poisoned")
             .record(Instant::now());
-        if let Some(suppressed) = suppressed {
+        if let Some(suppressed) = suppressed_option {
             self.notify(Notification::Unauthenticated {
                 service: Service::Gnosis,
                 request,
                 suppressed,
             });
         }
+        StatusCode::NOT_FOUND.into_response()
     }
 
-    async fn decide(&self, request: &Request) -> Result<SecretString, DenialReason> {
+    fn decide(&self, client: &ClientConfig, request: &Request) -> Result<AnyGnosis, DenialReason> {
         let now = since_unix_epoch().as_secs();
         let skew_seconds = now.abs_diff(request.timestamp);
         if skew_seconds > self.max_clock_skew_seconds {
             return Err(DenialReason::ClockSkew { skew_seconds });
         }
         self.check_and_record_nonce(&request.nonce, request.timestamp, now)?;
-
-        if !self.allowed_key_ids.contains(&request.key_id) {
+        if !client.allowed_gnosis_ids.contains(&request.gnosis_id) {
             return Err(DenialReason::NotAllowed);
         }
-
-        let path = api_key_file_path(&self.gnoses_directory, request.key_id);
-        let key_file = read_to_string(&path).await.map_err(|error| {
-            error!("cannot read key file {}: {error}", path.display());
-            DenialReason::KeyNotFound
-        })?;
-        Ok(SecretString::from(key_file))
+        Ok(self
+            .gnoses
+            .get(request.gnosis_id)
+            .expect("PhanesConfig::load checked every allowed gnosis has a table"))
     }
 
     fn check_and_record_nonce(
@@ -187,63 +154,85 @@ pub fn router(state: Arc<GnosisState>) -> Router {
 
 async fn gnosis(
     State(state): State<Arc<GnosisState>>,
-    ClientName(client): ClientName,
+    IpClientName(ip_client_name_option): IpClientName,
     request_head: RequestHead,
     body: Bytes,
 ) -> HttpResponse {
-    let responder =
-        match Responder::read_request(&state.gnosis_private_key, &state.client_public_key, &body) {
-            Ok(responder) => responder,
-            Err(error) => {
-                let request = RequestDetails::new(request_head, &body);
-                warn!("rejected unauthenticated request from client {client}: {error}; {request}");
-                state.notify_unauthenticated(request);
-                return StatusCode::NOT_FOUND.into_response();
-            }
-        };
-
-    let (key_id, decision) = match responder.parse_request() {
-        Ok(request) => {
-            let decision = state.decide(&request).await;
-            (Some(request.key_id), decision)
-        }
+    let responder = match Responder::read_request(&state.gnosis_private_key, &body) {
+        Ok(responder) => responder,
         Err(error) => {
-            warn!("client {client} sent a malformed payload: {error}");
-            (None, Err(DenialReason::MalformedRequest))
+            return state.reject_unauthenticated(&error.to_string(), request_head, &body);
+        }
+    };
+    let (client_name, client) = match identify(
+        &state.clients,
+        Service::Gnosis,
+        responder.client_public_key(),
+        ip_client_name_option.as_ref(),
+    ) {
+        Ok(identified) => identified,
+        Err(error) => {
+            return state.reject_unauthenticated(&error.to_string(), request_head, &body);
         }
     };
 
-    let (response, notification) = match (decision, key_id) {
-        (Ok(secret), Some(key_id)) => {
-            info!("granted key {key_id} to client {client}");
+    let request = match responder.parse_request() {
+        Ok(request) => request,
+        Err(error) => {
+            warn!("client {client_name} sent a malformed payload: {error}");
+            let (response, notification) = deny(client_name, None, &DenialReason::MalformedRequest);
+            return send(&state, responder, client_name, &response, notification);
+        }
+    };
+    let gnosis_id = request.gnosis_id;
+    let (response, notification) = match state.decide(client, &request) {
+        Ok(gnosis) => {
+            info!("granted gnosis {gnosis_id} to client {client_name}");
             (
-                Response::Granted { secret },
+                Response::Granted { gnosis },
                 Notification::Granted {
-                    client: client.clone(),
-                    key_id,
+                    client: client_name.clone(),
+                    gnosis_id,
                 },
             )
         }
-        (decision, key_id) => {
-            let reason = decision
-                .err()
-                .unwrap_or(DenialReason::MalformedRequest)
-                .to_string();
-            warn!("denied key {key_id:?} to client {client}: {reason}");
-            (
-                Response::Denied {
-                    reason: reason.clone(),
-                },
-                Notification::Denied {
-                    client: client.clone(),
-                    key_id,
-                    reason,
-                },
-            )
-        }
+        Err(reason) => deny(client_name, Some(gnosis_id), &reason),
     };
+    send(&state, responder, client_name, &response, notification)
+}
 
-    match responder.write_response(&response) {
+/// The denial for the client and its push. `gnosis_id_option` is `None` when the payload did not parse.
+fn deny(
+    client: &ClientName,
+    gnosis_id_option: Option<GnosisId>,
+    reason: &DenialReason,
+) -> (Response<AnyGnosis>, Notification) {
+    let reason = reason.to_string();
+    match gnosis_id_option {
+        Some(gnosis_id) => warn!("denied gnosis {gnosis_id} to client {client}: {reason}"),
+        None => warn!("denied an unparsable request of client {client}: {reason}"),
+    }
+    (
+        Response::Denied {
+            reason: reason.clone(),
+        },
+        Notification::Denied {
+            client: client.clone(),
+            gnosis_id: gnosis_id_option,
+            reason,
+        },
+    )
+}
+
+/// Encrypts `response` for the client; pushes `notification` once it is on its way.
+fn send(
+    state: &GnosisState,
+    responder: Responder,
+    client: &ClientName,
+    response: &Response<AnyGnosis>,
+    notification: Notification,
+) -> HttpResponse {
+    match responder.write_response(response) {
         Ok(second_message) => {
             state.notify(notification);
             (
@@ -255,8 +244,8 @@ async fn gnosis(
         Err(error) => {
             error!("failed to encrypt response: {error}");
             state.notify(Notification::Denied {
-                client,
-                key_id: None,
+                client: client.clone(),
+                gnosis_id: None,
                 reason: format!("server failed to encrypt response: {error}"),
             });
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -266,59 +255,65 @@ async fn gnosis(
 
 #[cfg(test)]
 mod tests {
-    use std::fs::write;
+    use std::net::Ipv4Addr;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request as HttpRequest};
     use secrecy::ExposeSecret;
     use serde_json::{from_slice, json};
-    use tempfile::{TempDir, tempdir};
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tower::ServiceExt;
 
     use super::*;
-    use crate::client_filter::UNFILTERED_CLIENT_NAME;
+    use crate::clients::tests::test_client;
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
+    use layline::gnosis::binance::BinanceApiKey;
     use layline::gnosis::{GNOSIS_PROLOGUE, Initiator};
-    use layline::noise::{build_handshake, decrypt, encrypt};
+    use layline::noise::{build_initiator, decrypt, encrypt};
     use layline::testing::test_keypair;
     use layline::time::get_current_timestamp_nanoseconds;
 
-    const KEY_ID: ApiKeyId = ApiKeyId::BinanceDemo;
-    /// Served byte for byte, whitespace included.
-    const KEY_FILE: &str = "{\n    \"api_key\": \"天上永恒的王座到来\",\n    \"secret_key\": \"世界为之焕然一新\"\n}\n";
-    /// Has a key file but is not in the allow list.
-    const NOT_ALLOWED_KEY_ID: ApiKeyId = ApiKeyId::BinanceReal;
-    const NOT_ALLOWED_KEY_FILE: &str = r#"{"api_key": "never", "secret_key": "released"}"#;
-    /// In the allow list but has no key file.
-    const MISSING_KEY_ID: ApiKeyId = ApiKeyId::BinanceSbeDemo;
+    const CLIENT_NAME: &str = "Osaka";
+    const OTHER_CLIENT_NAME: &str = "Tokyo";
+    /// The one gnosis the client may fetch.
+    const ALLOWED_GNOSIS_ID: GnosisId = GnosisId::BinanceDemo;
+    /// Not in the client's `allowed_gnosis_ids`.
+    const NOT_ALLOWED_GNOSIS_ID: GnosisId = GnosisId::BinanceReal;
+    const API_KEY: &str = "天上永恒的王座到来";
+    const SECRET_KEY: &str = "世界为之焕然一新";
+    /// Arbitrary documentation address (RFC 5737) with no business meaning.
+    const CLIENT_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 
     struct Harness {
         app: Router,
         client_private_key: SecretBox<StaticKey>,
-        gnosis_public_key: StaticKey,
+        gnosis_public_key: SecretBox<StaticKey>,
         notifications: UnboundedReceiver<Notification>,
-        _gnoses_directory: TempDir,
+    }
+
+    /// Phanes holds both gnoses; the client may fetch only `ALLOWED_GNOSIS_ID`.
+    fn gnoses() -> Gnoses {
+        toml::from_str(&format!(
+            "[{ALLOWED_GNOSIS_ID}]\napi_key = \"{API_KEY}\"\nsecret_key = \"{SECRET_KEY}\"\n\
+             [{NOT_ALLOWED_GNOSIS_ID}]\napi_key = \"never\"\nsecret_key = \"released\"\n"
+        ))
+        .expect("the gnoses parse")
     }
 
     fn harness() -> Harness {
         let (gnosis_private_key, gnosis_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let gnoses_directory = tempdir().expect("temporary directory is created");
-        for (key_id, key_file) in [
-            (KEY_ID, KEY_FILE),
-            (NOT_ALLOWED_KEY_ID, NOT_ALLOWED_KEY_FILE),
-        ] {
-            write(api_key_file_path(gnoses_directory.path(), key_id), key_file)
-                .expect("key file is written");
-        }
-
+        let client = ClientConfig {
+            client_gnosis_service_public_key: client_public_key,
+            allowed_gnosis_ids: vec![ALLOWED_GNOSIS_ID],
+            ..test_client(CLIENT_IPV4)
+        };
+        let clients = Clients::from([(ClientName::from(CLIENT_NAME), client)]);
         let (sender, notifications) = unbounded_channel();
         let state = GnosisState::new(
             gnosis_private_key,
-            client_public_key,
-            HashSet::from([KEY_ID, MISSING_KEY_ID]),
-            gnoses_directory.path().to_owned(),
+            Arc::new(clients),
+            gnoses(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
             sender,
         );
@@ -327,14 +322,23 @@ mod tests {
             client_private_key,
             gnosis_public_key,
             notifications,
-            _gnoses_directory: gnoses_directory,
         }
     }
 
-    async fn post(app: &Router, body: Vec<u8>) -> (StatusCode, Vec<u8>) {
-        let request = HttpRequest::post(GNOSIS_PATH)
+    /// Posts `body` as if the IP filter had found `ip_client_name_option` (`None`: no filter).
+    async fn post(
+        app: &Router,
+        body: Vec<u8>,
+        ip_client_name_option: Option<&str>,
+    ) -> (StatusCode, Vec<u8>) {
+        let mut request = HttpRequest::post(GNOSIS_PATH)
             .body(Body::from(body))
             .expect("http request is valid");
+        if let Some(ip_client_name) = ip_client_name_option {
+            request
+                .extensions_mut()
+                .insert(ClientName::from(ip_client_name));
+        }
         let response = app
             .clone()
             .oneshot(request)
@@ -348,14 +352,14 @@ mod tests {
     }
 
     impl Harness {
-        async fn gnosis(&self, request: &Request) -> Response {
+        async fn gnosis(&self, request: &Request) -> Response<BinanceApiKey> {
             let (initiator, first_message) = Initiator::write_request(
                 &self.client_private_key,
                 &self.gnosis_public_key,
                 request,
             )
             .expect("client writes request");
-            let (status, body) = post(&self.app, first_message).await;
+            let (status, body) = post(&self.app, first_message, None).await;
             assert_eq!(status, StatusCode::OK);
             initiator
                 .read_response(&body)
@@ -367,9 +371,41 @@ mod tests {
                 .try_recv()
                 .expect("a notification was queued")
         }
+
+        /// Message 1 for `ALLOWED_GNOSIS_ID`, signed with `client_private_key`.
+        fn first_message(&self, client_private_key: &SecretBox<StaticKey>) -> Vec<u8> {
+            let request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
+            let (_, first_message) =
+                Initiator::write_request(client_private_key, &self.gnosis_public_key, &request)
+                    .expect("client writes request");
+            first_message
+        }
+
+        /// Expects an empty 404 and one unauthenticated push carrying `first_message`.
+        async fn expect_unauthenticated(
+            &mut self,
+            first_message: Vec<u8>,
+            ip_client_name_option: Option<&str>,
+        ) {
+            let (status, body) =
+                post(&self.app, first_message.clone(), ip_client_name_option).await;
+            assert_eq!((status, body.is_empty()), (StatusCode::NOT_FOUND, true));
+            let Notification::Unauthenticated {
+                service,
+                request,
+                suppressed,
+            } = self.next_notification()
+            else {
+                panic!("expected an unauthenticated notification");
+            };
+            assert_eq!((service, suppressed), (Service::Gnosis, 0));
+            assert_eq!(request.head.method, Method::POST);
+            assert_eq!(request.head.uri.path(), GNOSIS_PATH);
+            assert_eq!(request.payload.as_ref(), first_message.as_slice());
+        }
     }
 
-    fn assert_denied(response: Response, expected: &str) {
+    fn assert_denied(response: Response<BinanceApiKey>, expected: &str) {
         match response {
             Response::Denied { reason } => assert!(
                 reason.contains(expected),
@@ -380,31 +416,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grants_allowed_key_and_notifies() {
+    async fn grants_allowed_gnosis_and_notifies() {
         let mut harness = harness();
         match harness
-            .gnosis(&Request::new(KEY_ID, get_current_timestamp_nanoseconds()))
+            .gnosis(&Request::new(
+                ALLOWED_GNOSIS_ID,
+                get_current_timestamp_nanoseconds(),
+            ))
             .await
         {
-            Response::Granted { secret } => assert_eq!(secret.expose_secret(), KEY_FILE),
+            Response::Granted { gnosis } => {
+                assert_eq!(API_KEY, gnosis.api_key().expose_secret());
+                assert_eq!(SECRET_KEY, gnosis.secret_key().expose_secret());
+            }
             Response::Denied { reason } => panic!("unexpected denial: {reason}"),
         }
         assert_eq!(
             harness.next_notification(),
             Notification::Granted {
-                client: UNFILTERED_CLIENT_NAME.into(),
-                key_id: KEY_ID
+                client: CLIENT_NAME.into(),
+                gnosis_id: ALLOWED_GNOSIS_ID,
             }
         );
     }
 
     #[tokio::test]
-    async fn denies_key_not_in_allow_list() {
+    async fn denies_gnosis_the_client_is_not_allowed() {
         let mut harness = harness();
         assert_denied(
             harness
                 .gnosis(&Request::new(
-                    NOT_ALLOWED_KEY_ID,
+                    NOT_ALLOWED_GNOSIS_ID,
                     get_current_timestamp_nanoseconds(),
                 ))
                 .await,
@@ -413,74 +455,33 @@ mod tests {
         assert_eq!(
             harness.next_notification(),
             Notification::Denied {
-                client: UNFILTERED_CLIENT_NAME.into(),
-                key_id: Some(NOT_ALLOWED_KEY_ID),
+                client: CLIENT_NAME.into(),
+                gnosis_id: Some(NOT_ALLOWED_GNOSIS_ID),
                 reason: DenialReason::NotAllowed.to_string(),
             }
         );
     }
 
-    #[tokio::test]
-    async fn denies_missing_key_file() {
-        let harness = harness();
-        assert_denied(
-            harness
-                .gnosis(&Request::new(
-                    MISSING_KEY_ID,
-                    get_current_timestamp_nanoseconds(),
-                ))
-                .await,
-            "not found",
-        );
-    }
-
-    #[test]
-    fn startup_check_wants_the_fields_of_the_key_id_and_never_quotes_the_file() {
-        let directory = tempdir().expect("temporary directory is created");
-        let path = api_key_file_path(directory.path(), KEY_ID);
-        assert_eq!(directory.path().join("binance_demo.json"), path);
-        assert!(matches!(
-            check_api_key_file(directory.path(), KEY_ID),
-            Err(KeyFileError::Unreadable { .. })
-        ));
-
-        const PLAIN_TEXT: &str = "secret written as plain text";
-        const SBE_KEY_FILE: &str = r#"{"api_key": "only the SBE field"}"#;
-        for mismatched in [PLAIN_TEXT, "{}", SBE_KEY_FILE] {
-            write(&path, mismatched).expect("key file is written");
-            let error = check_api_key_file(directory.path(), KEY_ID)
-                .expect_err("the file lacks the fields of a Binance trading key");
-            assert!(matches!(error, KeyFileError::Mismatched { .. }));
-            let message = error.to_string();
-            assert!(message.contains("binance_demo.json"), "{message}");
-            assert!(!message.contains(mismatched), "{message}");
-        }
-
-        write(&path, KEY_FILE).expect("key file is written");
-        check_api_key_file(directory.path(), KEY_ID).expect("the fields match");
-    }
-
     /// `Request` cannot hold an unknown id, so this writes the payload by hand.
     #[tokio::test]
-    async fn unknown_key_id_is_a_malformed_request() {
+    async fn unknown_gnosis_id_is_a_malformed_request() {
         let mut harness = harness();
-        let mut state = build_handshake(
+        let mut state = build_initiator(
             GNOSIS_PROLOGUE,
             &harness.client_private_key,
             &harness.gnosis_public_key,
-            true,
         )
         .expect("client builds handshake");
         let payload = json!({
-            "key_id": "../binance_demo",
+            "gnosis_id": "../binance_demo",
             "timestamp": since_unix_epoch().as_secs(),
             "nonce": "00".repeat(NONCE_LENGTH),
         });
         let first_message =
             encrypt(&mut state, payload.to_string().as_bytes()).expect("client encrypts");
-        let (status, body) = post(&harness.app, first_message).await;
+        let (status, body) = post(&harness.app, first_message, None).await;
         assert_eq!(status, StatusCode::OK);
-        let response: Response = from_slice(
+        let response: Response<BinanceApiKey> = from_slice(
             decrypt(&mut state, &body)
                 .expect("client decrypts response")
                 .expose_secret(),
@@ -490,8 +491,8 @@ mod tests {
         assert_eq!(
             harness.next_notification(),
             Notification::Denied {
-                client: UNFILTERED_CLIENT_NAME.into(),
-                key_id: None,
+                client: CLIENT_NAME.into(),
+                gnosis_id: None,
                 reason: DenialReason::MalformedRequest.to_string(),
             }
         );
@@ -500,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn denies_replayed_nonce() {
         let harness = harness();
-        let request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
+        let request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
         assert!(matches!(
             harness.gnosis(&request).await,
             Response::Granted { .. }
@@ -511,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn denies_stale_timestamp() {
         let harness = harness();
-        let mut request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
+        let mut request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
         // One second past the allowed skew.
         request.timestamp = since_unix_epoch().as_secs() - (DEFAULT_MAX_CLOCK_SKEW_SECONDS + 1);
         assert_denied(harness.gnosis(&request).await, "clock skew");
@@ -520,40 +521,49 @@ mod tests {
     #[tokio::test]
     async fn denies_malformed_nonce() {
         let harness = harness();
-        let mut request = Request::new(KEY_ID, get_current_timestamp_nanoseconds());
+        let mut request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
         request.nonce = "abc".into();
         assert_denied(harness.gnosis(&request).await, "malformed nonce");
     }
 
     #[tokio::test]
-    async fn unauthenticated_request_gets_empty_404_and_throttled_notification() {
+    async fn key_of_no_client_gets_empty_404_and_throttled_notification() {
         let mut harness = harness();
-        let (impostor_private_key, _) = test_keypair();
-        let mut first_messages = Vec::new();
-        for _ in 0..3 {
-            let (_, first_message) = Initiator::write_request(
-                &impostor_private_key,
-                &harness.gnosis_public_key,
-                &Request::new(KEY_ID, get_current_timestamp_nanoseconds()),
-            )
-            .expect("impostor writes request");
-            first_messages.push(first_message.clone());
-            let (status, body) = post(&harness.app, first_message).await;
+        let (stranger_private_key, _) = test_keypair();
+        let first_message = harness.first_message(&stranger_private_key);
+        harness.expect_unauthenticated(first_message, None).await;
+        for _ in 0..2 {
+            let first_message = harness.first_message(&stranger_private_key);
+            let (status, _) = post(&harness.app, first_message, None).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
-            assert!(body.is_empty());
         }
-        let Notification::Unauthenticated {
-            service,
-            request,
-            suppressed,
-        } = harness.next_notification()
-        else {
-            panic!("expected an unauthenticated notification");
-        };
-        assert_eq!((service, suppressed), (Service::Gnosis, 0));
-        assert_eq!(request.head.method, Method::POST);
-        assert_eq!(request.head.uri.path(), GNOSIS_PATH);
-        assert_eq!(request.payload.as_ref(), first_messages[0].as_slice());
         assert!(harness.notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn junk_gets_empty_404_and_a_notification() {
+        let mut harness = harness();
+        harness.expect_unauthenticated(b"junk".to_vec(), None).await;
+    }
+
+    #[tokio::test]
+    async fn key_sent_from_another_clients_address_gets_empty_404() {
+        let mut harness = harness();
+        let first_message = harness.first_message(&harness.client_private_key);
+        harness
+            .expect_unauthenticated(first_message, Some(OTHER_CLIENT_NAME))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn key_sent_from_its_own_clients_address_is_served() {
+        let mut harness = harness();
+        let first_message = harness.first_message(&harness.client_private_key);
+        let (status, _) = post(&harness.app, first_message, Some(CLIENT_NAME)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(matches!(
+            harness.next_notification(),
+            Notification::Granted { .. }
+        ));
     }
 }

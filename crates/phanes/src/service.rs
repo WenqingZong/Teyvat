@@ -1,7 +1,9 @@
 //! Names of the services behind the IP filter, for logs and push notifications.
 
+use strum::EnumIter;
+
 /// The services behind the IP filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, EnumIter, PartialEq, Eq)]
 pub enum Service {
     Gnosis,
     Celestia,

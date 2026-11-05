@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::error;
 
+use crate::clients::ClientName;
 use crate::request_details::RequestDetails;
 use crate::service::{Language, Service};
-use layline::api_keys::ApiKeyId;
 use layline::bark::{BarkMessage, Notifier};
+use layline::gnosis::GnosisId;
 
 const GROUP: &str = "phanes";
 const ALARM_SOUND: &str = "alarm";
@@ -28,27 +29,27 @@ pub enum Notification {
         listen_address: String,
     },
     Granted {
-        client: String,
-        key_id: ApiKeyId,
+        client: ClientName,
+        gnosis_id: GnosisId,
     },
-    /// Gnosis only: an allowed, authenticated client was refused a key, e.g. not in its ACL,
-    /// stale timestamp, replayed nonce or missing key file. See `DenialReason`.
+    /// Gnosis only: an authenticated client was refused a gnosis, e.g. not in its
+    /// `allowed_gnosis_ids`, stale timestamp or replayed nonce. See `DenialReason`.
     Denied {
-        client: String,
-        key_id: Option<ApiKeyId>,
+        client: ClientName,
+        gnosis_id: Option<GnosisId>,
         reason: String,
     },
     /// Passed the IP allow list (or none is mounted, in debug builds) but failed the Noise
-    /// handshake, or a Celestia frame failed decryption. Throttled; `suppressed` counts unpushed ones.
+    /// handshake, signed with a key of no client or of a client the address does not belong to,
+    /// or a Celestia frame failed decryption. Throttled; `suppressed` counts unpushed ones.
     Unauthenticated {
         service: Service,
         request: RequestDetails,
         suppressed: u64,
     },
     /// Release builds only: `CF-Connecting-IP` is missing, unparsable (`client_ip` is `None`)
-    /// or not in this service's allow list. Throttled like `Unauthenticated`.
+    /// or belongs to no client. Throttled like `Unauthenticated`.
     Blocked {
-        service: Service,
         client_ip: Option<IpAddr>,
         request: RequestDetails,
         suppressed: u64,
@@ -66,20 +67,21 @@ impl Notification {
                 format!("天上永恒的王座到来，世界为之焕然一新。法涅斯开始监听: {listen_address}"),
                 DEFAULT_SOUND,
             ),
-            Self::Granted { client, key_id } => (
+            Self::Granted { client, gnosis_id } => (
                 "神之心已发放".to_owned(),
-                format!("魔神: {client}\n神之心: {key_id}"),
+                format!("魔神: {client}\n神之心: {gnosis_id}"),
                 DEFAULT_SOUND,
             ),
             Self::Denied {
                 client,
-                key_id,
+                gnosis_id,
                 reason,
             } => {
-                let key_id = key_id.map_or_else(|| "(无法解析)".to_owned(), |id| id.to_string());
+                let gnosis_id =
+                    gnosis_id.map_or_else(|| "(无法解析)".to_owned(), |id| id.to_string());
                 (
                     "神之心请求被驳回".to_owned(),
-                    format!("魔神: {client}\n神之心: {key_id}\n驳回原因: {reason}"),
+                    format!("魔神: {client}\n神之心: {gnosis_id}\n驳回原因: {reason}"),
                     ALARM_SOUND,
                 )
             }
@@ -97,12 +99,10 @@ impl Notification {
                 )
             }
             Self::Blocked {
-                service,
                 client_ip,
                 request,
                 suppressed,
             } => {
-                let service = service.to_string(Language::Chinese);
                 let client_ip = client_ip.map_or_else(
                     || "(缺失或无法解析)".to_owned(),
                     |address| address.to_string(),
@@ -110,9 +110,7 @@ impl Notification {
                 let request = request.summarize();
                 (
                     "检测到深渊入侵!!!".to_owned(),
-                    format!(
-                        "被拦截的{service}\n来源 IP: {client_ip}\n{request}\n此前被合并的同类请求: {suppressed}"
-                    ),
+                    format!("来源 IP: {client_ip}\n{request}\n此前被合并的同类请求: {suppressed}"),
                     ALARM_SOUND,
                 )
             }
@@ -182,22 +180,22 @@ mod tests {
     fn denied_message_contains_all_fields() {
         let message = Notification::Denied {
             client: "osaka".into(),
-            key_id: Some(ApiKeyId::BinanceDemo),
-            reason: "key not allowed".into(),
+            gnosis_id: Some(GnosisId::BinanceDemo),
+            reason: "gnosis not allowed".into(),
         }
         .to_bark_message();
         assert_eq!(message.title, "神之心请求被驳回");
         assert_eq!(message.sound, ALARM_SOUND);
         assert!(message.body.contains("osaka"));
         assert!(message.body.contains("binance_demo"));
-        assert!(message.body.contains("key not allowed"));
+        assert!(message.body.contains("gnosis not allowed"));
     }
 
     #[test]
-    fn denied_message_without_key_id() {
+    fn denied_message_without_gnosis_id() {
         let message = Notification::Denied {
             client: "osaka".into(),
-            key_id: None,
+            gnosis_id: None,
             reason: "malformed request".into(),
         }
         .to_bark_message();
@@ -205,10 +203,10 @@ mod tests {
     }
 
     #[test]
-    fn granted_message_contains_client_and_key() {
+    fn granted_message_contains_client_and_gnosis() {
         let message = Notification::Granted {
             client: "osaka".into(),
-            key_id: ApiKeyId::BinanceDemo,
+            gnosis_id: GnosisId::BinanceDemo,
         }
         .to_bark_message();
         assert_eq!(message.title, "神之心已发放");
@@ -236,10 +234,9 @@ mod tests {
     }
 
     #[test]
-    fn blocked_message_names_service_and_address() {
+    fn blocked_message_names_address_and_request() {
         let request = RequestDetails::new(request_head(PATH), &[]);
         let message = Notification::Blocked {
-            service: Service::Celestia,
             client_ip: Some(BLOCKED_IP),
             request: request.clone(),
             suppressed: SUPPRESSED,
@@ -247,11 +244,6 @@ mod tests {
         .to_bark_message();
         assert!(message.body.contains(&request.summarize()));
         assert_eq!(message.sound, ALARM_SOUND);
-        assert!(
-            message
-                .body
-                .contains(&Service::Celestia.to_string(Language::Chinese))
-        );
         assert!(message.body.contains(&BLOCKED_IP.to_string()));
         assert!(message.body.contains(&SUPPRESSED.to_string()));
     }
@@ -259,7 +251,6 @@ mod tests {
     #[test]
     fn blocked_message_without_address() {
         let message = Notification::Blocked {
-            service: Service::Gnosis,
             client_ip: None,
             request: RequestDetails::new(request_head(PATH), &[]),
             suppressed: 0,

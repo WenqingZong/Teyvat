@@ -47,8 +47,7 @@ Teyvat/
 │   └── dummy_strategy/
 ├── architecture/     # 已实现功能的文档
 ├── plan/             # 尚未实现的功能
-├── deploy/           # 部署脚本、unit、配置模板、部署指南
-└── gnoses/           # Phanes 发放的 key 文件（提交的是 dummy 值，部署前换成真实值，换后不要提交）
+└── deploy/           # 部署脚本、unit、配置模板、部署指南
 ```
 
 私有策略将来以 git submodule 的形式放在 `crates/` 之外，并列入 workspace 的 `exclude`，使用自己的 `Cargo.lock`。
