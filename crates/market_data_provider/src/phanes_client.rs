@@ -19,17 +19,18 @@ use layline::noise::{StaticKey, deserialize_key};
 
 const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The `[phanes]` table of the config. Like Phanes itself, each service has its own key pair.
+/// The `[phanes_client]` table of the config. Like Phanes itself, each service has its own key
+/// pair. The client's public key is not needed: Noise derives it from the private key.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PhanesClientConfig {
     url: Url,
     /// Base64 X25519 private key this client authenticates to Gnosis with.
     #[serde(deserialize_with = "deserialize_key")]
-    gnosis_private_key: SecretBox<StaticKey>,
+    client_gnosis_private_key: SecretBox<StaticKey>,
     /// Base64 X25519 public key of Phanes Gnosis.
     #[serde(deserialize_with = "deserialize_key")]
-    gnosis_public_key: SecretBox<StaticKey>,
+    phanes_gnosis_public_key: SecretBox<StaticKey>,
 }
 
 /// Where gnoses come from; the connector asks only when a topic needs one.
@@ -84,8 +85,8 @@ impl GnosisHttp for ReqwestGnosisHttp {
 #[derive(Clone)]
 pub(crate) struct PhanesClient<Http = ReqwestGnosisHttp, TimeSource = RealClock> {
     url: Url,
-    gnosis_private_key: Arc<SecretBox<StaticKey>>,
-    gnosis_public_key: Arc<SecretBox<StaticKey>>,
+    client_gnosis_private_key: Arc<SecretBox<StaticKey>>,
+    phanes_gnosis_public_key: Arc<SecretBox<StaticKey>>,
     http: Http,
     clock: TimeSource,
 }
@@ -96,8 +97,8 @@ impl PhanesClient {
         let client = Client::builder().timeout(GNOSIS_REQUEST_TIMEOUT).build()?;
         Ok(Self {
             url: config.url,
-            gnosis_private_key: Arc::new(config.gnosis_private_key),
-            gnosis_public_key: Arc::new(config.gnosis_public_key),
+            client_gnosis_private_key: Arc::new(config.client_gnosis_private_key),
+            phanes_gnosis_public_key: Arc::new(config.phanes_gnosis_public_key),
             http: ReqwestGnosisHttp { client },
             clock: RealClock,
         })
@@ -107,8 +108,8 @@ impl PhanesClient {
 impl<Http: GnosisHttp, TimeSource: Clock> GnosisSource for PhanesClient<Http, TimeSource> {
     async fn fetch_gnosis<Key: Gnosis>(&self, demo: bool) -> Result<Key> {
         let (initiator, first_message) = Initiator::write_request(
-            &self.gnosis_private_key,
-            &self.gnosis_public_key,
+            &self.client_gnosis_private_key,
+            &self.phanes_gnosis_public_key,
             &Request::new(Key::gnosis_id(demo), self.clock.now()),
         )?;
         let (status, second_message) = self
@@ -165,12 +166,12 @@ pub(crate) mod tests {
 
     /// For code that needs a production `PhanesClient` but never fetches a gnosis.
     pub(crate) fn unreachable_phanes_client() -> PhanesClient {
-        let (gnosis_private_key, _) = test_keypair();
-        let (_, gnosis_public_key) = test_keypair();
+        let (client_gnosis_private_key, _) = test_keypair();
+        let (_, phanes_gnosis_public_key) = test_keypair();
         PhanesClient {
             url: Url::parse("https://phanes.invalid").expect("the test URL is valid"),
-            gnosis_private_key: Arc::new(gnosis_private_key),
-            gnosis_public_key: Arc::new(gnosis_public_key),
+            client_gnosis_private_key: Arc::new(client_gnosis_private_key),
+            phanes_gnosis_public_key: Arc::new(phanes_gnosis_public_key),
             http: ReqwestGnosisHttp {
                 client: Client::new(),
             },
@@ -212,8 +213,8 @@ pub(crate) mod tests {
 
     /// Phanes' end of the HTTP round trip, answered in process with the server half of the protocol.
     struct GnosisHttpMock {
-        gnosis_private_key: SecretBox<StaticKey>,
-        client_public_key: SecretBox<StaticKey>,
+        phanes_gnosis_private_key: SecretBox<StaticKey>,
+        client_gnosis_public_key: SecretBox<StaticKey>,
         grants: HashMap<GnosisId, String>,
         behaviour: PhanesBehaviour,
         requests: RefCell<Vec<Request>>,
@@ -227,11 +228,12 @@ pub(crate) mod tests {
             if url.path() != GNOSIS_PATH {
                 return Ok((StatusCode::NOT_FOUND, Vec::new()));
             }
-            let Ok(responder) = Responder::read_request(&self.gnosis_private_key, &body) else {
+            let Ok(responder) = Responder::read_request(&self.phanes_gnosis_private_key, &body)
+            else {
                 return Ok((StatusCode::NOT_FOUND, Vec::new()));
             };
             let is_known_client = responder.client_public_key().expose_secret()
-                == self.client_public_key.expose_secret();
+                == self.client_gnosis_public_key.expose_secret();
             if self.behaviour == PhanesBehaviour::ForgetClient || !is_known_client {
                 return Ok((StatusCode::NOT_FOUND, Vec::new()));
             }
@@ -260,20 +262,20 @@ pub(crate) mod tests {
 
     impl PhanesFixture {
         fn new() -> Self {
-            let (gnosis_private_key, gnosis_public_key) = test_keypair();
-            let (client_private_key, client_public_key) = test_keypair();
+            let (phanes_gnosis_private_key, phanes_gnosis_public_key) = test_keypair();
+            let (client_gnosis_private_key, client_gnosis_public_key) = test_keypair();
             let clock = MockClock::new(NOW_NANOSECONDS);
             let phanes = GnosisHttpMock {
-                gnosis_private_key,
-                client_public_key,
+                phanes_gnosis_private_key,
+                client_gnosis_public_key,
                 grants: HashMap::from([(GRANTED_GNOSIS_ID, granted_gnosis())]),
                 behaviour: PhanesBehaviour::Normal,
                 requests: RefCell::new(Vec::new()),
             };
             let client = PhanesClient {
                 url: Url::parse(PHANES_URL).expect("PHANES_URL is a valid URL"),
-                gnosis_private_key: Arc::new(client_private_key),
-                gnosis_public_key: Arc::new(gnosis_public_key),
+                client_gnosis_private_key: Arc::new(client_gnosis_private_key),
+                phanes_gnosis_public_key: Arc::new(phanes_gnosis_public_key),
                 http: phanes,
                 clock: clock.clone(),
             };
@@ -403,13 +405,13 @@ pub(crate) mod tests {
         assert!(!alert.contains("dummy-misnamed-secret"), "{alert}");
     }
 
-    /// The `[phanes]` table holding `gnosis_private_key` and `gnosis_public_key`, as written.
-    fn phanes_table(
-        gnosis_private_key: &str,
-        gnosis_public_key: &str,
+    /// The `[phanes_client]` table holding both keys, as written.
+    fn phanes_client_table(
+        client_gnosis_private_key: &str,
+        phanes_gnosis_public_key: &str,
     ) -> Result<PhanesClientConfig, TomlError> {
         toml::from_str(&format!(
-            "url = \"{PHANES_URL}\"\ngnosis_private_key = \"{gnosis_private_key}\"\ngnosis_public_key = \"{gnosis_public_key}\""
+            "url = \"{PHANES_URL}\"\nclient_gnosis_private_key = \"{client_gnosis_private_key}\"\nphanes_gnosis_public_key = \"{phanes_gnosis_public_key}\""
         ))
     }
 
@@ -419,18 +421,18 @@ pub(crate) mod tests {
         let (_, public_key) = test_keypair();
         let encoded_private_key = encode_key(private_key.expose_secret());
         let encoded_public_key = encode_key(public_key.expose_secret());
-        let config = phanes_table(&encoded_private_key, &encoded_public_key)
-            .expect("the [phanes] table is expected to parse");
+        let config = phanes_client_table(&encoded_private_key, &encoded_public_key)
+            .expect("the [phanes_client] table is expected to parse");
         let client = PhanesClient::new(config).expect("the config is valid");
         assert_eq!(
             private_key.expose_secret(),
-            client.gnosis_private_key.expose_secret()
+            client.client_gnosis_private_key.expose_secret()
         );
         assert_eq!(
             public_key.expose_secret(),
-            client.gnosis_public_key.expose_secret()
+            client.phanes_gnosis_public_key.expose_secret()
         );
-        assert!(phanes_table("not base64!", &encoded_public_key).is_err());
-        assert!(phanes_table(&encoded_private_key, "not base64!").is_err());
+        assert!(phanes_client_table("not base64!", &encoded_public_key).is_err());
+        assert!(phanes_client_table(&encoded_private_key, "not base64!").is_err());
     }
 }

@@ -39,7 +39,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - **Celestia 的安全事件**：上面的未认证情况，以及某帧解密失败（伪造帧），断开连接并 Bark 推送（10 分钟节流）。其他运行时错误（断线、超时、载荷格式错）只断开当前连接、记日志，不推送，由客户端重连补发。
 - 客户端只在启动时取一次 key，之后常驻内存。
 - 每次发放或拒绝 gnosis，都通过 Bark 加密推送（`layline::bark`，AES-256-CBC）通知手机。Bark 凭据放在 `phanes.toml` 的 `[bark]` 表（`device_key` / `encryption_key`，可选 `server`）。所有配置只从 `phanes.toml` 读，该文件必须是 600 权限，不入库；解析错误只报 toml 的错误信息、key 路径和行号，不引用原文，所以字段名写错也不会把 gnosis 打进日志。
-- 每个服务用自己的密钥对和命名（Gnosis：`phanes.toml` 的 `gnosis_private_key`、公钥 `gnosis.pub`；Celestia：`celestia_private_key`、`celestia.pub`），不用泛泛的 `server_*`。私钥和其他配置一样直接写在 `phanes.toml` 里（base64），不在配置里放指向其他文件的路径；部署脚本首次安装时用 openssl 生成，直接填进配置。
+- 每个服务用自己的密钥对和命名（Gnosis：`phanes.toml` 的 `gnosis_private_key`；Celestia：`celestia_private_key`），不用泛泛的 `server_*`。私钥和其他配置一样直接写在 `phanes.toml` 里（base64），不在配置里放指向其他文件的路径；部署脚本首次安装时用 openssl 生成，直接填进配置。公钥不存成文件：它可以由私钥推出，部署脚本需要打印时现推。
 
 ## 代码结构
 

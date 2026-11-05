@@ -21,7 +21,6 @@
 | 路径 | 内容 |
 |---|---|
 | `/usr/local/bin/phanes` | 二进制 |
-| `/etc/phanes/gnosis.pub` / `celestia.pub` | Gnosis / Celestia 公钥，交给每个客户端 |
 | `/etc/phanes/phanes.toml` | 配置（600；监听地址、Gnosis 和 Celestia 私钥、每个客户端的 IP、两个公钥和允许的 gnosis、待发放的 gnosis、Bark 凭据） |
 | `/etc/systemd/system/phanes.service` | systemd unit |
 
@@ -42,8 +41,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # 已装 Rust �
 deploy/phanes/phanes.sh install
 ```
 
-首次运行会：编译、安装二进制、生成配置模板并用 openssl 生成 Gnosis 和 Celestia 密钥（私钥直接填进 `phanes.toml`，只有公钥单独存成 `.pub`）、安装 systemd unit，
-然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给每个客户端，也可随时 `cat /etc/phanes/*.pub`）。
+首次运行会：编译、安装二进制、生成配置模板并用 openssl 生成 Gnosis 和 Celestia 密钥（私钥直接填进 `phanes.toml`，公钥不单独存文件，需要时由脚本从私钥推出）、安装 systemd unit，
+然后因为配置还没填而**暂不启动**，并打印 **Gnosis 公钥和 Celestia 公钥**（之后要给每个客户端；每次 `install` 都会再打印一遍）。
 
 #### 3. 填配置
 
@@ -97,16 +96,6 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 `uninstall` 删除上表"部署后的文件"里的所有东西以及 Phanes 的 journal 日志；cloudflared 的 hostname 映射保留。
 `uninstall` / `reinstall` 会先确认，加 `--yes` 跳过。
 
-#### 从旧配置迁移
-
-旧版的 `phanes.toml` 有 `gnoses_directory`、`[gnosis_service_config]`、`[celestia_service_config]`，key 放在 `/etc/phanes/gnoses/<key_id>.json`。新版 Phanes 遇到这些字段会拒绝启动（`install` 也会提示）。迁移：
-
-1. 每个客户端在 `[clients.<名字>]` 里加上 `client_gnosis_service_public_key`（原 `gnosis_service_config.public_key`）、`client_celestia_service_public_key`（原 `celestia_service_config.public_key`）和 `allowed_gnosis_ids`（原 `allowed_key_ids`）。
-2. 把 `/etc/phanes/gnoses/<key_id>.json` 的内容逐个写成 `[gnoses.<key_id>]` 表。
-3. 删掉 `gnoses_directory`、`[gnosis_service_config]`、`[celestia_service_config]`，再 `sudo rm -r /etc/phanes/gnoses`。
-4. `gnosis_private_key_file` / `celestia_private_key_file` 换成 `gnosis_private_key = "<gnosis.key 的内容>"` / `celestia_private_key = "<celestia.key 的内容>"`，再删掉 `/etc/phanes/*.key`。行情服务同理：`[phanes]` 里的 `gnosis_private_key_file` 换成 `gnosis_private_key = "<gnosis_client.key 的内容>"`，再删掉 `/etc/market_data_provider/gnosis_client.key`。
-5. 协议从 Noise `KK` 换成了 `IK`：Phanes、行情服务和 examples 要一起更新。
-
 ### Osaka 配置
 
 #### 1. 生成客户端密钥（只需 openssl）
@@ -129,7 +118,7 @@ done
 
 #### 2. RedmiBook 公钥
 
-把 RedmiBook 的 `/etc/phanes/gnosis.pub`、`/etc/phanes/celestia.pub` 内容配给 Osaka 上的程序。
+把 RedmiBook 上 `deploy/phanes/phanes.sh install` 打印的 Gnosis 和 Celestia 公钥配给 Osaka 上的程序。
 
 ### 端到端验证（在 Osaka 上）
 
@@ -147,7 +136,7 @@ scp target/release/examples/fetch osaka:~/
 ```bash
 ./fetch --url https://phanes.wenqing.dev \
   --client-private-key-file /etc/phanes-client/gnosis_client.key \
-  --gnosis-public-key "<gnosis.pub 内容>" --gnosis-id binance_demo
+  --gnosis-public-key "<Phanes 的 Gnosis 公钥>" --gnosis-id binance_demo
 ```
 
 成功会打印 `granted <gnosis_id>: <gnosis>`（会打印 key 本身，只用于 dummy key），手机收到"神之心已发放"。
@@ -157,7 +146,7 @@ scp target/release/examples/fetch osaka:~/
 | `GLIBC_2.xx not found` | Kali 的 glibc 比 Osaka 新。改用 `sudo apt install musl-tools && rustup target add x86_64-unknown-linux-musl && cargo build --release --example fetch --target x86_64-unknown-linux-musl` |
 | 403 + HTML 页面 | Cloudflare Bot Fight Mode / WAF 拦了数据中心 IP，给该 hostname 加 WAF Skip 规则 |
 | 空 404，手机收到"检测到深渊入侵!!!" | 来源 IP 不属于任何客户端。`journalctl` 里的 `blocked request` 记录了全部 header，其中 `cf-connecting-ip` 是 Cloudflare 看到的实际 IP，核对 `[clients.<name>]` 的 `ipv4` / `ipv6` |
-| 空 404，手机收到"检测到未授权的魔神" | 看 `journalctl` 里 `rejected unauthenticated Gnosis request:` 后面的原因：`public key belongs to no client`（客户端公钥没写进 `phanes.toml`，或填到了另一个服务的字段；公钥不写进日志，对照两边的 `.pub` 文件检查）、`signed with the key of client A but sent from an address of client B`（公钥和 IP 不属于同一个客户端）、`noise: decrypt error`（客户端用的 Phanes 公钥不对） |
+| 空 404，手机收到"检测到未授权的魔神" | 看 `journalctl` 里 `rejected unauthenticated Gnosis request:` 后面的原因：`public key belongs to no client`（客户端公钥没写进 `phanes.toml`，或填到了另一个服务的字段；公钥不写进日志，对照两边安装时打印的公钥检查）、`signed with the key of client A but sent from an address of client B`（公钥和 IP 不属于同一个客户端）、`noise: decrypt error`（客户端用的 Phanes 公钥不对） |
 | `denied <gnosis_id>: gnosis not allowed for this client` | 该 id 不在这个客户端的 `allowed_gnosis_ids` 里 |
 | `Denied: timestamp outside allowed clock skew` | 两台机器时钟差超过 60s，检查 NTP |
 
@@ -174,7 +163,7 @@ scp target/release/examples/celestia osaka:~/
 ```bash
 ./celestia --url https://phanes.wenqing.dev \
   --client-private-key-file /etc/phanes-client/celestia_client.key \
-  --celestia-public-key "<celestia.pub 内容>" --systemd-unit my_app.service   # 或 --process-id <pid>
+  --celestia-public-key "<Phanes 的 Celestia 公钥>" --systemd-unit my_app.service   # 或 --process-id <pid>
 ```
 
 - `--systemd-unit`：CPU、内存、网络都有。网络按进程口径统计，需要该 unit 开 `IPAccounting=yes`，否则网络为 0。
@@ -199,10 +188,10 @@ deploy/market_data_provider/market_data_provider.sh install
 
 首次运行会：编译 release 二进制、安装 systemd unit、创建 `/etc/market_data_provider/`（从
 `deploy/market_data_provider/market_data_provider.example.toml` 复制的配置，以及用 openssl 生成的 Gnosis 客户端密钥：
-私钥直接填进配置的 `gnosis_private_key`，公钥存成 `gnosis_client.pub`），然后停下，列出
+私钥直接填进配置的 `client_gnosis_private_key`；公钥不存文件，安装时由脚本从私钥推出并打印，只用来交给 Phanes，行情服务运行时用不到），然后停下，列出
 `/etc/market_data_provider/market_data_provider.toml` 里待填的占位符：
 
-- `[phanes]` 的 `url` 和 `gnosis_public_key`（即 Phanes 主机上 `/etc/phanes/gnosis.pub` 的内容）；
+- `[phanes_client]` 的 `url` 和 `phanes_gnosis_public_key`（即 Phanes 主机上 `deploy/phanes/phanes.sh install` 打印的 Gnosis 公钥）；
 - `[bark]` 凭据（release 构建缺少它会拒绝启动）；
 - `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情。
 

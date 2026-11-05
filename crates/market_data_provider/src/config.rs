@@ -21,7 +21,7 @@ struct ConfigFile {
     port: u16,
     /// Serve the venues' demo-trading data; every subscription request must ask for the same environment.
     demo: bool,
-    phanes: PhanesClientConfig,
+    phanes_client: PhanesClientConfig,
     /// Required by release builds only; debug builds log alerts instead.
     bark: Option<BarkConfig>,
 }
@@ -47,7 +47,7 @@ impl ProviderConfig {
             listen_address: SocketAddr::from((Ipv4Addr::LOCALHOST, config.port)),
             lease_duration: DEFAULT_LEASE_DURATION,
             demo: config.demo,
-            phanes_client: PhanesClient::new(config.phanes)?,
+            phanes_client: PhanesClient::new(config.phanes_client)?,
             notifier: Notifier::new(RELEASE_BUILD, config.bark)?,
         })
     }
@@ -90,7 +90,7 @@ mod tests {
 
         fn valid_text(&self) -> String {
             format!(
-                "port = 6666\ndemo = false\n\n[phanes]\nurl = \"https://phanes.example\"\ngnosis_private_key = \"{DUMMY_KEY}\"\ngnosis_public_key = \"{DUMMY_KEY}\"\n"
+                "port = 6666\ndemo = false\n\n[phanes_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
             )
         }
 
@@ -126,8 +126,8 @@ mod tests {
     fn invalid_phanes_key_is_refused() {
         let fixture = ConfigFixture::new();
         let text = fixture.valid_text().replace(
-            &format!("gnosis_public_key = \"{DUMMY_KEY}\""),
-            "gnosis_public_key = \"short\"",
+            &format!("phanes_gnosis_public_key = \"{DUMMY_KEY}\""),
+            "phanes_gnosis_public_key = \"short\"",
         );
         assert!(fixture.load(&text).is_err());
     }
