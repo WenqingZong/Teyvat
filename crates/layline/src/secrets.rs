@@ -41,30 +41,14 @@ pub fn read_secret_file(path: &Path) -> Result<SecretString, SecretFileError> {
 /// may hold secrets.
 pub fn read_secret_toml<Config: DeserializeOwned>(path: &Path) -> Result<Config, SecretFileError> {
     let toml_content = read_secret_file(path)?;
-    toml::from_str(toml_content.expose_secret()).map_err(|error| SecretFileError::InvalidToml {
-        path: path.to_owned(),
-        description: describe_without_source(error, toml_content.expose_secret()),
+    toml::from_str(toml_content.expose_secret()).map_err(|mut error: TomlError| {
+        // Without its input, toml leaves out the quoted line and names the key path instead.
+        error.set_input(None);
+        SecretFileError::InvalidToml {
+            path: path.to_owned(),
+            description: error.to_string().trim_end().replace('\n', " "),
+        }
     })
-}
-
-/// toml's message, the key path and the line number, but not the offending line itself.
-fn describe_without_source(mut error: TomlError, toml_str: &str) -> String {
-    // Without its input, toml leaves out the quoted line and names the key path instead.
-    error.set_input(None);
-    let message = error.to_string().trim_end().replace('\n', " ");
-    match error.span() {
-        Some(span) => format!("line {}: {message}", line_number(toml_str, span.start)),
-        None => message,
-    }
-}
-
-/// 1-based line of `byte_offset` in `text`.
-fn line_number(text: &str, byte_offset: usize) -> usize {
-    text.bytes()
-        .take(byte_offset)
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
 }
 
 #[cfg(test)]
@@ -127,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_toml_names_line_and_field_but_never_quotes_the_file() {
+    fn invalid_toml_names_the_field_but_never_quotes_the_file() {
         let directory = tempdir().expect("temp dir is created");
         let path = directory.path().join("config.toml");
         write_secret_file(
@@ -137,14 +121,7 @@ mod tests {
         let error = read_secret_toml::<Credentials>(&path)
             .expect_err("an unknown field is expected to be refused");
         let message = error.to_string();
-        assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("misspelled_secret"), "{message}");
         assert!(!message.contains(SECRET_VALUE), "{message}");
-    }
-
-    #[test]
-    fn line_numbers_count_from_one() {
-        assert_eq!(1, line_number("first\nsecond", 0));
-        assert_eq!(2, line_number("first\nsecond", "first\n".len()));
     }
 }

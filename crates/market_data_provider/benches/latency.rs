@@ -75,7 +75,7 @@ fn subscription(directory: &TempDir, topic: Topic) -> Subscription {
     let strategy_name = StrategyName::from(STRATEGY_NAME);
     Subscription {
         topic,
-        path: topic.file_path(directory.path(), &strategy_name),
+        path: topic.ring_key().file_path(directory.path(), &strategy_name),
     }
 }
 

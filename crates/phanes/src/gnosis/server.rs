@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -16,12 +15,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
 
 use crate::client_filter::IpClientName;
-use crate::clients::{ClientConfig, ClientName, Clients, identify};
+use crate::clients::{ClientConfig, Clients, identify};
 use crate::gnosis::config::{AnyGnosis, Gnoses};
-use crate::notify::{Notification, UnauthenticatedThrottle};
+use crate::notify::{Notification, ThrottledNotificationSender, enqueue};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
-use layline::gnosis::{GNOSIS_PATH, GnosisId, NONCE_LENGTH, Request, Responder, Response};
+use layline::gnosis::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
 use layline::noise::StaticKey;
 use layline::time::since_unix_epoch;
 
@@ -47,10 +46,10 @@ pub struct GnosisState {
     clients: Arc<Clients>,
     gnoses: Gnoses,
     max_clock_skew_seconds: u64,
-    notifications: UnboundedSender<Notification>,
+    notification_sender: UnboundedSender<Notification>,
+    unauthenticated_notification_sender: ThrottledNotificationSender,
     /// nonce -> unix second after which the nonce's timestamp is out of window anyway.
     seen_nonces: Mutex<HashMap<String, u64>>,
-    unauthenticated_throttle: Mutex<UnauthenticatedThrottle>,
 }
 
 impl GnosisState {
@@ -59,22 +58,18 @@ impl GnosisState {
         clients: Arc<Clients>,
         gnoses: Gnoses,
         max_clock_skew_seconds: u64,
-        notifications: UnboundedSender<Notification>,
+        notification_sender: UnboundedSender<Notification>,
     ) -> Self {
         Self {
             gnosis_private_key,
             clients,
             gnoses,
             max_clock_skew_seconds,
-            notifications,
+            unauthenticated_notification_sender: ThrottledNotificationSender::new(
+                notification_sender.clone(),
+            ),
+            notification_sender,
             seen_nonces: Mutex::default(),
-            unauthenticated_throttle: Mutex::default(),
-        }
-    }
-
-    fn notify(&self, notification: Notification) {
-        if self.notifications.send(notification).is_err() {
-            error!("notification dispatcher is gone; push dropped");
         }
     }
 
@@ -87,18 +82,12 @@ impl GnosisState {
     ) -> HttpResponse {
         let request = RequestDetails::new(request_head, body);
         warn!("rejected unauthenticated Gnosis request: {reason}; {request}");
-        let suppressed_option = self
-            .unauthenticated_throttle
-            .lock()
-            .expect("unauthenticated throttle mutex is not poisoned")
-            .record(Instant::now());
-        if let Some(suppressed) = suppressed_option {
-            self.notify(Notification::Unauthenticated {
+        self.unauthenticated_notification_sender
+            .enqueue(|suppressed| Notification::Unauthenticated {
                 service: Service::Gnosis,
                 request,
                 suppressed,
             });
-        }
         StatusCode::NOT_FOUND.into_response()
     }
 
@@ -176,65 +165,47 @@ async fn gnosis(
         }
     };
 
-    let request = match responder.parse_request() {
-        Ok(request) => request,
+    // The gnosis id is `None` when the payload did not parse.
+    let decision = match responder.parse_request() {
+        Ok(request) => match state.decide(client, &request) {
+            Ok(gnosis) => Ok((request.gnosis_id, gnosis)),
+            Err(reason) => Err((Some(request.gnosis_id), reason)),
+        },
         Err(error) => {
             warn!("client {client_name} sent a malformed payload: {error}");
-            let (response, notification) = deny(client_name, None, &DenialReason::MalformedRequest);
-            return send(&state, responder, client_name, &response, notification);
+            Err((None, DenialReason::MalformedRequest))
         }
     };
-    let gnosis_id = request.gnosis_id;
-    let (response, notification) = match state.decide(client, &request) {
-        Ok(gnosis) => {
+    let (response, notification) = match decision {
+        Ok((gnosis_id, gnosis)) => {
             info!("granted gnosis {gnosis_id} to client {client_name}");
-            (
-                Response::Granted { gnosis },
-                Notification::Granted {
-                    client: client_name.clone(),
-                    gnosis_id,
-                },
-            )
+            let notification = Notification::Granted {
+                client: client_name.clone(),
+                gnosis_id,
+            };
+            (Response::Granted { gnosis }, notification)
         }
-        Err(reason) => deny(client_name, Some(gnosis_id), &reason),
+        Err((gnosis_id_option, reason)) => {
+            let reason = reason.to_string();
+            match gnosis_id_option {
+                Some(gnosis_id) => {
+                    warn!("denied gnosis {gnosis_id} to client {client_name}: {reason}");
+                }
+                None => warn!("denied an unparsable request of client {client_name}: {reason}"),
+            }
+            let notification = Notification::Denied {
+                client: client_name.clone(),
+                gnosis_id: gnosis_id_option,
+                reason: reason.clone(),
+            };
+            (Response::Denied { reason }, notification)
+        }
     };
-    send(&state, responder, client_name, &response, notification)
-}
 
-/// The denial for the client and its push. `gnosis_id_option` is `None` when the payload did not parse.
-fn deny(
-    client: &ClientName,
-    gnosis_id_option: Option<GnosisId>,
-    reason: &DenialReason,
-) -> (Response<AnyGnosis>, Notification) {
-    let reason = reason.to_string();
-    match gnosis_id_option {
-        Some(gnosis_id) => warn!("denied gnosis {gnosis_id} to client {client}: {reason}"),
-        None => warn!("denied an unparsable request of client {client}: {reason}"),
-    }
-    (
-        Response::Denied {
-            reason: reason.clone(),
-        },
-        Notification::Denied {
-            client: client.clone(),
-            gnosis_id: gnosis_id_option,
-            reason,
-        },
-    )
-}
-
-/// Encrypts `response` for the client; pushes `notification` once it is on its way.
-fn send(
-    state: &GnosisState,
-    responder: Responder,
-    client: &ClientName,
-    response: &Response<AnyGnosis>,
-    notification: Notification,
-) -> HttpResponse {
-    match responder.write_response(response) {
+    // The push goes out only once the response is on its way.
+    match responder.write_response(&response) {
         Ok(second_message) => {
-            state.notify(notification);
+            enqueue(&state.notification_sender, notification);
             (
                 [(header::CONTENT_TYPE, "application/octet-stream")],
                 second_message,
@@ -243,11 +214,12 @@ fn send(
         }
         Err(error) => {
             error!("failed to encrypt response: {error}");
-            state.notify(Notification::Denied {
-                client: client.clone(),
+            let notification = Notification::Denied {
+                client: client_name.clone(),
                 gnosis_id: None,
                 reason: format!("server failed to encrypt response: {error}"),
-            });
+            };
+            enqueue(&state.notification_sender, notification);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -265,10 +237,11 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::clients::ClientName;
     use crate::clients::tests::test_client;
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
     use layline::gnosis::binance::BinanceApiKey;
-    use layline::gnosis::{GNOSIS_PROLOGUE, Initiator};
+    use layline::gnosis::{GNOSIS_PROLOGUE, GnosisId, Initiator};
     use layline::noise::{build_initiator, decrypt, encrypt};
     use layline::testing::test_keypair;
     use layline::time::get_current_timestamp_nanoseconds;
@@ -288,7 +261,7 @@ mod tests {
         app: Router,
         client_private_key: SecretBox<StaticKey>,
         gnosis_public_key: SecretBox<StaticKey>,
-        notifications: UnboundedReceiver<Notification>,
+        notification_receiver: UnboundedReceiver<Notification>,
     }
 
     /// Phanes holds both gnoses; the client may fetch only `ALLOWED_GNOSIS_ID`.
@@ -309,19 +282,19 @@ mod tests {
             ..test_client(CLIENT_IPV4)
         };
         let clients = Clients::from([(ClientName::from(CLIENT_NAME), client)]);
-        let (sender, notifications) = unbounded_channel();
+        let (notification_sender, notification_receiver) = unbounded_channel();
         let state = GnosisState::new(
             gnosis_private_key,
             Arc::new(clients),
             gnoses(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
-            sender,
+            notification_sender,
         );
         Harness {
             app: router(Arc::new(state)),
             client_private_key,
             gnosis_public_key,
-            notifications,
+            notification_receiver,
         }
     }
 
@@ -367,7 +340,7 @@ mod tests {
         }
 
         fn next_notification(&mut self) -> Notification {
-            self.notifications
+            self.notification_receiver
                 .try_recv()
                 .expect("a notification was queued")
         }
@@ -537,7 +510,7 @@ mod tests {
             let (status, _) = post(&harness.app, first_message, None).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
         }
-        assert!(harness.notifications.try_recv().is_err());
+        assert!(harness.notification_receiver.try_recv().is_err());
     }
 
     #[tokio::test]

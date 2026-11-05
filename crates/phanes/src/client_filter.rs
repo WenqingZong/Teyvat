@@ -6,8 +6,7 @@
 
 use std::convert::Infallible;
 use std::net::IpAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::StatusCode;
@@ -15,10 +14,10 @@ use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::clients::{ClientName, Clients};
-use crate::notify::{Notification, UnauthenticatedThrottle};
+use crate::notify::{Notification, ThrottledNotificationSender};
 use crate::request_details::RequestDetails;
 
 pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
@@ -39,35 +38,14 @@ impl<S: Send + Sync> FromRequestParts<S> for IpClientName {
 /// The allow list shared by every service.
 pub struct ClientFilter {
     clients: Arc<Clients>,
-    notifications: UnboundedSender<Notification>,
-    blocked_throttle: Mutex<UnauthenticatedThrottle>,
+    blocked_notification_sender: ThrottledNotificationSender,
 }
 
 impl ClientFilter {
-    pub fn new(clients: Arc<Clients>, notifications: UnboundedSender<Notification>) -> Self {
+    pub fn new(clients: Arc<Clients>, notification_sender: UnboundedSender<Notification>) -> Self {
         Self {
             clients,
-            notifications,
-            blocked_throttle: Mutex::default(),
-        }
-    }
-
-    fn notify_blocked(&self, client_ip: Option<IpAddr>, request: RequestDetails) {
-        let suppressed = self
-            .blocked_throttle
-            .lock()
-            .expect("blocked throttle mutex is not poisoned")
-            .record(Instant::now());
-        let Some(suppressed) = suppressed else {
-            return;
-        };
-        let notification = Notification::Blocked {
-            client_ip,
-            request,
-            suppressed,
-        };
-        if self.notifications.send(notification).is_err() {
-            error!("notification dispatcher is gone; push dropped");
+            blocked_notification_sender: ThrottledNotificationSender::new(notification_sender),
         }
     }
 }
@@ -95,7 +73,13 @@ pub async fn filter_clients(
     }) else {
         let request = RequestDetails::read_request(request).await;
         warn!("blocked request: {request}");
-        filter.notify_blocked(client_ip, request);
+        filter
+            .blocked_notification_sender
+            .enqueue(|suppressed| Notification::Blocked {
+                client_ip,
+                request,
+                suppressed,
+            });
         return StatusCode::NOT_FOUND.into_response();
     };
     let path = request.uri().path();
@@ -133,17 +117,17 @@ mod tests {
     }
 
     fn filtered_router() -> (Router, UnboundedReceiver<Notification>) {
-        let (sender, notifications) = unbounded_channel();
+        let (notification_sender, notification_receiver) = unbounded_channel();
         let osaka = ClientConfig {
             ipv6: Some(OSAKA_IPV6),
             ..test_client(OSAKA_IPV4)
         };
         let clients = Clients::from([(ClientName::from("Osaka"), osaka)]);
-        let filter = Arc::new(ClientFilter::new(Arc::new(clients), sender));
+        let filter = Arc::new(ClientFilter::new(Arc::new(clients), notification_sender));
         let router = Router::new()
             .route(PATH, get(whoami))
             .layer(from_fn_with_state(filter, filter_clients));
-        (router, notifications)
+        (router, notification_receiver)
     }
 
     async fn call(router: &Router, client_ip: Option<&str>) -> (StatusCode, String) {
@@ -189,22 +173,22 @@ mod tests {
 
     #[tokio::test]
     async fn allowed_ipv4_and_ipv6_reach_the_handler_with_their_name() {
-        let (router, mut notifications) = filtered_router();
+        let (router, mut notification_receiver) = filtered_router();
         for address in [IpAddr::V4(OSAKA_IPV4), IpAddr::V6(OSAKA_IPV6)] {
             let response = call(&router, Some(&address.to_string())).await;
             assert_eq!(response, (StatusCode::OK, "Osaka".to_owned()));
         }
-        assert!(notifications.try_recv().is_err());
+        assert!(notification_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn stranger_gets_empty_404_and_a_notification() {
-        let (router, mut notifications) = filtered_router();
+        let (router, mut notification_receiver) = filtered_router();
         let header = STRANGER_IP.to_string();
         let response = call(&router, Some(&header)).await;
         assert_eq!(response, (StatusCode::NOT_FOUND, String::new()));
         assert_eq!(
-            notifications.try_recv(),
+            notification_receiver.try_recv(),
             Ok(blocked(Some(STRANGER_IP), Some(&header)))
         );
     }
@@ -214,13 +198,13 @@ mod tests {
         const NOT_AN_ADDRESS: &str = "not an address";
         /// `X-Forwarded-For` style list; `CF-Connecting-IP` always holds exactly one address.
         const ADDRESS_LIST: &str = "192.0.2.1, 10.0.0.1";
-        let (router, mut notifications) = filtered_router();
+        let (router, mut notification_receiver) = filtered_router();
         for client_ip in [None, Some(NOT_AN_ADDRESS), Some(ADDRESS_LIST)] {
             let response = call(&router, client_ip).await;
             assert_eq!(response, (StatusCode::NOT_FOUND, String::new()));
         }
-        assert_eq!(notifications.try_recv(), Ok(blocked(None, None)));
-        assert!(notifications.try_recv().is_err());
+        assert_eq!(notification_receiver.try_recv(), Ok(blocked(None, None)));
+        assert!(notification_receiver.try_recv().is_err());
     }
 
     #[tokio::test]

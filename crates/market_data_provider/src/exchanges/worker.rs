@@ -16,20 +16,14 @@ use super::ExchangeConnector;
 use layline::shared_memory::{MarketDataWriter, SerializedMarketData};
 use layline::types::{Exchange, MarketData, RingKey, StrategyName, Topic};
 
-enum WorkerCommand {
-    Subscribe {
-        strategy_name: StrategyName,
-        topics: HashSet<Topic>,
-        reply_sender: oneshot::Sender<WorkerReply>,
-    },
-    Unsubscribe {
-        strategy_name: StrategyName,
-        topics: HashSet<Topic>,
-        reply_sender: oneshot::Sender<WorkerReply>,
-    },
+/// Makes `topics` the strategy's whole set on this exchange.
+struct SetTopics {
+    strategy_name: StrategyName,
+    topics: HashSet<Topic>,
+    reply_sender: oneshot::Sender<WorkerReply>,
 }
 
-/// Why each topic could not be subscribed or unsubscribed; topics missing from the map succeeded.
+/// Why each topic could not be added or released; topics missing from the map succeeded.
 pub(super) type WorkerReply = HashMap<Topic, String>;
 
 pub(super) fn failed_reply(topics: &HashSet<Topic>, reason: &str) -> WorkerReply {
@@ -44,76 +38,40 @@ const WORKER_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 /// Thread-safe entry point to one exchange worker; dropping it stops the worker.
 pub(super) struct WorkerHandle {
     exchange: Exchange,
-    commands: UnboundedSender<WorkerCommand>,
+    commands: UnboundedSender<SetTopics>,
 }
 
 impl WorkerHandle {
-    pub(super) async fn subscribe(
+    /// Makes `topics` the strategy's whole set on this exchange, so sending the same set twice changes nothing.
+    pub(super) async fn set_topics(
         &self,
         strategy_name: &StrategyName,
         topics: &HashSet<Topic>,
     ) -> WorkerReply {
         let (reply_sender, reply_receiver) = oneshot::channel();
-        let command = WorkerCommand::Subscribe {
+        let command = SetTopics {
             strategy_name: strategy_name.clone(),
             topics: topics.clone(),
             reply_sender,
         };
         if self.commands.send(command).is_err() {
-            return self.stopped(topics);
+            return failed_reply(topics, &format!("{} worker has stopped", self.exchange));
         }
         match timeout(WORKER_REPLY_TIMEOUT, reply_receiver).await {
             Ok(Ok(worker_reply)) => worker_reply,
-            Ok(Err(_)) => self.stopped(topics),
-            Err(_) => self.unanswered(topics),
-        }
-    }
-
-    /// Unknown topics succeed, so unsubscribing is idempotent.
-    pub(super) async fn unsubscribe(
-        &self,
-        strategy_name: &StrategyName,
-        topics: &HashSet<Topic>,
-    ) -> WorkerReply {
-        let (reply_sender, reply_receiver) = oneshot::channel();
-        let command = WorkerCommand::Unsubscribe {
-            strategy_name: strategy_name.clone(),
-            topics: topics.clone(),
-            reply_sender,
-        };
-        if self.commands.send(command).is_err() {
-            return WorkerReply::new();
-        }
-        match timeout(WORKER_REPLY_TIMEOUT, reply_receiver).await {
-            Ok(Ok(worker_reply)) => worker_reply,
-            Ok(Err(_)) => WorkerReply::new(),
-            Err(_) => self.unanswered(topics),
+            Ok(Err(_)) => failed_reply(topics, &format!("{} worker has stopped", self.exchange)),
+            Err(_) => failed_reply(
+                topics,
+                &format!(
+                    "{} worker did not answer within {WORKER_REPLY_TIMEOUT:?}",
+                    self.exchange
+                ),
+            ),
         }
     }
 
     pub(super) fn has_stopped(&self) -> bool {
         self.commands.is_closed()
-    }
-
-    #[cfg(test)]
-    pub(super) fn stopped_for_test(exchange: Exchange) -> Self {
-        let (commands, receiver) = unbounded_channel();
-        drop(receiver);
-        Self { exchange, commands }
-    }
-
-    fn stopped(&self, topics: &HashSet<Topic>) -> WorkerReply {
-        failed_reply(topics, &format!("{} worker has stopped", self.exchange))
-    }
-
-    fn unanswered(&self, topics: &HashSet<Topic>) -> WorkerReply {
-        failed_reply(
-            topics,
-            &format!(
-                "{} worker did not answer within {WORKER_REPLY_TIMEOUT:?}",
-                self.exchange
-            ),
-        )
     }
 }
 
@@ -143,7 +101,7 @@ pub(super) fn spawn_worker<Connector: ExchangeConnector>(
 async fn run_worker<Connector: ExchangeConnector>(
     root_directory: PathBuf,
     new_connector: impl FnOnce() -> Connector,
-    commands: UnboundedReceiver<WorkerCommand>,
+    commands: UnboundedReceiver<SetTopics>,
 ) {
     let worker = ExchangeWorker {
         connector: new_connector(),
@@ -167,30 +125,19 @@ struct StrategyRings {
     writers: HashMap<RingKey, MarketDataWriter>,
 }
 
-impl StrategyRings {
-    fn publish(&self, serialized: &SerializedMarketData) {
-        self.writers
-            .get(&serialized.topic().ring_key())
-            .expect("every subscribed topic's ring is open")
-            .publish(serialized);
-    }
-}
-
 impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
-    async fn run(mut self, mut commands: UnboundedReceiver<WorkerCommand>) {
+    async fn run(mut self, mut commands: UnboundedReceiver<SetTopics>) {
         loop {
             select! {
-                command_option = commands.recv() => match command_option {
-                    Some(WorkerCommand::Subscribe { strategy_name, topics, reply_sender }) => {
-                        let failures = self.subscribe(&strategy_name, &topics).await;
-                        self.reply(reply_sender, failures);
+                command_option = commands.recv() => {
+                    let Some(SetTopics { strategy_name, topics, reply_sender }) = command_option else {
+                        break;
+                    };
+                    let failures = self.set_topics(&strategy_name, &topics).await;
+                    if reply_sender.send(failures).is_err() {
+                        warn!("{} requester went away before the reply", Connector::EXCHANGE);
                     }
-                    Some(WorkerCommand::Unsubscribe { strategy_name, topics, reply_sender }) => {
-                        let failures = self.unsubscribe(&strategy_name, &topics).await;
-                        self.reply(reply_sender, failures);
-                    }
-                    None => break,
-                },
+                }
                 data = self.connector.next_event() => self.publish(&data),
             }
             if self.strategies.is_empty() {
@@ -200,66 +147,29 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
         self.connector.disconnect().await;
     }
 
-    /// Opens the strategy's rings first, then subscribes the exchange to the topics no strategy wanted before.
-    async fn subscribe(
+    /// Opens the rings of the added topics, then has the exchange send the topics no strategy wanted
+    /// before and stop the ones no strategy wants any more.
+    async fn set_topics(
         &mut self,
         strategy_name: &StrategyName,
         topics: &HashSet<Topic>,
     ) -> WorkerReply {
-        let (opened, mut failures) = self.open_rings(strategy_name, topics);
-        let newly_wanted: HashSet<Topic> = opened
-            .iter()
-            .filter(|topic| !self.is_wanted(topic))
-            .copied()
-            .collect();
-        if !newly_wanted.is_empty()
-            && let Err(error) = self.connector.subscribe(&newly_wanted).await
-        {
-            failures.extend(failed_reply(&newly_wanted, &format!("{error:#}")));
-        }
-
-        let rings = self
-            .strategies
-            .get_mut(strategy_name)
-            .expect("open_rings registers the strategy");
-        for topic in opened
-            .into_iter()
-            .filter(|topic| !failures.contains_key(topic))
-        {
-            info!(
-                "publishing {topic} to {}",
-                topic
-                    .file_path(&self.root_directory, strategy_name)
-                    .display()
-            );
-            rings.topics.insert(topic);
-        }
-        self.close_unused_rings(strategy_name);
-        failures
-    }
-
-    /// Opens the strategy's ring of every topic it does not have yet. Returns those topics, and why the others were refused.
-    fn open_rings(
-        &mut self,
-        strategy_name: &StrategyName,
-        topics: &HashSet<Topic>,
-    ) -> (HashSet<Topic>, WorkerReply) {
         let rings = self.strategies.entry(strategy_name.clone()).or_default();
+        let dropped: Vec<Topic> = rings.topics.difference(topics).copied().collect();
         let mut opened = HashSet::new();
         let mut failures = WorkerReply::new();
         for topic in topics.difference(&rings.topics) {
-            if topic.instrument.exchange != Connector::EXCHANGE {
-                let reason = format!(
-                    "{} worker cannot serve {}",
-                    Connector::EXCHANGE,
-                    topic.instrument.exchange
-                );
-                failures.insert(*topic, reason);
-                continue;
-            }
-            let ring_key = topic.ring_key();
-            if let Entry::Vacant(entry) = rings.writers.entry(ring_key) {
-                match MarketDataWriter::open(&self.root_directory, strategy_name, ring_key) {
+            // The router groups topics by exchange, so a topic of another exchange is a bug; the
+            // panic stops the whole provider.
+            assert_eq!(
+                Connector::EXCHANGE,
+                topic.instrument.exchange,
+                "{} worker was sent {topic}",
+                Connector::EXCHANGE
+            );
+            if let Entry::Vacant(entry) = rings.writers.entry(topic.ring_key()) {
+                match MarketDataWriter::open(&self.root_directory, strategy_name, topic.ring_key())
+                {
                     Ok(writer) => {
                         entry.insert(writer);
                     }
@@ -271,41 +181,53 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
             }
             opened.insert(*topic);
         }
-        (opened, failures)
-    }
 
-    /// Unknown topics succeed, so unsubscribing is idempotent. The exchange stops sending the topics no strategy wants any more.
-    async fn unsubscribe(
-        &mut self,
-        strategy_name: &StrategyName,
-        topics: &HashSet<Topic>,
-    ) -> WorkerReply {
-        let Some(rings) = self.strategies.get_mut(strategy_name) else {
-            return WorkerReply::new();
-        };
-        let removed: Vec<Topic> = topics
+        let newly_wanted: HashSet<Topic> = opened
             .iter()
-            .filter(|topic| rings.topics.remove(topic))
+            .filter(|topic| !self.is_wanted(topic))
             .copied()
             .collect();
-        self.close_unused_rings(strategy_name);
+        if !newly_wanted.is_empty()
+            && let Err(error) = self.connector.subscribe(&newly_wanted).await
+        {
+            failures.extend(failed_reply(&newly_wanted, &format!("{error:#}")));
+        }
+        let rings = self
+            .strategies
+            .get_mut(strategy_name)
+            .expect("the strategy was registered above");
+        for topic in opened.iter().filter(|topic| !failures.contains_key(topic)) {
+            let path = topic
+                .ring_key()
+                .file_path(&self.root_directory, strategy_name);
+            info!("publishing {topic} to {}", path.display());
+            rings.topics.insert(*topic);
+        }
+        for topic in &dropped {
+            rings.topics.remove(topic);
+        }
+        let used: HashSet<RingKey> = rings.topics.iter().map(Topic::ring_key).collect();
+        rings.writers.retain(|ring_key, _| used.contains(ring_key));
+        if rings.topics.is_empty() {
+            self.strategies.remove(strategy_name);
+        }
 
-        let unwanted: HashSet<Topic> = removed
+        let unwanted: HashSet<Topic> = dropped
             .into_iter()
             .filter(|topic| !self.is_wanted(topic))
             .collect();
         if unwanted.is_empty() {
-            return WorkerReply::new();
+            return failures;
         }
         match self.connector.unsubscribe(&unwanted).await {
             Ok(()) => {
                 for topic in &unwanted {
                     info!("stopped publishing {topic}, no strategy wants it");
                 }
-                WorkerReply::new()
             }
-            Err(error) => failed_reply(&unwanted, &format!("{error:#}")),
+            Err(error) => failures.extend(failed_reply(&unwanted, &format!("{error:#}"))),
         }
+        failures
     }
 
     /// Whether any strategy reads `topic`, so the exchange must keep sending it.
@@ -313,27 +235,6 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
         self.strategies
             .values()
             .any(|rings| rings.topics.contains(topic))
-    }
-
-    /// Closes the strategy's rings that no topic is written into, and forgets the strategy once it has no topic left.
-    fn close_unused_rings(&mut self, strategy_name: &StrategyName) {
-        let Some(rings) = self.strategies.get_mut(strategy_name) else {
-            return;
-        };
-        let used: HashSet<RingKey> = rings.topics.iter().map(Topic::ring_key).collect();
-        rings.writers.retain(|ring_key, _| used.contains(ring_key));
-        if rings.topics.is_empty() {
-            self.strategies.remove(strategy_name);
-        }
-    }
-
-    fn reply(&self, reply_sender: oneshot::Sender<WorkerReply>, failures: WorkerReply) {
-        if reply_sender.send(failures).is_err() {
-            warn!(
-                "{} requester went away before the reply",
-                Connector::EXCHANGE
-            );
-        }
     }
 
     /// Serializes once, then writes the same bytes into the ring of every strategy that reads the topic.
@@ -345,12 +246,13 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
                 return;
             }
         };
+        let topic = serialized.topic();
         for rings in self
             .strategies
             .values()
-            .filter(|rings| rings.topics.contains(&serialized.topic()))
+            .filter(|rings| rings.topics.contains(&topic))
         {
-            rings.publish(&serialized);
+            rings.writers[&topic.ring_key()].publish(&serialized);
         }
     }
 }
@@ -384,6 +286,13 @@ pub(super) mod tests {
         timeout(STOP_TIMEOUT, worker.commands.closed())
             .await
             .expect("worker is expected to stop");
+    }
+
+    /// A handle whose worker has already stopped.
+    pub(in crate::exchanges) fn stopped_worker(exchange: Exchange) -> WorkerHandle {
+        let (commands, receiver) = unbounded_channel();
+        drop(receiver);
+        WorkerHandle { exchange, commands }
     }
 
     /// Always rejects unsubscribing; accepts subscribing only if `ACCEPTS_SUBSCRIBE`.
@@ -458,7 +367,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn worker_subscribes_batch_and_reports_failures() {
+    async fn worker_sets_topics_and_repeating_a_set_changes_nothing() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let worker = spawn(directory.path(), OkxConnector::new);
@@ -468,29 +377,29 @@ pub(super) mod tests {
             bitcoin_topic(MarketDataType::Trade),
         ]);
 
-        let reply = worker.subscribe(&first_strategy_name, &topics).await;
+        let reply = worker.set_topics(&first_strategy_name, &topics).await;
         assert!(reply.is_empty(), "{reply:?}");
         assert!(topics.iter().all(|topic| {
             topic
+                .ring_key()
                 .file_path(directory.path(), &first_strategy_name)
                 .exists()
         }));
         assert!(
             worker
-                .subscribe(&first_strategy_name, &bbo)
-                .await
-                .is_empty()
-        );
-
-        assert!(
-            worker
-                .unsubscribe(&first_strategy_name, &bbo)
+                .set_topics(&first_strategy_name, &topics)
                 .await
                 .is_empty()
         );
         assert!(
             worker
-                .unsubscribe(&first_strategy_name, &topics)
+                .set_topics(&first_strategy_name, &bbo)
+                .await
+                .is_empty()
+        );
+        assert!(
+            worker
+                .set_topics(&first_strategy_name, &HashSet::new())
                 .await
                 .is_empty()
         );
@@ -506,13 +415,13 @@ pub(super) mod tests {
         let ether = ether_topic(MarketDataType::Bbo);
         assert!(
             worker
-                .subscribe(&first_strategy_name, &HashSet::from([bitcoin, ether]))
+                .set_topics(&first_strategy_name, &HashSet::from([bitcoin, ether]))
                 .await
                 .is_empty()
         );
         assert!(
             worker
-                .subscribe(&second_strategy_name, &HashSet::from([bitcoin]))
+                .set_topics(&second_strategy_name, &HashSet::from([bitcoin]))
                 .await
                 .is_empty()
         );
@@ -528,7 +437,7 @@ pub(super) mod tests {
 
         assert!(
             worker
-                .unsubscribe(&first_strategy_name, &HashSet::from([bitcoin]))
+                .set_topics(&first_strategy_name, &HashSet::from([ether]))
                 .await
                 .is_empty()
         );
@@ -547,13 +456,13 @@ pub(super) mod tests {
         let worker = spawn(directory.path(), || ScriptedConnector::<true>);
         assert!(
             worker
-                .subscribe(&first_strategy_name, &bbo)
+                .set_topics(&first_strategy_name, &bbo)
                 .await
                 .is_empty()
         );
         assert!(
             worker
-                .subscribe(&second_strategy_name, &bbo)
+                .set_topics(&second_strategy_name, &bbo)
                 .await
                 .is_empty()
         );
@@ -561,13 +470,16 @@ pub(super) mod tests {
         // The connector rejects every unsubscription, so a reply without failures means it was never asked.
         assert!(
             worker
-                .unsubscribe(&first_strategy_name, &bbo)
+                .set_topics(&first_strategy_name, &HashSet::new())
                 .await
                 .is_empty()
         );
         assert_eq!(
             bbo.len(),
-            worker.unsubscribe(&second_strategy_name, &bbo).await.len()
+            worker
+                .set_topics(&second_strategy_name, &HashSet::new())
+                .await
+                .len()
         );
     }
 
@@ -578,28 +490,19 @@ pub(super) mod tests {
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let worker = spawn(directory.path(), OkxConnector::new);
         let bbo = HashSet::from([bitcoin_topic(MarketDataType::Bbo)]);
+        for strategy_name in [&first_strategy_name, &second_strategy_name] {
+            assert!(worker.set_topics(strategy_name, &bbo).await.is_empty());
+        }
         assert!(
             worker
-                .subscribe(&first_strategy_name, &bbo)
-                .await
-                .is_empty()
-        );
-        assert!(
-            worker
-                .subscribe(&second_strategy_name, &bbo)
-                .await
-                .is_empty()
-        );
-        assert!(
-            worker
-                .unsubscribe(&first_strategy_name, &bbo)
+                .set_topics(&first_strategy_name, &HashSet::new())
                 .await
                 .is_empty()
         );
         assert!(!worker.has_stopped());
         assert!(
             worker
-                .unsubscribe(&second_strategy_name, &bbo)
+                .set_topics(&second_strategy_name, &HashSet::new())
                 .await
                 .is_empty()
         );
@@ -608,10 +511,15 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn wrong_exchange_is_refused() {
+    #[should_panic(expected = "OKX worker was sent Binance/")]
+    async fn topic_of_another_exchange_panics() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
         let directory = tempdir().expect("temp dir creation is expected to not fail");
-        let worker = spawn(directory.path(), OkxConnector::new);
+        let mut worker = ExchangeWorker {
+            connector: OkxConnector::new(),
+            root_directory: directory.path().to_owned(),
+            strategies: HashMap::new(),
+        };
         let binance_topic = Topic {
             instrument: Instrument {
                 exchange: Exchange::Binance,
@@ -619,10 +527,9 @@ pub(super) mod tests {
             },
             market_data_type: MarketDataType::Bbo,
         };
-        let reply = worker
-            .subscribe(&first_strategy_name, &HashSet::from([binance_topic]))
+        worker
+            .set_topics(&first_strategy_name, &HashSet::from([binance_topic]))
             .await;
-        assert!(reply.contains_key(&binance_topic));
     }
 
     #[tokio::test]
@@ -630,11 +537,14 @@ pub(super) mod tests {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let bbo = bitcoin_topic(MarketDataType::Bbo);
-        create_dir_all(bbo.file_path(directory.path(), &first_strategy_name))
-            .expect("creating the ring path as a directory is expected to not fail");
+        create_dir_all(
+            bbo.ring_key()
+                .file_path(directory.path(), &first_strategy_name),
+        )
+        .expect("creating the ring path as a directory is expected to not fail");
         let worker = spawn(directory.path(), OkxConnector::new);
         let reply = worker
-            .subscribe(&first_strategy_name, &HashSet::from([bbo]))
+            .set_topics(&first_strategy_name, &HashSet::from([bbo]))
             .await;
         assert!(reply.contains_key(&bbo));
     }
@@ -647,25 +557,19 @@ pub(super) mod tests {
         let trade = bitcoin_topic(MarketDataType::Trade);
         let rejecting = spawn(directory.path(), || ScriptedConnector::<false>);
         let reply = rejecting
-            .subscribe(&first_strategy_name, &HashSet::from([bbo]))
+            .set_topics(&first_strategy_name, &HashSet::from([bbo]))
             .await;
         assert!(reply.contains_key(&bbo));
-        assert!(
-            rejecting
-                .unsubscribe(&first_strategy_name, &HashSet::from([bbo]))
-                .await
-                .is_empty()
-        );
 
         let sticky = spawn(directory.path(), || ScriptedConnector::<true>);
         assert!(
             sticky
-                .subscribe(&first_strategy_name, &HashSet::from([bbo]))
+                .set_topics(&first_strategy_name, &HashSet::from([bbo, trade]))
                 .await
                 .is_empty()
         );
         let reply = sticky
-            .unsubscribe(&first_strategy_name, &HashSet::from([bbo, trade]))
+            .set_topics(&first_strategy_name, &HashSet::from([trade]))
             .await;
         assert!(reply.contains_key(&bbo));
         assert!(!reply.contains_key(&trade));
@@ -680,7 +584,7 @@ pub(super) mod tests {
             commands,
         };
         let topics = HashSet::from([bitcoin_topic(MarketDataType::Bbo)]);
-        let reply = worker.subscribe(&first_strategy_name, &topics).await;
+        let reply = worker.set_topics(&first_strategy_name, &topics).await;
         assert!(
             reply
                 .values()
@@ -691,18 +595,18 @@ pub(super) mod tests {
     #[tokio::test]
     async fn stopped_worker_fails_every_topic() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
-        let worker = WorkerHandle::stopped_for_test(Exchange::Okx);
+        let worker = stopped_worker(Exchange::Okx);
         assert!(worker.has_stopped());
         let topics = HashSet::from([
             bitcoin_topic(MarketDataType::Bbo),
             bitcoin_topic(MarketDataType::Trade),
         ]);
-        let reply = worker.subscribe(&first_strategy_name, &topics).await;
+        let reply = worker.set_topics(&first_strategy_name, &topics).await;
         assert_eq!(topics.len(), reply.len());
         assert!(reply.values().all(|reason| reason.contains("has stopped")));
         assert!(
             worker
-                .unsubscribe(&first_strategy_name, &topics)
+                .set_topics(&first_strategy_name, &HashSet::new())
                 .await
                 .is_empty()
         );

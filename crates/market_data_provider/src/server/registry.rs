@@ -7,66 +7,53 @@ use layline::types::{StrategyName, Topic};
 /// unsubscribes or its lease expires.
 #[derive(Default)]
 pub(crate) struct SubscriptionRegistry {
-    topics_by_strategy: HashMap<StrategyName, HashSet<Topic>>,
-    lease_expiries: HashMap<StrategyName, Instant>,
+    holdings: HashMap<StrategyName, Holding>,
+}
+
+struct Holding {
+    topics: HashSet<Topic>,
+    lease_expires_at: Instant,
 }
 
 impl SubscriptionRegistry {
     pub(crate) fn held_by(&self, strategy_name: &StrategyName) -> HashSet<Topic> {
-        self.topics_by_strategy
+        self.holdings
             .get(strategy_name)
-            .cloned()
+            .map(|holding| holding.topics.clone())
             .unwrap_or_default()
     }
 
-    pub(crate) fn add(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
-        self.topics_by_strategy
-            .entry(strategy_name.to_owned())
-            .or_default()
-            .extend(topics);
-    }
-
-    pub(crate) fn remove(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
-        let Some(held) = self.topics_by_strategy.get_mut(strategy_name) else {
+    /// Replaces the strategy's topics and lease; a strategy without topics is forgotten.
+    pub(crate) fn set(
+        &mut self,
+        strategy_name: &StrategyName,
+        topics: HashSet<Topic>,
+        lease_expires_at: Instant,
+    ) {
+        if topics.is_empty() {
+            self.holdings.remove(strategy_name);
             return;
-        };
-        held.retain(|topic| !topics.contains(topic));
-        if held.is_empty() {
-            self.topics_by_strategy.remove(strategy_name);
         }
-    }
-
-    pub(crate) fn renew_lease(&mut self, strategy_name: &StrategyName, expires_at: Instant) {
-        self.lease_expiries
-            .insert(strategy_name.to_owned(), expires_at);
+        let holding = Holding {
+            topics,
+            lease_expires_at,
+        };
+        self.holdings.insert(strategy_name.clone(), holding);
     }
 
     /// Forgets every strategy whose lease ended by `now`, returning the topics each one held.
     pub(crate) fn expire_leases(&mut self, now: Instant) -> HashMap<StrategyName, HashSet<Topic>> {
-        let expired: Vec<StrategyName> = self
-            .lease_expiries
-            .iter()
-            .filter(|(_, expires_at)| **expires_at <= now)
-            .map(|(strategy_name, _)| strategy_name.clone())
-            .collect();
-        expired
-            .into_iter()
-            .map(|strategy_name| {
-                self.lease_expiries.remove(&strategy_name);
-                let held = self
-                    .topics_by_strategy
-                    .remove(&strategy_name)
-                    .unwrap_or_default();
-                (strategy_name, held)
-            })
+        self.holdings
+            .extract_if(|_, holding| holding.lease_expires_at <= now)
+            .map(|(strategy_name, holding)| (strategy_name, holding.topics))
             .collect()
     }
 
     /// Every topic some strategy holds, which is what the provider publishes.
     pub(crate) fn subscribed_topics(&self) -> HashSet<Topic> {
-        self.topics_by_strategy
+        self.holdings
             .values()
-            .flatten()
+            .flat_map(|holding| &holding.topics)
             .copied()
             .collect()
     }
@@ -105,45 +92,34 @@ mod tests {
     }
 
     #[test]
-    fn strategies_hold_what_they_add_until_they_remove_it() {
+    fn strategies_hold_what_they_were_set_to() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
         let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
+        let lease_expires_at = Instant::now() + LEASE;
         let mut registry = SubscriptionRegistry::default();
-        registry.add(&first_strategy_name, &bbo());
-        registry.add(&first_strategy_name, &trade());
-        registry.add(&second_strategy_name, &bbo());
+        registry.set(&first_strategy_name, &bbo() | &trade(), lease_expires_at);
+        registry.set(&second_strategy_name, bbo(), lease_expires_at);
         assert_eq!(&bbo() | &trade(), registry.held_by(&first_strategy_name));
-
-        registry.remove(&first_strategy_name, &bbo());
-        assert_eq!(trade(), registry.held_by(&first_strategy_name));
-        assert_eq!(bbo(), registry.held_by(&second_strategy_name));
-    }
-
-    #[test]
-    fn subscribed_topics_are_every_strategys_topics() {
-        let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
-        let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
-        let mut registry = SubscriptionRegistry::default();
-        registry.add(&first_strategy_name, &bbo());
-        registry.add(&second_strategy_name, &bbo());
-        registry.add(&second_strategy_name, &trade());
         assert_eq!(&bbo() | &trade(), registry.subscribed_topics());
 
-        registry.remove(&second_strategy_name, &(&bbo() | &trade()));
-        registry.remove(&first_strategy_name, &bbo());
+        registry.set(&first_strategy_name, trade(), lease_expires_at);
+        assert_eq!(trade(), registry.held_by(&first_strategy_name));
+        assert_eq!(bbo(), registry.held_by(&second_strategy_name));
+
+        registry.set(&first_strategy_name, HashSet::new(), lease_expires_at);
+        registry.set(&second_strategy_name, HashSet::new(), lease_expires_at);
         assert!(registry.subscribed_topics().is_empty());
+        assert!(registry.expire_leases(lease_expires_at).is_empty());
     }
 
     #[test]
     fn expired_lease_releases_only_that_strategy() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
         let second_strategy_name = StrategyName::from(SECOND_STRATEGY_NAME);
-        let mut registry = SubscriptionRegistry::default();
-        registry.add(&first_strategy_name, &(&bbo() | &trade()));
-        registry.add(&second_strategy_name, &bbo());
         let start = Instant::now();
-        registry.renew_lease(&first_strategy_name, start + LEASE);
-        registry.renew_lease(&second_strategy_name, start + LEASE * 2);
+        let mut registry = SubscriptionRegistry::default();
+        registry.set(&first_strategy_name, &bbo() | &trade(), start + LEASE);
+        registry.set(&second_strategy_name, bbo(), start + LEASE * 2);
 
         assert!(
             registry
@@ -161,11 +137,10 @@ mod tests {
     #[test]
     fn renewed_lease_postpones_expiry() {
         let first_strategy_name = StrategyName::from(FIRST_STRATEGY_NAME);
-        let mut registry = SubscriptionRegistry::default();
-        registry.add(&first_strategy_name, &bbo());
         let start = Instant::now();
-        registry.renew_lease(&first_strategy_name, start + LEASE);
-        registry.renew_lease(&first_strategy_name, start + LEASE * 2);
+        let mut registry = SubscriptionRegistry::default();
+        registry.set(&first_strategy_name, bbo(), start + LEASE);
+        registry.set(&first_strategy_name, bbo(), start + LEASE * 2);
         assert!(registry.expire_leases(start + LEASE).is_empty());
     }
 }

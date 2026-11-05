@@ -30,7 +30,7 @@ use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter};
 use phanes::clients::ClientName;
 use phanes::config::PhanesConfig;
 use phanes::gnosis::server::GnosisState;
-use phanes::notify::{self, Notification};
+use phanes::notify::{self, Notification, enqueue};
 use phanes::server;
 
 const CRASH_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -200,14 +200,11 @@ async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<()
     let listen_address = config.listen_address;
     let client_names: Vec<&ClientName> = clients.keys().collect();
     info!("Phanes listening on {listen_address} for clients {client_names:?}");
-    if notification_sender
-        .send(Notification::Started {
-            listen_address: config.listen_address.to_string(),
-        })
-        .is_err()
-    {
-        error!("notification dispatcher is gone; startup push dropped");
-    }
+    let listen_address = listen_address.to_string();
+    enqueue(
+        &notification_sender,
+        Notification::Started { listen_address },
+    );
 
     server::run(
         listener,

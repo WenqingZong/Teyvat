@@ -9,6 +9,7 @@
 | `phanes/` | Phanes 的部署脚本 `phanes.sh`、systemd unit `phanes.service`、配置模板 `phanes.example.toml`（RedmiBook） |
 | `market_data_provider/` | 行情服务的部署脚本 `market_data_provider.sh`、systemd unit `market_data_provider.service`、配置模板 `market_data_provider.example.toml`（Osaka） |
 | `dummy_strategy/` | 占位策略的部署脚本 `dummy_strategy.sh`、systemd unit `dummy_strategy.service`、配置模板 `strategy.example.toml`（Osaka，和行情服务同机） |
+| `common.sh` | 三个部署脚本共用的函数：日志和确认、编译安装二进制、准备配置目录、systemd unit、卸载、在配置里生成 X25519 私钥并推导公钥、`install` / `uninstall` / `reinstall` 分发 |
 | `clickhouse/` | RedmiBook 上 ClickHouse 的手动安装记录 [`clickhouse.md`](clickhouse/clickhouse.md)（尚未接入代码，见 [`plan/database.md`](../plan/database.md)） |
 
 所有命令都在 **Teyvat 仓库根目录**执行。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），

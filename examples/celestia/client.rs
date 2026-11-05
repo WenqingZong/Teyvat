@@ -230,7 +230,7 @@ mod tests {
     async fn phanes() -> (Url, SecretBox<StaticKey>, SecretBox<StaticKey>) {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let (notifications, _) = unbounded_channel();
+        let (notification_sender, _) = unbounded_channel();
         let client = ClientConfig {
             ipv4: Ipv4Addr::LOCALHOST,
             ipv6: None,
@@ -242,7 +242,7 @@ mod tests {
         let state = Arc::new(CelestiaState::new(
             celestia_private_key,
             Arc::new(clients),
-            notifications,
+            notification_sender,
         ));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

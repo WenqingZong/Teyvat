@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use futures::future::join_all;
+use strum::IntoEnumIterator;
 
 use super::websocket::TungsteniteClient;
-use super::worker::{WorkerHandle, WorkerReply, failed_reply, spawn_worker};
+use super::worker::{WorkerHandle, failed_reply, spawn_worker};
 use super::{BinanceConnector, ConnectorContext, OkxConnector};
 use crate::utils::RealClock;
 use layline::types::{Exchange, StrategyName, Topic};
@@ -33,96 +33,51 @@ impl ExchangeRouter {
         &self.root_directory
     }
 
-    /// Whether an exchange's worker is alive, so active topics are not left without a publisher.
-    pub(crate) fn is_running(&self, exchange: Exchange) -> bool {
-        self.workers
-            .get(&exchange)
-            .is_some_and(|worker| !worker.has_stopped())
-    }
-
-    /// Delivers `topics` to the strategy. Returns why each topic was refused; topics missing from the map succeeded.
-    pub(crate) async fn subscribe(
+    /// Moves the strategy from `held` to `target`, one exchange after another. Returns why each topic
+    /// could not be added or released; topics missing from the map succeeded.
+    pub(crate) async fn set_topics(
         &mut self,
         strategy_name: &StrategyName,
-        topics: &HashSet<Topic>,
+        held: &HashSet<Topic>,
+        target: &HashSet<Topic>,
     ) -> HashMap<Topic, String> {
-        let by_exchange = group_by_exchange(topics);
-        let start_failures = self.start_missing_workers(by_exchange.keys().copied());
-        let workers = &self.workers;
-        let start_failures = &start_failures;
-        let replies = join_all(by_exchange.iter().map(|(exchange, topics)| {
-            let exchange = *exchange;
-            async move {
-                match (workers.get(&exchange), start_failures.get(&exchange)) {
-                    (Some(worker), None) => worker.subscribe(strategy_name, topics).await,
-                    (_, reason) => failed_reply(
-                        topics,
-                        reason.map_or("worker is not running", String::as_str),
-                    ),
-                }
-            }
-        }))
-        .await;
-        merge_failures(replies)
-    }
-
-    /// Stops delivering `topics` to the strategy. Returns why each topic could not be unsubscribed; topics missing from the map succeeded.
-    pub(crate) async fn unsubscribe(
-        &mut self,
-        strategy_name: &StrategyName,
-        topics: &HashSet<Topic>,
-    ) -> HashMap<Topic, String> {
-        let by_exchange = group_by_exchange(topics);
-        let workers = &self.workers;
-        let replies = join_all(by_exchange.iter().map(|(exchange, topics)| {
-            let exchange = *exchange;
-            async move {
-                match workers.get(&exchange) {
-                    Some(worker) if !worker.has_stopped() => {
-                        worker.unsubscribe(strategy_name, topics).await
-                    }
-                    _ => WorkerReply::new(),
-                }
-            }
-        }))
-        .await;
-        merge_failures(replies)
-    }
-
-    /// Returns the reason for each worker that failed to start.
-    fn start_missing_workers(
-        &mut self,
-        exchanges: impl IntoIterator<Item = Exchange>,
-    ) -> HashMap<Exchange, String> {
-        let missing: Vec<Exchange> = exchanges
-            .into_iter()
-            .filter(|exchange| {
-                self.workers
-                    .get(exchange)
-                    .is_none_or(WorkerHandle::has_stopped)
-            })
-            .collect();
+        let mut held_by_exchange = group_by_exchange(held);
+        let mut target_by_exchange = group_by_exchange(target);
         let mut failures = HashMap::new();
-        for exchange in missing {
-            match spawn_exchange_worker(exchange, &self.root_directory, self.demo, &self.context) {
-                Ok(worker) => {
-                    self.workers.insert(exchange, worker);
-                }
-                Err(error) => {
-                    self.workers.remove(&exchange);
-                    failures.insert(
-                        exchange,
-                        format!("failed to start {exchange} worker: {error:#}"),
-                    );
+        for exchange in Exchange::iter() {
+            let held = held_by_exchange.remove(&exchange).unwrap_or_default();
+            let target = target_by_exchange.remove(&exchange).unwrap_or_default();
+            let running = self
+                .workers
+                .get(&exchange)
+                .is_some_and(|worker| !worker.has_stopped());
+            // A stopped worker took the strategy's rings with it, so a new one is sent the whole target.
+            if (running && held == target) || (!running && target.is_empty()) {
+                continue;
+            }
+            if !running {
+                match spawn_exchange_worker(
+                    exchange,
+                    &self.root_directory,
+                    self.demo,
+                    &self.context,
+                ) {
+                    Ok(worker) => {
+                        self.workers.insert(exchange, worker);
+                    }
+                    Err(error) => {
+                        self.workers.remove(&exchange);
+                        let reason = format!("failed to start {exchange} worker: {error:#}");
+                        failures.extend(failed_reply(&target, &reason));
+                        continue;
+                    }
                 }
             }
+            let worker = &self.workers[&exchange];
+            failures.extend(worker.set_topics(strategy_name, &target).await);
         }
         failures
     }
-}
-
-fn merge_failures(replies: Vec<WorkerReply>) -> HashMap<Topic, String> {
-    replies.into_iter().flatten().collect()
 }
 
 /// The only per-exchange code in routing: add an arm here when adding an exchange.
@@ -167,7 +122,7 @@ mod tests {
 
     use super::*;
     use crate::exchanges::tests::test_connector_context;
-    use crate::exchanges::worker::tests::wait_until_stopped;
+    use crate::exchanges::worker::tests::{stopped_worker, wait_until_stopped};
     use layline::testing::{test_instrument, test_topic};
     use layline::types::{Currency, MarketDataType, UnderlyingType};
 
@@ -236,14 +191,22 @@ mod tests {
             topic(Exchange::Okx, MarketDataType::Trade),
         ]);
 
-        let failures = router.subscribe(&strategy_name, &topics).await;
+        let failures = router
+            .set_topics(&strategy_name, &HashSet::new(), &topics)
+            .await;
         assert!(failures.is_empty(), "{failures:?}");
+        assert!(topics.iter().all(|topic| {
+            topic
+                .ring_key()
+                .file_path(directory.path(), &strategy_name)
+                .exists()
+        }));
         assert!(
-            topics
-                .iter()
-                .all(|topic| topic.file_path(directory.path(), &strategy_name).exists())
+            router
+                .set_topics(&strategy_name, &topics, &HashSet::new())
+                .await
+                .is_empty()
         );
-        assert!(router.unsubscribe(&strategy_name, &topics).await.is_empty());
     }
 
     #[tokio::test]
@@ -258,7 +221,7 @@ mod tests {
         let okx_topics: HashSet<Topic> = okx_bbo.union(&okx_trade).copied().collect();
         assert!(
             router
-                .subscribe(&strategy_name, &okx_topics)
+                .set_topics(&strategy_name, &HashSet::new(), &okx_topics)
                 .await
                 .is_empty()
         );
@@ -266,23 +229,23 @@ mod tests {
 
         assert!(
             router
-                .unsubscribe(&strategy_name, &okx_bbo)
+                .set_topics(&strategy_name, &okx_topics, &okx_trade)
                 .await
                 .is_empty()
         );
         assert_eq!(HashSet::from([Exchange::Okx]), running_exchanges(&router));
         assert!(
             router
-                .unsubscribe(&strategy_name, &okx_trade)
+                .set_topics(&strategy_name, &okx_trade, &HashSet::new())
                 .await
                 .is_empty()
         );
         wait_until_idle(&router).await;
 
-        let okx_bbo = HashSet::from([topic(Exchange::Okx, MarketDataType::Bbo)]);
+        // Releasing from a stopped worker neither fails nor starts a new one.
         assert!(
             router
-                .unsubscribe(&strategy_name, &okx_bbo)
+                .set_topics(&strategy_name, &okx_bbo, &HashSet::new())
                 .await
                 .is_empty()
         );
@@ -290,19 +253,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_worker_is_replaced_on_next_subscribe() {
+    async fn stopped_worker_is_replaced_and_sent_the_held_topics() {
         let strategy_name = StrategyName::from(STRATEGY_NAME);
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let mut router = ExchangeRouter::new(directory.path(), false, test_connector_context());
         router
             .workers
-            .insert(Exchange::Okx, WorkerHandle::stopped_for_test(Exchange::Okx));
-        assert!(!router.is_running(Exchange::Okx));
+            .insert(Exchange::Okx, stopped_worker(Exchange::Okx));
 
+        // The strategy already held the topic, so only the stopped worker makes the router send it.
         let okx_trade = HashSet::from([topic(Exchange::Okx, MarketDataType::Trade)]);
         assert!(
             router
-                .subscribe(&strategy_name, &okx_trade)
+                .set_topics(&strategy_name, &okx_trade, &okx_trade)
                 .await
                 .is_empty()
         );

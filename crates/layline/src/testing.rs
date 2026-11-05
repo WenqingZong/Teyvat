@@ -43,7 +43,7 @@ pub fn test_subscription(
 ) -> Subscription {
     Subscription {
         topic,
-        path: topic.file_path(root_directory, strategy_name),
+        path: topic.ring_key().file_path(root_directory, strategy_name),
     }
 }
 

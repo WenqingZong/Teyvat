@@ -1,9 +1,8 @@
 use std::fmt::{Display, Formatter, Result as FormatResult};
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Instrument, MarketDataType, RingKey, StrategyName};
+use crate::types::{Instrument, MarketDataType, RingKey};
 
 /// Unit of subscription and deduplication; a strategy's topics of one `RingKey` share a ring.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -20,11 +19,6 @@ impl Topic {
             market_data_type: self.market_data_type,
         }
     }
-
-    /// The ring that delivers this topic to `strategy_name`.
-    pub fn file_path(&self, root_directory: &Path, strategy_name: &StrategyName) -> PathBuf {
-        self.ring_key().file_path(root_directory, strategy_name)
-    }
 }
 
 impl Display for Topic {
@@ -35,9 +29,11 @@ impl Display for Topic {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::testing::{test_instrument, test_topic};
-    use crate::types::{Currency, Exchange, UnderlyingType};
+    use crate::types::{Currency, Exchange, StrategyName, UnderlyingType};
 
     fn topic() -> Topic {
         Topic {
@@ -66,12 +62,20 @@ mod tests {
         let first_strategy_name = StrategyName::from("first");
         let second_strategy_name = StrategyName::from("second");
         assert_eq!(
-            topic().file_path(root_directory, &first_strategy_name),
-            other_pair.file_path(root_directory, &first_strategy_name)
+            topic()
+                .ring_key()
+                .file_path(root_directory, &first_strategy_name),
+            other_pair
+                .ring_key()
+                .file_path(root_directory, &first_strategy_name)
         );
         assert_ne!(
-            topic().file_path(root_directory, &first_strategy_name),
-            topic().file_path(root_directory, &second_strategy_name)
+            topic()
+                .ring_key()
+                .file_path(root_directory, &first_strategy_name),
+            topic()
+                .ring_key()
+                .file_path(root_directory, &second_strategy_name)
         );
     }
 

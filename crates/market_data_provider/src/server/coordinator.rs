@@ -31,8 +31,7 @@ impl Coordinator {
         topics: &HashSet<Topic>,
         now: Instant,
     ) -> HashMap<Topic, SubscriptionResult> {
-        let mut target = self.registry.held_by(strategy_name);
-        target.extend(topics.iter().copied());
+        let target = &self.registry.held_by(strategy_name) | topics;
         self.apply(strategy_name, &target, topics, now).await
     }
 
@@ -43,12 +42,12 @@ impl Coordinator {
         topics: &HashSet<Topic>,
         now: Instant,
     ) -> HashMap<Topic, SubscriptionResult> {
-        let change = TopicSetChange::between(&self.registry.held_by(strategy_name), topics);
-        if !change.is_empty() {
+        let held = self.registry.held_by(strategy_name);
+        if held != *topics {
             warn!(
                 "{strategy_name} resubscribed with a different set: added {}, dropped {}",
-                format_topics(&change.added),
-                format_topics(&change.dropped)
+                format_topics(topics.difference(&held)),
+                format_topics(held.difference(topics))
             );
         }
         self.apply(strategy_name, topics, topics, now).await
@@ -60,14 +59,15 @@ impl Coordinator {
         topics: &HashSet<Topic>,
         now: Instant,
     ) {
-        self.registry
-            .renew_lease(strategy_name, now + self.lease_duration);
-        self.release(strategy_name, topics).await;
+        let target = &self.registry.held_by(strategy_name) - topics;
+        self.apply(strategy_name, &target, &HashSet::new(), now)
+            .await;
     }
 
     pub(crate) async fn expire_leases(&mut self, now: Instant) {
-        for (strategy_name, topics) in self.registry.expire_leases(now) {
-            self.release(&strategy_name, &topics).await;
+        for (strategy_name, held) in self.registry.expire_leases(now) {
+            self.move_topics(&strategy_name, &held, &HashSet::new())
+                .await;
         }
     }
 
@@ -79,7 +79,8 @@ impl Coordinator {
         self.registry.subscribed_topics()
     }
 
-    /// Moves the strategy's held set to `target`. Returns the ring path, or why each requested topic was refused.
+    /// Moves the strategy's held set to `target` and renews its lease. Returns the ring path, or why
+    /// each requested topic was refused.
     async fn apply(
         &mut self,
         strategy_name: &StrategyName,
@@ -87,112 +88,54 @@ impl Coordinator {
         requested: &HashSet<Topic>,
         now: Instant,
     ) -> HashMap<Topic, SubscriptionResult> {
-        self.registry
-            .renew_lease(strategy_name, now + self.lease_duration);
-        let change = TopicSetChange::between(&self.registry.held_by(strategy_name), target);
-
-        // A stopped worker took the strategy's rings with it, so its held topics are subscribed again.
-        let to_subscribe: HashSet<Topic> = target
+        let held = self.registry.held_by(strategy_name);
+        let failures = self.move_topics(strategy_name, &held, target).await;
+        // A held topic a new worker refused stays held, so the next request sends it again.
+        let new_held = target
             .iter()
-            .filter(|topic| {
-                change.added.contains(topic) || !self.router.is_running(topic.instrument.exchange)
-            })
+            .filter(|topic| held.contains(topic) || !failures.contains_key(topic))
             .copied()
             .collect();
-        let failures = self.router.subscribe(strategy_name, &to_subscribe).await;
-        let subscribed: HashSet<Topic> = to_subscribe
-            .into_iter()
-            .filter(|topic| !failures.contains_key(topic))
-            .collect();
-        self.registry.add(strategy_name, &subscribed);
-        self.release(strategy_name, &change.dropped).await;
+        self.registry
+            .set(strategy_name, new_held, now + self.lease_duration);
 
-        for (reason, topics) in group_by_reason(&failures) {
-            warn!(
-                "{strategy_name} was refused {}: {reason}",
-                format_topics(&topics)
-            );
-        }
         let root_directory = self.router.root_directory();
         requested
             .iter()
             .map(|topic| {
                 let subscription_result = match failures.get(topic) {
                     Some(reason) => Err(reason.clone()),
-                    None => Ok(topic.file_path(root_directory, strategy_name)),
+                    None => Ok(topic.ring_key().file_path(root_directory, strategy_name)),
                 };
                 (*topic, subscription_result)
             })
             .collect()
     }
 
-    /// Stops delivering `topics` to the strategy; the exchange stops sending those no strategy holds any more.
-    async fn release(&mut self, strategy_name: &StrategyName, topics: &HashSet<Topic>) {
-        self.registry.remove(strategy_name, topics);
-        let failures = self.router.unsubscribe(strategy_name, topics).await;
-        for (reason, topics) in group_by_reason(&failures) {
+    /// Has the router move the strategy from `held` to `target`, and logs every failure.
+    async fn move_topics(
+        &mut self,
+        strategy_name: &StrategyName,
+        held: &HashSet<Topic>,
+        target: &HashSet<Topic>,
+    ) -> HashMap<Topic, String> {
+        let failures = self.router.set_topics(strategy_name, held, target).await;
+        let (refused, unreleased): (HashMap<Topic, String>, HashMap<Topic, String>) = failures
+            .clone()
+            .into_iter()
+            .partition(|(topic, _)| target.contains(topic));
+        for (reason, topics) in group_by_reason(&unreleased) {
             warn!(
                 "failed to release {} of {strategy_name}: {reason}",
                 format_topics(&topics)
             );
         }
-    }
-}
-
-/// What a strategy must add to, and drop from, its held set to reach `requested`.
-#[derive(Debug, PartialEq)]
-struct TopicSetChange {
-    added: HashSet<Topic>,
-    dropped: HashSet<Topic>,
-}
-
-impl TopicSetChange {
-    fn between(held: &HashSet<Topic>, requested: &HashSet<Topic>) -> Self {
-        Self {
-            added: requested.difference(held).copied().collect(),
-            dropped: held.difference(requested).copied().collect(),
+        for (reason, topics) in group_by_reason(&refused) {
+            warn!(
+                "{strategy_name} was refused {}: {reason}",
+                format_topics(&topics)
+            );
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.dropped.is_empty()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use layline::testing::{test_instrument, test_topic};
-    use layline::types::{Currency, Exchange, MarketDataType, UnderlyingType};
-
-    fn topic(exchange: Exchange, market_data_type: MarketDataType) -> Topic {
-        test_topic(
-            test_instrument(
-                exchange,
-                Currency::Btc,
-                Currency::Usdt,
-                UnderlyingType::Spot,
-            ),
-            market_data_type,
-        )
-    }
-
-    #[test]
-    fn change_lists_added_and_dropped_topics() {
-        let binance_bbo = topic(Exchange::Binance, MarketDataType::Bbo);
-        let binance_trade = topic(Exchange::Binance, MarketDataType::Trade);
-        let okx_trade = topic(Exchange::Okx, MarketDataType::Trade);
-        let held = HashSet::from([binance_bbo, okx_trade]);
-        let requested = HashSet::from([binance_bbo, binance_trade]);
-        let change = TopicSetChange::between(&held, &requested);
-        assert_eq!(
-            TopicSetChange {
-                added: HashSet::from([binance_trade]),
-                dropped: HashSet::from([okx_trade]),
-            },
-            change
-        );
-        assert!(!change.is_empty());
-        assert!(TopicSetChange::between(&held, &held).is_empty());
+        failures
     }
 }

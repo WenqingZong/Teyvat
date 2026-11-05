@@ -5,10 +5,10 @@
 
 use std::mem::take;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::error;
 
 use crate::clients::ClientName;
@@ -148,6 +148,40 @@ impl UnauthenticatedThrottle {
         } else {
             self.suppressed += 1;
             None
+        }
+    }
+}
+
+/// Queues `notification` for the dispatcher, so a handler never waits on a push.
+pub fn enqueue(notification_sender: &UnboundedSender<Notification>, notification: Notification) {
+    if notification_sender.send(notification).is_err() {
+        error!("notification dispatcher is gone; push dropped");
+    }
+}
+
+/// Queues at most one notification per interval, through an [`UnauthenticatedThrottle`].
+pub struct ThrottledNotificationSender {
+    notification_sender: UnboundedSender<Notification>,
+    throttle: Mutex<UnauthenticatedThrottle>,
+}
+
+impl ThrottledNotificationSender {
+    pub fn new(notification_sender: UnboundedSender<Notification>) -> Self {
+        Self {
+            notification_sender,
+            throttle: Mutex::default(),
+        }
+    }
+
+    /// `build` receives how many notifications were suppressed since the last one queued.
+    pub fn enqueue(&self, build: impl FnOnce(u64) -> Notification) {
+        let suppressed_option = self
+            .throttle
+            .lock()
+            .expect("throttle mutex is not poisoned")
+            .record(Instant::now());
+        if let Some(suppressed) = suppressed_option {
+            enqueue(&self.notification_sender, build(suppressed));
         }
     }
 }

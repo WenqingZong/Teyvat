@@ -1,8 +1,8 @@
 //! Phanes side: accepts a client's Celestia WebSocket, identifies the client by the public key of
 //! its handshake, logs every sample and acks each batch.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Error as AxumError;
 use axum::Router;
@@ -13,15 +13,14 @@ use axum::response::Response as HttpResponse;
 use axum::routing::get;
 use futures::SinkExt;
 use secrecy::SecretBox;
-use snow::Error as NoiseError;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder, Session};
 use crate::client_filter::IpClientName;
-use crate::clients::{ClientName, Clients, IdentificationError, identify};
-use crate::notify::{Notification, UnauthenticatedThrottle};
+use crate::clients::{ClientName, Clients, identify};
+use crate::notify::{Notification, ThrottledNotificationSender};
 use crate::request_details::{RequestDetails, RequestHead};
 use crate::service::Service;
 use layline::noise::{MAX_NOISE_MESSAGE_LENGTH, StaticKey};
@@ -33,8 +32,7 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 pub struct CelestiaState {
     celestia_private_key: SecretBox<StaticKey>,
     clients: Arc<Clients>,
-    notifications: UnboundedSender<Notification>,
-    unauthenticated_throttle: Mutex<UnauthenticatedThrottle>,
+    unauthenticated_notification_sender: ThrottledNotificationSender,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,15 +41,8 @@ enum ConnectionError {
     WebSocket(#[from] AxumError),
     /// Security events, pushed to the phone with the rejected frame: a failed handshake, a key of
     /// no client or of a client the address does not belong to, or a forged frame.
-    #[error("unauthenticated: {error}")]
-    Unauthenticated { error: CelestiaError, frame: Bytes },
-    #[error("{error}")]
-    Unidentified {
-        error: IdentificationError,
-        frame: Bytes,
-    },
-    #[error("frame failed decryption: {error}")]
-    Forged { error: NoiseError, frame: Bytes },
+    #[error("{reason}")]
+    Rejected { reason: String, frame: Bytes },
     #[error(transparent)]
     Celestia(#[from] CelestiaError),
     #[error("no message within {0:?}")]
@@ -62,48 +53,18 @@ enum ConnectionError {
     UnexpectedText,
 }
 
-impl ConnectionError {
-    /// `None` for runtime errors, which are not security events.
-    fn get_rejected_frame(&self) -> Option<&[u8]> {
-        match self {
-            Self::Unauthenticated { frame, .. }
-            | Self::Unidentified { frame, .. }
-            | Self::Forged { frame, .. } => Some(frame),
-            _ => None,
-        }
-    }
-}
-
 impl CelestiaState {
     pub fn new(
         celestia_private_key: SecretBox<StaticKey>,
         clients: Arc<Clients>,
-        notifications: UnboundedSender<Notification>,
+        notification_sender: UnboundedSender<Notification>,
     ) -> Self {
         Self {
             celestia_private_key,
             clients,
-            notifications,
-            unauthenticated_throttle: Mutex::default(),
-        }
-    }
-
-    fn notify_unauthenticated(&self, request: RequestDetails) {
-        let suppressed = self
-            .unauthenticated_throttle
-            .lock()
-            .expect("unauthenticated throttle mutex is not poisoned")
-            .record(Instant::now());
-        let Some(suppressed) = suppressed else {
-            return;
-        };
-        let notification = Notification::Unauthenticated {
-            service: Service::Celestia,
-            request,
-            suppressed,
-        };
-        if self.notifications.send(notification).is_err() {
-            error!("notification dispatcher is gone; push dropped");
+            unauthenticated_notification_sender: ThrottledNotificationSender::new(
+                notification_sender,
+            ),
         }
     }
 }
@@ -150,13 +111,19 @@ fn report_connection_error(
         || "an unidentified client".to_owned(),
         |client| format!("client {client}"),
     );
-    match error.get_rejected_frame() {
-        Some(frame) => {
+    match error {
+        ConnectionError::Rejected { frame, .. } => {
             let request = RequestDetails::new(request_head, frame);
             warn!("Celestia security event from {caller}: {error}; {request}");
-            state.notify_unauthenticated(request);
+            state
+                .unauthenticated_notification_sender
+                .enqueue(|suppressed| Notification::Unauthenticated {
+                    service: Service::Celestia,
+                    request,
+                    suppressed,
+                });
         }
-        None => warn!("Celestia connection of {caller} ended: {error}"),
+        _ => warn!("Celestia connection of {caller} ended: {error}"),
     }
 }
 
@@ -173,8 +140,8 @@ async fn exchange_batches(
         match message {
             Message::Binary(ciphertext) => {
                 let batch: Batch = session.decrypt(&ciphertext).map_err(|error| match error {
-                    CelestiaError::Noise(error) => ConnectionError::Forged {
-                        error,
+                    CelestiaError::Noise(error) => ConnectionError::Rejected {
+                        reason: format!("frame failed decryption: {error}"),
                         frame: ciphertext,
                     },
                     CelestiaError::Payload(_) => ConnectionError::Celestia(error),
@@ -215,8 +182,8 @@ async fn handshake(
     {
         Ok(responder) => responder,
         Err(error) => {
-            return Err(ConnectionError::Unauthenticated {
-                error,
+            return Err(ConnectionError::Rejected {
+                reason: format!("unauthenticated: {error}"),
                 frame: first_message,
             });
         }
@@ -229,8 +196,8 @@ async fn handshake(
     ) {
         Ok((client_name, _)) => client_name.clone(),
         Err(error) => {
-            return Err(ConnectionError::Unidentified {
-                error,
+            return Err(ConnectionError::Rejected {
+                reason: error.to_string(),
                 frame: first_message,
             });
         }
@@ -285,13 +252,13 @@ mod tests {
         url: String,
         client_private_key: SecretBox<StaticKey>,
         celestia_public_key: SecretBox<StaticKey>,
-        notifications: UnboundedReceiver<Notification>,
+        notification_receiver: UnboundedReceiver<Notification>,
     }
 
     async fn harness() -> Harness {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
-        let (sender, notifications) = unbounded_channel();
+        let (notification_sender, notification_receiver) = unbounded_channel();
         let client = ClientConfig {
             client_celestia_service_public_key: client_public_key,
             ..test_client(CLIENT_IPV4)
@@ -300,7 +267,7 @@ mod tests {
         let state = Arc::new(CelestiaState::new(
             celestia_private_key,
             Arc::new(clients),
-            sender,
+            notification_sender,
         ));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -311,7 +278,7 @@ mod tests {
             url: format!("ws://{address}{CELESTIA_PATH}"),
             client_private_key,
             celestia_public_key,
-            notifications,
+            notification_receiver,
         }
     }
 
@@ -351,7 +318,7 @@ mod tests {
         }
 
         async fn next_notification(&mut self) -> Option<Notification> {
-            timeout(NOTIFICATION_WAIT, self.notifications.recv())
+            timeout(NOTIFICATION_WAIT, self.notification_receiver.recv())
                 .await
                 .ok()
                 .flatten()

@@ -105,7 +105,7 @@ mod tests {
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
 
     fn phanes_router(
-        notifications: UnboundedSender<Notification>,
+        notification_sender: UnboundedSender<Notification>,
         client_filter: Option<Arc<ClientFilter>>,
     ) -> Router {
         let (gnosis_private_key, _) = test_keypair();
@@ -115,10 +115,10 @@ mod tests {
             Arc::default(),
             Gnoses::default(),
             DEFAULT_MAX_CLOCK_SKEW_SECONDS,
-            notifications.clone(),
+            notification_sender.clone(),
         );
         let celestia_state =
-            CelestiaState::new(celestia_private_key, Arc::default(), notifications);
+            CelestiaState::new(celestia_private_key, Arc::default(), notification_sender);
         router(
             Arc::new(gnosis_state),
             Arc::new(celestia_state),
@@ -126,12 +126,15 @@ mod tests {
         )
     }
 
-    fn client_filter(notifications: &UnboundedSender<Notification>) -> Arc<ClientFilter> {
+    fn client_filter(notification_sender: &UnboundedSender<Notification>) -> Arc<ClientFilter> {
         let clients = Clients::from([
             (ClientName::from("Osaka"), test_client(OSAKA_IPV4)),
             (ClientName::from("Tokyo"), test_client(TOKYO_IPV4)),
         ]);
-        Arc::new(ClientFilter::new(Arc::new(clients), notifications.clone()))
+        Arc::new(ClientFilter::new(
+            Arc::new(clients),
+            notification_sender.clone(),
+        ))
     }
 
     async fn status(router: &Router, request: HttpRequest<Body>) -> StatusCode {
@@ -153,8 +156,8 @@ mod tests {
 
     #[tokio::test]
     async fn serves_every_service() {
-        let (notifications, _) = unbounded_channel();
-        let router = phanes_router(notifications, None);
+        let (notification_sender, _) = unbounded_channel();
+        let router = phanes_router(notification_sender, None);
         assert_eq!(status(&router, get(INFO_PATH, None)).await, StatusCode::OK);
         // A plain GET without the upgrade headers is rejected by the WebSocket extractor, not 404.
         assert_ne!(
@@ -174,8 +177,11 @@ mod tests {
 
     #[tokio::test]
     async fn every_client_reaches_every_service_and_strangers_none() {
-        let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
+        let (notification_sender, mut notification_receiver) = unbounded_channel();
+        let router = phanes_router(
+            notification_sender.clone(),
+            Some(client_filter(&notification_sender)),
+        );
         // Past the filter, GET /gnosis is 405 and a plain GET /celestia is not 404.
         for client_ip in [IpAddr::V4(OSAKA_IPV4), IpAddr::V4(TOKYO_IPV4)] {
             assert_eq!(
@@ -187,7 +193,7 @@ mod tests {
                 StatusCode::NOT_FOUND
             );
         }
-        assert!(receiver.try_recv().is_err());
+        assert!(notification_receiver.try_recv().is_err());
 
         assert_eq!(
             status(&router, get(CELESTIA_PATH, Some(STRANGER_IP))).await,
@@ -197,7 +203,7 @@ mod tests {
             client_ip,
             request,
             suppressed,
-        }) = receiver.try_recv().ok()
+        }) = notification_receiver.try_recv().ok()
         else {
             panic!("expected a blocked notification");
         };
@@ -209,28 +215,34 @@ mod tests {
     async fn unknown_paths_are_not_blocked_requests() {
         /// Arbitrary paths a scanner might try.
         const UNKNOWN_PATHS: [&str; 2] = ["/", "/.env"];
-        let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
+        let (notification_sender, mut notification_receiver) = unbounded_channel();
+        let router = phanes_router(
+            notification_sender.clone(),
+            Some(client_filter(&notification_sender)),
+        );
         for path in UNKNOWN_PATHS {
             assert_eq!(
                 status(&router, get(path, Some(STRANGER_IP))).await,
                 StatusCode::NOT_FOUND
             );
         }
-        assert!(receiver.try_recv().is_err());
+        assert!(notification_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn info_is_open_to_everyone() {
-        let (notifications, mut receiver) = unbounded_channel();
-        let router = phanes_router(notifications.clone(), Some(client_filter(&notifications)));
+        let (notification_sender, mut notification_receiver) = unbounded_channel();
+        let router = phanes_router(
+            notification_sender.clone(),
+            Some(client_filter(&notification_sender)),
+        );
         for client_ip in [Some(STRANGER_IP), None] {
             assert_eq!(
                 status(&router, get(INFO_PATH, client_ip)).await,
                 StatusCode::OK
             );
         }
-        assert!(receiver.try_recv().is_err());
+        assert!(notification_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
