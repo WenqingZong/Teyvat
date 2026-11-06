@@ -44,6 +44,9 @@ pub enum Notification {
     /// or a Celestia frame failed decryption. Throttled; `suppressed` counts unpushed ones.
     Unauthenticated {
         service: Service,
+        reason: String,
+        /// The client the address belongs to; `None` in debug builds, which have no IP filter.
+        ip_client_name_option: Option<ClientName>,
         request: RequestDetails,
         suppressed: u64,
     },
@@ -87,14 +90,23 @@ impl Notification {
             }
             Self::Unauthenticated {
                 service,
+                reason,
+                ip_client_name_option,
                 request,
                 suppressed,
             } => {
                 let service = service.to_string(Language::Chinese);
+                let ip_client_name = ip_client_name_option.as_ref().map_or_else(
+                    || "(debug 构建无 IP 白名单)".to_owned(),
+                    |name| format!("{name} (仅凭 IP，未经密钥验证)"),
+                );
                 let request = request.summarize();
                 (
                     "检测到未授权的魔神".to_owned(),
-                    format!("未授权的{service}\n{request}\n此前被合并的同类请求: {suppressed}"),
+                    format!(
+                        "未授权的{service}\n原因: {reason}\n来源 IP 对应的魔神: {ip_client_name}\n\
+                         {request}\n此前被合并的同类请求: {suppressed}"
+                    ),
                     ALARM_SOUND,
                 )
             }
@@ -250,21 +262,38 @@ mod tests {
     }
 
     #[test]
-    fn unauthenticated_message_names_service() {
+    fn unauthenticated_message_names_service_reason_and_ip_client() {
         let request = RequestDetails::new(request_head(PATH), &[]);
         let message = Notification::Unauthenticated {
             service: Service::Celestia,
+            reason: "noise: decrypt error".into(),
+            ip_client_name_option: Some("osaka".into()),
             request: request.clone(),
             suppressed: SUPPRESSED,
         }
         .to_bark_message();
         assert!(message.body.contains(&request.summarize()));
+        assert!(message.body.contains("原因: noise: decrypt error"));
+        assert!(message.body.contains("osaka (仅凭 IP，未经密钥验证)"));
         assert!(
             message
                 .body
                 .contains(&Service::Celestia.to_string(Language::Chinese))
         );
         assert!(message.body.contains(&SUPPRESSED.to_string()));
+    }
+
+    #[test]
+    fn unauthenticated_message_without_ip_filter() {
+        let message = Notification::Unauthenticated {
+            service: Service::Gnosis,
+            reason: "noise: decrypt error".into(),
+            ip_client_name_option: None,
+            request: RequestDetails::new(request_head(PATH), &[]),
+            suppressed: 0,
+        }
+        .to_bark_message();
+        assert!(message.body.contains("(debug 构建无 IP 白名单)"));
     }
 
     #[test]

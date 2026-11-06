@@ -5,6 +5,7 @@
 //! the appendable `X-Forwarded-For`).
 
 use std::convert::Infallible;
+use std::fmt::{Display, Formatter, Result as FormatResult};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -26,6 +27,16 @@ pub const CLIENT_IP_HEADER: &str = "cf-connecting-ip";
 /// filter is not mounted (debug builds).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IpClientName(pub Option<ClientName>);
+
+/// For logs: the IP is all that backs the name.
+impl Display for IpClientName {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        match &self.0 {
+            Some(name) => write!(formatter, "{name} (not verified by key)"),
+            None => write!(formatter, "none (no IP allow list in debug builds)"),
+        }
+    }
+}
 
 impl<S: Send + Sync> FromRequestParts<S> for IpClientName {
     type Rejection = Infallible;
@@ -72,7 +83,7 @@ pub async fn filter_clients(
         Some((address, name.clone()))
     }) else {
         let request = RequestDetails::read_request(request).await;
-        warn!("blocked request: {request}");
+        warn!("blocked request\n{request}");
         filter
             .blocked_notification_sender
             .enqueue(|suppressed| Notification::Blocked {
@@ -110,6 +121,16 @@ mod tests {
     const OSAKA_IPV4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
     const OSAKA_IPV6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
     const STRANGER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+
+    #[test]
+    fn ip_client_name_says_it_is_not_verified_by_key() {
+        let osaka = IpClientName(Some("Osaka".into()));
+        assert_eq!(osaka.to_string(), "Osaka (not verified by key)");
+        assert_eq!(
+            IpClientName(None).to_string(),
+            "none (no IP allow list in debug builds)"
+        );
+    }
 
     /// Answers with the client name the filter found, or nothing when no filter runs.
     async fn whoami(IpClientName(ip_client_name_option): IpClientName) -> String {

@@ -21,7 +21,7 @@ use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder
 use crate::client_filter::IpClientName;
 use crate::clients::{ClientName, Clients, identify};
 use crate::notify::{Notification, ThrottledNotificationSender};
-use crate::request_details::{RequestDetails, RequestHead};
+use crate::request_details::{LOG_INDENT, RequestDetails, RequestHead};
 use crate::service::Service;
 use layline::noise::{MAX_NOISE_MESSAGE_LENGTH, StaticKey};
 
@@ -77,7 +77,7 @@ pub fn router(state: Arc<CelestiaState>) -> Router {
 
 async fn upgrade(
     State(state): State<Arc<CelestiaState>>,
-    IpClientName(ip_client_name_option): IpClientName,
+    ip_client_name: IpClientName,
     request_head: RequestHead,
     websocket: WebSocketUpgrade,
 ) -> HttpResponse {
@@ -85,16 +85,28 @@ async fn upgrade(
         .max_message_size(MAX_NOISE_MESSAGE_LENGTH)
         .on_upgrade(move |mut socket| async move {
             let (mut session, client) =
-                match handshake(&mut socket, &state, ip_client_name_option.as_ref()).await {
+                match handshake(&mut socket, &state, ip_client_name.0.as_ref()).await {
                     Ok(established) => established,
                     Err(error) => {
-                        return report_connection_error(&state, None, request_head, &error);
+                        return report_connection_error(
+                            &state,
+                            None,
+                            ip_client_name,
+                            request_head,
+                            &error,
+                        );
                     }
                 };
             info!("Celestia client {client} connected");
             match exchange_batches(socket, &mut session, &client).await {
                 Ok(()) => info!("Celestia client {client} disconnected"),
-                Err(error) => report_connection_error(&state, Some(&client), request_head, &error),
+                Err(error) => report_connection_error(
+                    &state,
+                    Some(&client),
+                    ip_client_name,
+                    request_head,
+                    &error,
+                ),
             }
         })
 }
@@ -104,6 +116,7 @@ async fn upgrade(
 fn report_connection_error(
     state: &CelestiaState,
     client_option: Option<&ClientName>,
+    ip_client_name: IpClientName,
     request_head: RequestHead,
     error: &ConnectionError,
 ) {
@@ -112,13 +125,18 @@ fn report_connection_error(
         |client| format!("client {client}"),
     );
     match error {
-        ConnectionError::Rejected { frame, .. } => {
+        ConnectionError::Rejected { reason, frame } => {
             let request = RequestDetails::new(request_head, frame);
-            warn!("Celestia security event from {caller}: {error}; {request}");
+            warn!(
+                "Celestia security event from {caller}\n{LOG_INDENT}reason: {reason}\n\
+                 {LOG_INDENT}client by IP: {ip_client_name}\n{request}"
+            );
             state
                 .unauthenticated_notification_sender
                 .enqueue(|suppressed| Notification::Unauthenticated {
                     service: Service::Celestia,
+                    reason: reason.clone(),
+                    ip_client_name_option: ip_client_name.0,
                     request,
                     suppressed,
                 });
@@ -342,6 +360,7 @@ mod tests {
             service,
             request,
             suppressed,
+            ..
         }) = notification
         else {
             panic!("expected a security event, got {notification:?}");

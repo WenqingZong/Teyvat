@@ -18,7 +18,7 @@ use crate::client_filter::IpClientName;
 use crate::clients::{ClientConfig, Clients, identify};
 use crate::gnosis::config::{AnyGnosis, Gnoses};
 use crate::notify::{Notification, ThrottledNotificationSender, enqueue};
-use crate::request_details::{RequestDetails, RequestHead};
+use crate::request_details::{LOG_INDENT, RequestDetails, RequestHead};
 use crate::service::Service;
 use layline::gnosis::{GNOSIS_PATH, NONCE_LENGTH, Request, Responder, Response};
 use layline::noise::StaticKey;
@@ -76,15 +76,21 @@ impl GnosisState {
     /// Logs the whole request, pushes (throttled) and answers with an empty 404.
     fn reject_unauthenticated(
         &self,
-        reason: &str,
+        reason: String,
+        ip_client_name: IpClientName,
         request_head: RequestHead,
         body: &[u8],
     ) -> HttpResponse {
         let request = RequestDetails::new(request_head, body);
-        warn!("rejected unauthenticated Gnosis request: {reason}; {request}");
+        warn!(
+            "rejected unauthenticated Gnosis request\n{LOG_INDENT}reason: {reason}\n\
+             {LOG_INDENT}client by IP: {ip_client_name}\n{request}"
+        );
         self.unauthenticated_notification_sender
             .enqueue(|suppressed| Notification::Unauthenticated {
                 service: Service::Gnosis,
+                reason,
+                ip_client_name_option: ip_client_name.0,
                 request,
                 suppressed,
             });
@@ -143,25 +149,35 @@ pub fn router(state: Arc<GnosisState>) -> Router {
 
 async fn gnosis(
     State(state): State<Arc<GnosisState>>,
-    IpClientName(ip_client_name_option): IpClientName,
+    ip_client_name: IpClientName,
     request_head: RequestHead,
     body: Bytes,
 ) -> HttpResponse {
     let responder = match Responder::read_request(&state.gnosis_private_key, &body) {
         Ok(responder) => responder,
         Err(error) => {
-            return state.reject_unauthenticated(&error.to_string(), request_head, &body);
+            return state.reject_unauthenticated(
+                error.to_string(),
+                ip_client_name,
+                request_head,
+                &body,
+            );
         }
     };
     let (client_name, client) = match identify(
         &state.clients,
         Service::Gnosis,
         responder.client_public_key(),
-        ip_client_name_option.as_ref(),
+        ip_client_name.0.as_ref(),
     ) {
         Ok(identified) => identified,
         Err(error) => {
-            return state.reject_unauthenticated(&error.to_string(), request_head, &body);
+            return state.reject_unauthenticated(
+                error.to_string(),
+                ip_client_name,
+                request_head,
+                &body,
+            );
         }
     };
 
@@ -355,13 +371,19 @@ mod tests {
             assert_eq!((status, body.is_empty()), (StatusCode::NOT_FOUND, true));
             let Notification::Unauthenticated {
                 service,
+                ip_client_name_option: notified_ip_client_name_option,
                 request,
                 suppressed,
+                ..
             } = self.next_notification()
             else {
                 panic!("expected an unauthenticated notification");
             };
             assert_eq!((service, suppressed), (Service::Gnosis, 0));
+            assert_eq!(
+                notified_ip_client_name_option.as_deref(),
+                ip_client_name_option
+            );
             assert_eq!(request.head.method, Method::POST);
             assert_eq!(request.head.uri.path(), GNOSIS_PATH);
             assert_eq!(request.payload.as_ref(), first_message.as_slice());
