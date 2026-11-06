@@ -53,7 +53,7 @@ pub fn router(
 /// Unknown paths belong to no service: logged in full for later analysis, never pushed.
 async fn log_unknown_path(request: Request) -> StatusCode {
     let request = RequestDetails::read_request(request).await;
-    warn!("request to unknown path: {request}");
+    warn!("request to unknown path\n{request}");
     StatusCode::NOT_FOUND
 }
 

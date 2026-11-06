@@ -27,6 +27,10 @@ const SUMMARY_HEADERS: [&str; 5] = [
 ];
 /// Keeps a push under Bark's size limit even if a header is huge.
 const MAX_SUMMARY_HEADER_CHARACTERS: usize = 128;
+/// One level of indentation of a multi-line log entry.
+pub const LOG_INDENT: &str = "    ";
+/// Payload bytes per log line: 64 hex characters.
+const LOG_PAYLOAD_BYTES_PER_LINE: usize = 32;
 
 /// Everything about a request except its body; extracted by handlers that may reject it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,7 +109,8 @@ impl RequestDetails {
     }
 }
 
-/// One line: `HeaderMap`'s `Debug` escapes control characters, so a header cannot forge log lines.
+/// Indented lines that follow a log message. Header values are written with `Debug`, which quotes
+/// them and escapes non-ASCII bytes, so a header cannot pass for a line of its own.
 impl Display for RequestDetails {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
         let RequestHead {
@@ -113,13 +118,22 @@ impl Display for RequestDetails {
             uri,
             headers,
         } = &self.head;
+        writeln!(formatter, "{LOG_INDENT}request: {method} {uri}")?;
+        writeln!(formatter, "{LOG_INDENT}headers:")?;
+        for (name, value) in headers {
+            writeln!(formatter, "{LOG_INDENT}{LOG_INDENT}{name}: {value:?}")?;
+        }
         let payload_length = self.payload.len();
         let truncation = if self.truncated { ", truncated" } else { "" };
-        let payload = encode_hex(&self.payload);
         write!(
             formatter,
-            "{method} {uri} headers={headers:?} payload ({payload_length} bytes{truncation})={payload}"
-        )
+            "{LOG_INDENT}payload ({payload_length} bytes{truncation}):"
+        )?;
+        for line_bytes in self.payload.chunks(LOG_PAYLOAD_BYTES_PER_LINE) {
+            let line = encode_hex(line_bytes);
+            write!(formatter, "\n{LOG_INDENT}{LOG_INDENT}{line}")?;
+        }
+        Ok(())
     }
 }
 
@@ -138,6 +152,8 @@ async fn read_body_head(body: Body) -> Vec<u8> {
 
 #[cfg(test)]
 pub mod tests {
+    use axum::http::HeaderValue;
+
     use super::*;
 
     pub const PATH: &str = "/celestia";
@@ -202,17 +218,29 @@ pub mod tests {
     }
 
     #[test]
-    fn log_line_has_every_header_and_hex_payload() {
-        /// Arbitrary bytes with no business meaning.
-        const PAYLOAD: &[u8] = &[0xde, 0xad, 0x0a];
-        let line = RequestDetails::new(request_head(PATH), PAYLOAD).to_string();
-        assert!(line.starts_with(&format!("GET {PATH} ")));
-        for value in [USER_AGENT, CF_RAY, OTHER_HEADER, OTHER_VALUE] {
-            assert!(line.contains(value), "{line:?} should contain {value:?}");
-        }
+    fn log_lists_every_header_and_wraps_the_hex_payload() {
+        /// Arbitrary bytes with no business meaning, one more than a log line holds.
+        const PAYLOAD: [u8; LOG_PAYLOAD_BYTES_PER_LINE + 1] =
+            [0xab; LOG_PAYLOAD_BYTES_PER_LINE + 1];
+        let mut head = request_head(PATH);
+        head.headers.insert(
+            OTHER_HEADER,
+            HeaderValue::from_bytes("\u{2028}".as_bytes()).expect("obs-text is a valid value"),
+        );
+        let log = RequestDetails::new(head, &PAYLOAD).to_string();
+        let full_line = "ab".repeat(LOG_PAYLOAD_BYTES_PER_LINE);
         let payload_length = PAYLOAD.len();
-        assert!(line.ends_with(&format!("payload ({payload_length} bytes)=dead0a")));
-        assert!(!line.contains('\n'));
+        let expected = format!(
+            "    request: GET {PATH}\n    \
+             headers:\n        \
+             user-agent: \"{USER_AGENT}\"\n        \
+             cf-ray: \"{CF_RAY}\"\n        \
+             {OTHER_HEADER}: \"\\xe2\\x80\\xa8\"\n    \
+             payload ({payload_length} bytes):\n        \
+             {full_line}\n        \
+             ab"
+        );
+        assert_eq!(log, expected);
     }
 
     #[test]
