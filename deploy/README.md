@@ -51,6 +51,7 @@ deploy/phanes/phanes.sh install
 
 `/etc/phanes/phanes.toml`：
 
+- `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）。
 - 每个客户端一张 `[clients.<名字>]` 表（模板里是 `[clients.Osaka]`）：
   - `ipv4` 必填，`ipv6` 可选：Cloudflare 看到的公网 IP（Osaka 有 IPv6，访问 Cloudflare 时可能走 IPv6，记得填上）。IP 无效或同一 IP 出现在两个客户端下，Phanes 拒绝启动。
   - `client_gnosis_service_public_key`、`client_celestia_service_public_key`：该客户端的 Gnosis 和 Celestia 公钥（见下文 Osaka 第 1 步）。Phanes 按公钥认出客户端，所以同一个服务里两个客户端的公钥不能相同；公钥解不出来，Phanes 拒绝启动。
@@ -196,7 +197,8 @@ deploy/market_data_provider/market_data_provider.sh install
 
 - `[phanes_client]` 的 `url` 和 `phanes_gnosis_public_key`（即 Phanes 主机上 `deploy/phanes/phanes.sh install` 打印的 Gnosis 公钥）；
 - `[bark]` 凭据（release 构建缺少它会拒绝启动）；
-- `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情。
+- `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情；
+- `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）。
 
 在 Phanes 主机上，把安装时打印的公钥填进 `/etc/phanes/phanes.toml` 里这台机器的 `[clients.<名字>]` 表的 `client_gnosis_service_public_key`，
 确认它的 `allowed_gnosis_ids` 包含 `binance_sbe_real`（实盘）或 `binance_sbe_demo`（demo），且 `[gnoses]` 里有这张表，然后重启 Phanes。

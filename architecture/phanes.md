@@ -55,7 +55,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`。`load` 解析完立刻检查：IP 不重复、所有公钥（跨客户端、跨服务）不重复、允许的 gnosis 都有表；任何一项不过，Phanes 拒绝启动，之后的服务过程都假设配置合法。配置和私钥文件经 `layline::secrets` 读取。
 - `src/request_details.rs`：被拒请求的快照 `RequestDetails`（`RequestHead` 加载荷）；`Display` 输出跟在日志消息后面的多行完整内容（4 空格缩进；header 值用 `Debug` 打印，带引号并转义非 ASCII 字节，伪造不出单独一行；载荷 hex 每行 32 字节），`summarize()` 输出推送摘要。
 - `src/notify.rs`：推送事件（启动 / 发放 / 拒绝 / 未认证 / 白名单拦截 / 挂了）及其中文文案；后台任务经 `layline::bark::Notifier` 发送：release 构建走 Bark，缺 `[bark]` 就报错退出；debug 构建（本机开发）不需要 Bark，推送改为 `info!` 日志。`enqueue` 把推送放进队列，发送端已关闭时只记一条 error；`ThrottledNotificationSender` 在它前面加一个 `UnauthenticatedThrottle`。未认证的推送按 `Service` 区分，各自有独立的 `ThrottledNotificationSender`；白名单拦截不分服务，一个。
-- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen` 向终端打印一对新的 base64 密钥（不写文件，也不进日志，私钥只应填进它主人的配置），用于新客户端或换密钥；`phanes serve --config <phanes.toml>` 由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
+- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen` 向终端打印一对新的 base64 密钥（不写文件，也不进日志，私钥只应填进它主人的配置），用于新客户端或换密钥；`phanes serve --config <phanes.toml>` 加载配置后启动进程监控（`layline::process_metrics`，间隔为 `process_metrics_interval_seconds`，见 [`overview.md`](overview.md)「进程监控」），整个服务由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
 - 仓库根目录的 `examples/`（只给测试用的代码放这里，不放进 crate）：`fetch.rs` 模拟客户端取 gnosis（按任意 id 取，所以把 gnosis 当 JSON 打出来）；`bark_push.rs` 发一条 Bark 推送；`celestia/` 是简化版的客户端进程监控（`client.rs` 内存 `Outbox`、重连补发、30 秒心跳；`sampler.rs` 读 `/proc` 和 `systemctl show`，拿不到网络数据时填 0）。celestia example 的测试经根 `Cargo.toml` 的 `test = true` 随 `cargo test --workspace` 运行。
 
 ## Celestia 简化版的现状

@@ -1,6 +1,6 @@
 # Osaka 监控（Celestia）计划
 
-状态：简化版已实现（Phanes 收数据只打日志；Osaka 端为 `examples/celestia/`，内存缓存），已实现部分见 [`architecture/phanes.md`](../architecture/phanes.md)。进程内采集已实现为 `layline::process_metrics`（目前只打日志，已接入 dummy_strategy），见 [`architecture/overview.md`](../architecture/overview.md)「进程监控」。实施进度见 §8。标 **【待定】** 的条目需要确认后再动手。
+状态：简化版已实现（Phanes 收数据只打日志；Osaka 端为 `examples/celestia/`，内存缓存），已实现部分见 [`architecture/phanes.md`](../architecture/phanes.md)。进程内采集已实现为 `layline::process_metrics`（目前只打日志，已接入 Phanes、market_data_provider 和 dummy_strategy），见 [`architecture/overview.md`](../architecture/overview.md)「进程监控」。实施进度见 §8。标 **【待定】** 的条目需要确认后再动手。
 
 ## 1. 目标
 
@@ -143,7 +143,7 @@ Bark 和 `Notifier` 在 `layline::bark`。
 1. **【已完成】** 改造为 workspace，把共用协议抽出来：Teyvat workspace，Noise 层和 Gnosis 协议在 `layline`。Gnosis 的行为不变，测试全过。
 2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/phanes/src/celestia/proto.rs`。
 3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、每个客户端的 Celestia 公钥、密钥由部署脚本用 openssl 生成并写进 `phanes.toml`，均已完成；写 ClickHouse、去重未做。
-4. 写 `celestia-client`：采集、spool、发送、重连、限速补发。**【部分完成】** 采集已在 `layline::process_metrics`：进程内 std 线程，CPU、内存（分 anon/file/shmem）、按线程的 CPU 和上下文切换、fd 数、TCP 收发（netlink `sock_diag` 进程口径，取代原计划的 systemd `IPAccounting`），间隔来自各服务配置的 `process_metrics_interval_seconds`；目前只打日志，已接入 dummy_strategy，mdp 和 phanes 待接入。
+4. 写 `celestia-client`：采集、spool、发送、重连、限速补发。**【部分完成】** 采集已在 `layline::process_metrics`：进程内 std 线程，CPU、内存（分 anon/file/shmem）、按线程的 CPU 和上下文切换、fd 数、TCP 收发（netlink `sock_diag` 进程口径，取代原计划的 systemd `IPAccounting`），间隔来自各服务配置的 `process_metrics_interval_seconds`；目前只打日志，已接入 Phanes、market_data_provider 和 dummy_strategy。
 5. **【部分完成】** 写 `examples/`：模拟 Osaka 程序（`examples/celestia/`，内存缓存、重连补发）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
 6. 部署：ClickHouse、Grafana、systemd unit，扩展部署脚本，配置 cloudflared 路由和 Cloudflare Access。
 7. Grafana 看板（CPU、内存、网络、内部指标），配置以 JSON 形式入库。

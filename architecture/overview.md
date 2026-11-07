@@ -13,7 +13,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 +-- Osaka ---------------------------------------------------+
 | market_data_provider --shared memory rings--> strategies   |
 | fetches API keys from Gnosis at startup                    |
-| dummy_strategy logs its own process metrics; only          |
+| every service logs its own process metrics; only           |
 | examples/celestia sends process metrics to Celestia so far |
 +----+-------------------------------------------------------+
      | HTTPS; Noise_IK end to end, Cloudflare sees only ciphertext
@@ -89,7 +89,7 @@ thread metrics (cpu, voluntary/involuntary context switches per second): dummy_s
 
 这些读取由内核在内存里现场生成，不拿其他线程会持有的锁（不读 `smaps`，它要拿 `mmap_lock`）。对热路径唯一的影响是监控线程每个间隔醒一次，核被占满时可能抢占轮询线程几十微秒。读取失败只 `warn!` 并跳过这个间隔，不让进程退出（策略装了 panic hook，任何线程 panic 都会让整个进程退出）。唯一的例外是两次读数之间单调时钟没有前进：这说明机器本身坏了，监控线程 panic，进程退出。线程在被列出后退出、fd 在被列出后关闭都属正常，直接跳过。
 
-目前接入的是 dummy_strategy；发送到 Phanes 的计划见 [`plan/celestia.md`](../plan/celestia.md)。
+Phanes、market_data_provider 和 dummy_strategy 都在加载配置后立即启动监控；Phanes 在装好 panic hook 之后才启动，监控线程 panic 时和其他 panic 一样推送并退出。发送到 Phanes 的计划见 [`plan/celestia.md`](../plan/celestia.md)。
 
 ## 质量检查
 

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use secrecy::{ExposeSecret, SecretBox};
@@ -57,6 +58,8 @@ pub struct PhanesConfig {
     pub celestia_private_key: SecretBox<StaticKey>,
     #[serde(default = "default_max_clock_skew_seconds")]
     pub max_clock_skew_seconds: u64,
+    /// How often the process logs its own CPU, memory, threads and TCP traffic.
+    pub process_metrics_interval_seconds: NonZeroU64,
     pub clients: Clients,
     /// Phanes may hold gnoses no client is allowed yet.
     #[serde(default)]
@@ -198,6 +201,7 @@ mod tests {
 listen_address = "127.0.0.1:8888"
 gnosis_private_key = "{gnosis_private_key}"
 celestia_private_key = "{celestia_private_key}"
+process_metrics_interval_seconds = 10
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"
@@ -263,6 +267,7 @@ secret_key = "released"
             config.max_clock_skew_seconds,
             DEFAULT_MAX_CLOCK_SKEW_SECONDS
         );
+        assert_eq!(10, config.process_metrics_interval_seconds.get());
         assert!(config.bark.is_none());
         assert_eq!(
             fixture.gnosis_private_key.expose_secret(),
