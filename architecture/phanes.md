@@ -16,7 +16,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 |---|---|
 | `POST /gnosis` | body 为 Noise 握手消息 1（含客户端公钥和加密的 `{gnosis_id, timestamp, nonce}`），返回消息 2（含加密的 gnosis 或拒绝原因）。握手失败、公钥不属于任何客户端，返回空 404。 |
 | `GET /celestia` | 升级为 WebSocket。前两帧是 Noise 握手，之后每帧是一个加密的 `Batch`，Phanes 回加密的 `Ack`。握手或解密失败直接断开并推送。 |
-| `GET /info` | 返回 JSON `{status, server_time, version, build}`（`server_time` 为 UTC 时间、精确到毫秒，如 `2026-10-15 13:30:05.123 UTC`），供 Osaka 探活。不做 IP 过滤，任何人可访问。 |
+| `GET /info` | 返回 JSON `{status, server_time, version, build, git_commit_hash}`（`server_time` 为 UTC 时间、精确到毫秒，如 `2026-10-15 13:30:05.123 UTC`），供 Osaka 探活。不做 IP 过滤，任何人可访问。 |
 
 ## 要求
 
@@ -50,7 +50,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 - `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 按公钥认出客户端（并核对 IP）→ 时间窗口 → nonce 防重放 → 该客户端的 `allowed_gnosis_ids` 里有这个 id，再从 `Gnoses` 取出（`load` 已保证有表）。gnosis id 是 `layline::gnosis::GnosisId` 枚举：请求里的未知 id 解析失败，按畸形请求拒绝。握手失败或认不出客户端回空 404（推送 10 分钟节流）；认出之后的拒绝回加密的 `Denied{reason}`。加密回复（Gnosis 的消息 2、Celestia 的消息 2 和 ack）对正确的代码不会失败，所以用 `expect`：真失败了就是 bug，panic 经 panic hook 让 Phanes 推送崩溃并退出。
 - `src/celestia/`：`proto.rs`（`ProcessSample`/`Batch`/`Ack`、`Initiator`、`Responder`（`read_first_message` → `client_public_key` → `finish`）、`Session`）；`server.rs`（`GET /celestia`：握手并认出客户端 → 解密 → 打日志 → 回 ack；认不出或解密失败断开并节流推送；90 秒没有消息就断开）。
 - `src/service.rs`：`Service` 枚举（Gnosis / Celestia）和 `Language`；`to_string(Language)` 给出英文日志名或中文推送名。它是叶子模块，服务可以引用自己的名字而不必 import `server`，避免循环依赖。
-- `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`，并在服务路由上挂唯一的 `ClientFilter`（为 `None` 时不挂；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build）。
+- `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`，并在服务路由上挂唯一的 `ClientFilter`（为 `None` 时不挂；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build / git_commit_hash）。
 - `src/client_filter.rs`：IP 白名单中间件 `filter_clients`，全局一个 `ClientFilter`；放行的请求在扩展里带上 IP 所属的 `ClientName`，handler 用 `IpClientName` 取出（没挂中间件时为 `None`）。
 - `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`。`load` 解析完立刻检查：IP 不重复、所有公钥（跨客户端、跨服务）不重复、允许的 gnosis 都有表；任何一项不过，Phanes 拒绝启动，之后的服务过程都假设配置合法。配置和私钥文件经 `layline::secrets` 读取。
 - `src/request_details.rs`：被拒请求的快照 `RequestDetails`（`RequestHead` 加载荷）；`Display` 输出跟在日志消息后面的多行完整内容（4 空格缩进；header 值用 `Debug` 打印，带引号并转义非 ASCII 字节，伪造不出单独一行；载荷 hex 每行 32 字节），`summarize()` 输出推送摘要。

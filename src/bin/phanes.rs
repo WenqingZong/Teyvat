@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use layline::bark::Notifier;
-use layline::build::RELEASE_BUILD;
+use layline::build::{GIT_COMMIT_HASH, RELEASE_BUILD, build_profile};
 use layline::logging::init_tracing;
 use layline::noise::{encode_key, generate_keypair};
 use phanes::celestia::server::CelestiaState;
@@ -59,9 +59,9 @@ enum Command {
 #[derive(Debug, thiserror::Error)]
 enum ServiceError {
     #[error(
-        "listen_address {0} is not loopback: LAN devices could bypass Cloudflare and forge {CLIENT_IP_HEADER}"
+        "listen_address {listen_address} is not loopback: LAN devices could bypass Cloudflare and forge {CLIENT_IP_HEADER}"
     )]
-    ListenAddressNotLoopback(SocketAddr),
+    ListenAddressNotLoopback { listen_address: SocketAddr },
     #[error("cannot listen on {address}: {source}")]
     Bind {
         address: SocketAddr,
@@ -84,6 +84,8 @@ fn main() -> ExitCode {
             }
         },
         Command::Serve { config } => {
+            let build_profile = build_profile();
+            info!("{build_profile} build of commit {GIT_COMMIT_HASH}");
             let runtime = match RuntimeBuilder::new_multi_thread().enable_all().build() {
                 Ok(runtime) => runtime,
                 Err(error) => {
@@ -161,9 +163,9 @@ async fn supervise(config_path: &Path) -> ExitCode {
 async fn run_service(config: PhanesConfig, notifier: Arc<Notifier>) -> Result<(), ServiceError> {
     // The IP filter trusts CF-Connecting-IP, which only cloudflared on this machine may set.
     if RELEASE_BUILD && !config.listen_address.ip().is_loopback() {
-        return Err(ServiceError::ListenAddressNotLoopback(
-            config.listen_address,
-        ));
+        return Err(ServiceError::ListenAddressNotLoopback {
+            listen_address: config.listen_address,
+        });
     }
 
     let listener = TcpListener::bind(config.listen_address)

@@ -4,6 +4,7 @@
 //! so the Bark relay server only sees ciphertext. The key and IV are used as raw
 //! ASCII bytes, matching the Bark app's "AES-256-CBC" encryption setting.
 
+use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::sync::Arc;
 
 use aes::Aes256;
@@ -28,8 +29,8 @@ const BARK_SERVER: &str = "https://api.day.app";
 pub enum BarkError {
     #[error("missing [bark] section in the config")]
     MissingConfig,
-    #[error("encryption key must be exactly {KEY_LENGTH} bytes, got {0}")]
-    InvalidKeyLength(usize),
+    #[error("encryption key must be exactly {KEY_LENGTH} bytes, got {length}")]
+    InvalidKeyLength { length: usize },
     #[error("Bark server {0} cannot be used as a base URL")]
     InvalidServer(Url),
     #[error("failed to serialize payload: {0}")]
@@ -42,13 +43,31 @@ pub enum BarkError {
 }
 
 /// The `[bark]` table of the config.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BarkConfig {
     #[serde(default = "default_bark_server")]
     server: Url,
     device_key: SecretString,
     encryption_key: SecretString,
+}
+
+/// Written by hand so `server` prints as one URL rather than `Url`'s fields; the credentials print
+/// as `[REDACTED]`.
+impl Debug for BarkConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        let Self {
+            server,
+            device_key,
+            encryption_key,
+        } = self;
+        formatter
+            .debug_struct("BarkConfig")
+            .field("server", &format_args!("{server}"))
+            .field("device_key", device_key)
+            .field("encryption_key", encryption_key)
+            .finish()
+    }
 }
 
 fn default_bark_server() -> Url {
@@ -94,7 +113,7 @@ impl BarkNotifier {
     pub fn new(config: BarkConfig) -> Result<Self, BarkError> {
         let key_length = config.encryption_key.expose_secret().len();
         if key_length != KEY_LENGTH {
-            return Err(BarkError::InvalidKeyLength(key_length));
+            return Err(BarkError::InvalidKeyLength { length: key_length });
         }
         if config.server.cannot_be_a_base() {
             return Err(BarkError::InvalidServer(config.server));
@@ -260,7 +279,10 @@ mod tests {
     #[test]
     fn notifier_rejects_wrong_key_length() {
         let result = BarkNotifier::new(test_config(BARK_SERVER, "too-short"));
-        assert!(matches!(result, Err(BarkError::InvalidKeyLength(9))));
+        assert!(matches!(
+            result,
+            Err(BarkError::InvalidKeyLength { length: 9 })
+        ));
     }
 
     #[test]

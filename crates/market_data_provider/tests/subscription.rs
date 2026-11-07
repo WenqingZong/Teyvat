@@ -13,6 +13,7 @@ use tokio::task::spawn_blocking;
 use ureq::http::Response;
 use ureq::{Body, Error};
 
+use layline::build::GIT_COMMIT_HASH;
 use layline::provider_api::{
     CONNECTED_APIS_PATH, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH, SUBSCRIBE_PATH,
     SUBSCRIBED_PATH, SubscribedResponse, Subscription, SubscriptionRequest, SubscriptionResponse,
@@ -23,7 +24,7 @@ use layline::testing::write_secret_file;
 use layline::types::{
     Currency, Exchange, Instrument, MarketData, MarketDataType, StrategyName, Topic, UnderlyingType,
 };
-use market_data_provider::config::ProviderConfig;
+use market_data_provider::config::MarketDataProviderConfig;
 use market_data_provider::server::{run, serve};
 
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,24 +77,22 @@ fn topics() -> HashSet<Topic> {
     ])
 }
 
-/// Listens on a free port; the `[phanes_client]` table only has to parse, since OKX never asks for a key.
-fn config(root_directory: &Path, lease_duration: Duration, demo: bool) -> ProviderConfig {
+/// The `[phanes_client]` table only has to parse, since OKX never asks for a key.
+fn config(port: u16, demo: bool) -> MarketDataProviderConfig {
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let config_file = directory.path().join("market_data_provider.toml");
     let text = format!(
-        "port = 0\ndemo = {demo}\n\n[phanes_client]\nurl = \"https://phanes.invalid\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
+        "port = {port}\ndemo = {demo}\n\n[phanes_client]\nurl = \"https://phanes.invalid\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
     );
     write_secret_file(&config_file, &text);
-    let mut config = ProviderConfig::load(&config_file).expect("the config is expected to load");
-    config.root_directory = root_directory.to_owned();
-    config.lease_duration = lease_duration;
-    config
+    MarketDataProviderConfig::load(&config_file).expect("the config is expected to load")
 }
 
 async fn start_provider(root_directory: &Path, lease_duration: Duration) -> SocketAddr {
     start_provider_in_environment(root_directory, lease_duration, false).await
 }
 
+/// Listens on a free port.
 async fn start_provider_in_environment(
     root_directory: &Path,
     lease_duration: Duration,
@@ -106,8 +105,10 @@ async fn start_provider_in_environment(
         .local_addr()
         .expect("local address is expected to be known");
     tokio::spawn(serve(
-        config(root_directory, lease_duration, demo),
+        config(0, demo),
         listener,
+        root_directory.to_owned(),
+        lease_duration,
     ));
     address
 }
@@ -331,6 +332,7 @@ async fn health_info_and_validation_endpoints_respond() {
             .expect("info is expected to be json");
         assert_eq!(env!("CARGO_PKG_VERSION"), info.version);
         assert_eq!("debug", info.build);
+        assert_eq!(GIT_COMMIT_HASH, info.git_commit_hash);
         assert_eq!(LONG_LEASE.as_secs(), info.lease_duration_seconds);
         assert_server_time_is_utc_milliseconds(&info.server_time);
 
@@ -414,7 +416,5 @@ async fn second_provider_refuses_a_taken_address() {
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let address = start_provider(directory.path(), LONG_LEASE).await;
 
-    let mut second = config(directory.path(), LONG_LEASE, false);
-    second.listen_address = address;
-    assert!(run(second).await.is_err());
+    assert!(run(config(address.port(), false)).await.is_err());
 }

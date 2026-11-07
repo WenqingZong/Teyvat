@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing::error;
+use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use dummy_strategy::client::subscribe;
 use dummy_strategy::config::StrategyConfig;
 use dummy_strategy::latency_bench::LatencyBench;
 use dummy_strategy::strategy::Strategy;
+use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::logging::init_tracing;
 use layline::shared_memory::MarketDataReader;
 
@@ -40,6 +41,8 @@ fn main() {
         .lock()
         .expect("nothing panics while holding LOG_GUARD") = Some(init_tracing());
     exit_on_panic();
+    let build_profile = build_profile();
+    info!("{build_profile} build of commit {GIT_COMMIT_HASH}");
     let report_interval = Duration::from_secs(arguments.report_interval_seconds);
     if let Err(error) = run(&arguments.config, report_interval) {
         // `{:?}` keeps the whole context chain.

@@ -50,13 +50,13 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 cargo test --workspace                        # unit, integration and example tests of every crate
 cargo test -p <crate> <name> -- --nocapture   # one test
-cargo test --workspace --test module_dependencies --test import_groups   # module cycle and import grouping checks
+cargo test --workspace --test module_dependencies --test import_groups --test format_strings   # module cycle, import grouping and format string checks
 cargo llvm-cov --workspace --summary-only     # line coverage; CI requires 90%
 cargo bench -p market_data_provider           # criterion latency benches
 deploy/phanes/phanes.sh install               # deploy; see deploy/README.md
 ```
 
-CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle and import grouping checks, tests and coverage with `RUSTFLAGS=-Dwarnings`. Dependabot opens dependency PRs daily.
+CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle, import grouping and format string checks, tests and coverage with `RUSTFLAGS=-Dwarnings`. Dependabot opens dependency PRs daily.
 
 ## Coding standards
 
@@ -67,6 +67,7 @@ CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle and impo
 - **No module cycles:** every crate has `tests/module_dependencies.rs`, which calls `layline::testing::assert_acyclic_modules`; top-level modules must not import each other in a cycle. Shared names such as Phanes' `Service` live in a leaf module, not in the module that composes everything.
 - **Logging:** only `tracing`. Import the macros at the top of the file (`use tracing::{info, warn};`) and write `info!`, not `tracing::info!`. Binaries and examples call `layline::logging::init_tracing()` once and keep the returned guard alive until exit, because dropping it flushes buffered lines.
 - **Imports:** no long inline paths such as `std::fs::read_to_string` or `snow::Builder`; `use` them at the top of the file, and rename clashes with clear aliases (`IoError`, `TomlError`). Group `use` items in three blocks separated by one blank line: the standard library (`std`, `core`, `alloc`), then third-party crates, then this repository (`crate`, `self`, `super`, workspace crates such as `layline`, child modules); rustfmt sorts within each block. Every package's `tests/import_groups.rs` (`layline::testing::assert_grouped_imports`) enforces it.
+- **Format strings:** one placeholder style per string: never mix positional (`{}`, `{:?}`, `{0}`) with named (`{name}`). Bind an expression such as `path.display()` to a local first, then inline it (`let path = path.display(); info!("loaded {path}: {config:#?}");`); in a `thiserror` attribute, where no local can be bound, use a named field or a named argument. Every package's `tests/format_strings.rs` (`layline::testing::assert_consistent_format_strings`) enforces it.
 - **Naming:** names are spelled out, never abbreviated. A binding (variable, parameter, closure or loop variable, pattern) whose type is `Result` ends in `_result`, and one whose type is `Option` ends in `_option`; unwrapped values take no suffix. A timestamp or time span held as a raw integer names its unit (`exchange_time_nanoseconds`); `Duration` and `Instant` need none.
 - **No magic numbers:** define named constants.
 - **Types:** no generic parameters for show (such as `impl Into<String>`) when they buy nothing; keep parameters of the same kind the same type; prefer semantic types (`Url`, `SecretString`, `StatusCode`), even when that needs a hand-written serde adapter.

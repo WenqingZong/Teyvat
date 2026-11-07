@@ -177,10 +177,10 @@ struct Reader<'a> {
 impl<'a> Reader<'a> {
     fn bytes(&mut self, length: usize) -> Result<&'a [u8]> {
         let end = self.offset.checked_add(length).context("offset overflow")?;
-        let bytes = self
-            .frame
-            .get(self.offset..end)
-            .with_context(|| format!("frame of {} bytes ends before {end}", self.frame.len()))?;
+        let bytes = self.frame.get(self.offset..end).with_context(|| {
+            let frame_length = self.frame.len();
+            format!("frame of {frame_length} bytes ends before {end}")
+        })?;
         self.offset = end;
         Ok(bytes)
     }
@@ -198,8 +198,9 @@ impl<'a> Reader<'a> {
     }
 
     fn seek(&mut self, offset: usize) -> Result<()> {
-        if offset > self.frame.len() {
-            bail!("frame of {} bytes ends before {offset}", self.frame.len());
+        let frame_length = self.frame.len();
+        if offset > frame_length {
+            bail!("frame of {frame_length} bytes ends before {offset}");
         }
         self.offset = offset;
         Ok(())

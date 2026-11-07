@@ -30,7 +30,7 @@ jobs:
         run: cargo clippy --workspace --all-targets
 
       - name: module cycle and import grouping checks
-        run: cargo test --workspace --test module_dependencies --test import_groups
+        run: cargo test --workspace --test module_dependencies --test import_groups --test format_strings
 
       - name: cargo test
         run: cargo test --workspace

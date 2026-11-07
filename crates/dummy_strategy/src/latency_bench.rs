@@ -137,13 +137,13 @@ fn summary_line(name: &str, samples: &mut LatencySamples) -> String {
         .zip(&samples.transport_nanoseconds)
         .map(|(provider, transport)| provider + transport)
         .collect();
+    let sample_count = samples.provider_nanoseconds.len();
+    let provider_percentiles = percentiles(&mut samples.provider_nanoseconds);
+    let transport_percentiles = percentiles(&mut samples.transport_nanoseconds);
+    let internal_percentiles = percentiles(&mut internal_nanoseconds);
+    let parse_percentiles = percentiles(&mut samples.parse_nanoseconds);
     format!(
-        "{name} n={} | provider {} | transport {} | internal {} | parse {}",
-        samples.provider_nanoseconds.len(),
-        percentiles(&mut samples.provider_nanoseconds),
-        percentiles(&mut samples.transport_nanoseconds),
-        percentiles(&mut internal_nanoseconds),
-        percentiles(&mut samples.parse_nanoseconds),
+        "{name} n={sample_count} | provider {provider_percentiles} | transport {transport_percentiles} | internal {internal_percentiles} | parse {parse_percentiles}"
     )
 }
 

@@ -2,6 +2,7 @@
 //! instrument. Production code never calls these.
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{Permissions, read_dir, read_to_string, set_permissions, write};
+use std::iter::{once, repeat_n};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -259,8 +260,9 @@ pub fn assert_grouped_imports(manifest_directory: &Path) {
     let mut violations = Vec::new();
     for path in files {
         let text = read_to_string(&path).expect("source file is expected to be readable");
+        let path = path.display();
         for line_number in import_group_violations(&text, &third_party_crates) {
-            violations.push(format!("{}:{line_number}", path.display()));
+            violations.push(format!("{path}:{line_number}"));
         }
     }
     assert!(
@@ -398,6 +400,187 @@ fn classify_import(path: &str, third_party_crates: &BTreeSet<String>) -> ImportG
     }
 }
 
+/// How a format placeholder names its argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceholderKind {
+    /// `{}`, `{:?}`, `{0}`: an argument after the format string, by position.
+    Positional,
+    /// `{name}`, `{name:?}`: a variable or constant in scope, or a named argument.
+    Named,
+}
+
+/// Panics if a string literal of the package at `manifest_directory` mixes positional placeholders
+/// (`{}`, `{:?}`, `{0}`) with named ones (`{name}`): a format string uses one style, and an
+/// expression such as `path.display()` is bound to a local first. Checks `build.rs`, `src`,
+/// `tests`, `benches` and `examples`, skipping comments.
+pub fn assert_consistent_format_strings(manifest_directory: &Path) {
+    let mut files = Vec::new();
+    let build_script = manifest_directory.join("build.rs");
+    if build_script.is_file() {
+        files.push(build_script);
+    }
+    for directory in SOURCE_DIRECTORIES {
+        let path = manifest_directory.join(directory);
+        if path.is_dir() {
+            rust_files(&path, &mut files);
+        }
+    }
+    let mut violations = Vec::new();
+    for path in files {
+        let text = read_to_string(&path).expect("source file is expected to be readable");
+        let path = path.display();
+        for (line_number, literal) in string_literals(&text) {
+            if mixes_placeholder_kinds(&literal) {
+                violations.push(format!("{path}:{line_number}: {literal:?}"));
+            }
+        }
+    }
+    let joined_violations = violations.join("\n");
+    assert!(
+        violations.is_empty(),
+        "format strings must not mix positional placeholders ({{}}) with named ones ({{name}}):\n{joined_violations}"
+    );
+}
+
+/// Every string literal outside comments, with the 1-based line it starts on, as written in the
+/// source (escapes not processed). Covers plain, byte and raw strings; char literals and lifetimes
+/// are skipped so that `'"'` opens no string.
+fn string_literals(text: &str) -> Vec<(usize, String)> {
+    let characters: Vec<char> = text.chars().collect();
+    let mut literals = Vec::new();
+    let mut line_number = 1;
+    let mut index = 0;
+    while index < characters.len() {
+        let start = index;
+        let rest = &characters[index..];
+        index = if rest.starts_with(&['/', '/']) {
+            find_from(&characters, index, &['\n']).unwrap_or(characters.len())
+        } else if rest.starts_with(&['/', '*']) {
+            find_from(&characters, index + 2, &['*', '/']).map_or(characters.len(), |end| end + 2)
+        } else if let Some(hash_count) = raw_string_opening(&characters, index) {
+            let content_start =
+                index + raw_string_prefix_length(&characters, index) + hash_count + 1;
+            let closing: Vec<char> = once('"').chain(repeat_n('#', hash_count)).collect();
+            let content_end =
+                find_from(&characters, content_start, &closing).unwrap_or(characters.len());
+            literals.push((
+                line_number,
+                characters[content_start..content_end].iter().collect(),
+            ));
+            (content_end + closing.len()).min(characters.len())
+        } else if characters[index] == '"' {
+            let content_end = plain_string_end(&characters, index + 1);
+            literals.push((
+                line_number,
+                characters[index + 1..content_end].iter().collect(),
+            ));
+            (content_end + 1).min(characters.len())
+        } else if characters[index] == '\'' {
+            char_literal_end(&characters, index)
+        } else {
+            index + 1
+        };
+        line_number += characters[start..index]
+            .iter()
+            .filter(|&&character| character == '\n')
+            .count();
+    }
+    literals
+}
+
+/// The first index at or after `from` where `pattern` starts.
+fn find_from(characters: &[char], from: usize, pattern: &[char]) -> Option<usize> {
+    (from..characters.len()).find(|&index| characters[index..].starts_with(pattern))
+}
+
+/// The number of `#` of a raw string (`r"`, `r#"`, `br#"`) opening at `index`, which must not
+/// continue an identifier such as `letter"`.
+fn raw_string_opening(characters: &[char], index: usize) -> Option<usize> {
+    let continues_identifier = index > 0 && is_identifier_character(characters[index - 1]);
+    if continues_identifier {
+        return None;
+    }
+    let after_prefix = index + raw_string_prefix_length(characters, index);
+    if after_prefix == index {
+        return None;
+    }
+    let hash_count = characters[after_prefix..]
+        .iter()
+        .take_while(|&&character| character == '#')
+        .count();
+    (characters.get(after_prefix + hash_count) == Some(&'"')).then_some(hash_count)
+}
+
+/// 1 for `r`, 2 for `br`, 0 when no raw string prefix starts at `index`.
+fn raw_string_prefix_length(characters: &[char], index: usize) -> usize {
+    match (characters.get(index), characters.get(index + 1)) {
+        (Some('r'), _) => 1,
+        (Some('b'), Some('r')) => 2,
+        _ => 0,
+    }
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+/// The index of the `"` closing a plain string whose content starts at `content_start`.
+fn plain_string_end(characters: &[char], content_start: usize) -> usize {
+    let mut index = content_start;
+    while index < characters.len() && characters[index] != '"' {
+        index += if characters[index] == '\\' { 2 } else { 1 };
+    }
+    index.min(characters.len())
+}
+
+/// The index after a char literal (`'x'`, `'\n'`, `'\u{7f}'`) opening at `index`, or after the
+/// quote alone when it starts a lifetime such as `'a`.
+fn char_literal_end(characters: &[char], index: usize) -> usize {
+    match characters.get(index + 1) {
+        Some('\\') => {
+            find_from(characters, index + 2, &['\'']).map_or(characters.len(), |end| end + 1)
+        }
+        Some(_) if characters.get(index + 2) == Some(&'\'') => index + 3,
+        _ => index + 1,
+    }
+}
+
+/// Whether `literal` holds both a positional and a named placeholder. `{{` and `}}` are escaped
+/// braces, not placeholders.
+fn mixes_placeholder_kinds(literal: &str) -> bool {
+    let unescaped = literal.replace("{{", "").replace("}}", "");
+    let mut kinds = Vec::new();
+    for candidate in unescaped.split('{').skip(1) {
+        let Some((placeholder, _)) = candidate.split_once('}') else {
+            continue;
+        };
+        if let Some(kind) = placeholder_kind(placeholder) {
+            kinds.push(kind);
+        }
+    }
+    kinds.contains(&PlaceholderKind::Positional) && kinds.contains(&PlaceholderKind::Named)
+}
+
+/// The kind of the placeholder between `{` and `}`, or `None` for text that only looks like one,
+/// such as `{"key": 1`.
+fn placeholder_kind(placeholder: &str) -> Option<PlaceholderKind> {
+    let argument = placeholder
+        .split_once(':')
+        .map_or(placeholder, |(argument, _)| argument);
+    let mut argument_characters = argument.chars();
+    match argument_characters.next() {
+        None => Some(PlaceholderKind::Positional),
+        Some(first) if first.is_ascii_digit() => argument
+            .chars()
+            .all(|character| character.is_ascii_digit())
+            .then_some(PlaceholderKind::Positional),
+        Some(first) if first.is_alphabetic() || first == '_' => argument_characters
+            .all(is_identifier_character)
+            .then_some(PlaceholderKind::Named),
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{create_dir_all, write};
@@ -499,5 +682,73 @@ mod tests {
             vec!["layline", "tokio", "tempfile"],
             dependency_names(manifest)
         );
+    }
+
+    // Inputs that mix placeholder kinds are joined from pieces, so that no literal in this file
+    // mixes them and the package's own format string check still passes.
+
+    #[test]
+    fn mixed_placeholder_kinds_are_found() {
+        assert!(mixes_placeholder_kinds(
+            &["value {}", " of {name}"].concat()
+        ));
+        assert!(mixes_placeholder_kinds(&["{0}", " {name:?}"].concat()));
+    }
+
+    #[test]
+    fn one_placeholder_kind_passes() {
+        assert!(!mixes_placeholder_kinds("{} {:?} {0} {:>8}"));
+        assert!(!mixes_placeholder_kinds(
+            "{name} {name:#?} {GIT_COMMIT_HASH}"
+        ));
+        assert!(!mixes_placeholder_kinds("{{}} {name}"));
+        assert!(!mixes_placeholder_kinds("{\"key\": 1} {}"));
+        assert!(!mixes_placeholder_kinds("{ unclosed"));
+    }
+
+    #[test]
+    fn string_literals_skip_comments_and_char_literals() {
+        let text = [
+            "// \"{}",
+            " {name}\"\n",
+            "fn first<'a>(text: &'a str) -> char { '\"' }\n",
+            "let raw = r#\"say \"hi\"\"#;\n",
+            "let bytes = b\"\\\"quoted\\\"\";\n",
+            "/* \"in block\" */ let plain = \"a\\\"b\"; let escaped = '\\'';\n",
+            "let raw_bytes = br\"x\"; let r#type = 1;\n",
+        ]
+        .concat();
+        assert_eq!(
+            vec![
+                (3, r#"say "hi""#.to_owned()),
+                (4, r#"\"quoted\""#.to_owned()),
+                (5, r#"a\"b"#.to_owned()),
+                (6, "x".to_owned()),
+            ],
+            string_literals(&text)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "format strings must not mix")]
+    fn mixed_format_string_panics() {
+        let source = [
+            "fn describe(x: u8) -> String { format!(\"{}",
+            " {x}\", x) }\n",
+        ]
+        .concat();
+        let directory = write_crate(&[("lib.rs", &source)]);
+        assert_consistent_format_strings(directory.path());
+    }
+
+    #[test]
+    fn consistent_format_strings_pass_including_build_script() {
+        let directory = write_crate(&[("lib.rs", "fn f(x: u8) -> String { format!(\"{x}\") }\n")]);
+        write(
+            directory.path().join("build.rs"),
+            "fn main() { let _ = format!(\"{} {}\", 1, 2); }\n",
+        )
+        .expect("build script is written");
+        assert_consistent_format_strings(directory.path());
     }
 }

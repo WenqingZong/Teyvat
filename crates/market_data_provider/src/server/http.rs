@@ -13,7 +13,7 @@ use tracing::info;
 use super::coordinator::Coordinator;
 use super::format_topics;
 use crate::exchanges::connected_apis;
-use layline::build::build_profile;
+use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::provider_api::{
     CONNECTED_APIS_PATH, ConnectedApis, HEALTH_PATH, INFO_PATH, ProviderInfo, RESUBSCRIBE_PATH,
     SUBSCRIBE_PATH, SUBSCRIBED_PATH, SubscribedResponse, SubscriptionRequest, SubscriptionResponse,
@@ -60,6 +60,7 @@ async fn provider_info(State(state): State<ServerState>) -> Json<ProviderInfo> {
         server_time: server_time(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         build: build_profile().to_owned(),
+        git_commit_hash: GIT_COMMIT_HASH.to_owned(),
         lease_duration_seconds: lease_duration.as_secs(),
     })
 }

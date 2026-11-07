@@ -327,15 +327,16 @@ where
             }
             match self.connect_and_request(endpoint, SUBSCRIBE, &names).await {
                 Ok(()) => {
-                    info!("restored {endpoint} with {} streams", names.len());
+                    let stream_count = names.len();
+                    info!("restored {endpoint} with {stream_count} streams");
                     self.endpoint_set.clear_restore(endpoint);
                 }
                 Err(error) => {
                     self.fail(endpoint).await;
                     let failures = self.endpoint_set.restore_failures(endpoint);
+                    let next_retry_delay = retry_delay(failures);
                     error!(
-                        "failed to restore {endpoint} ({failures} in a row): {error:#}; retrying in {:?}",
-                        retry_delay(failures)
+                        "failed to restore {endpoint} ({failures} in a row): {error:#}; retrying in {next_retry_delay:?}"
                     );
                     if failures == RESTORE_FAILURES_BEFORE_ALERT {
                         self.alert
@@ -519,10 +520,10 @@ where
                         bid_size: best_bid_ask.bid_size,
                         sequence,
                     })),
-                    Err(error) => warn!(
-                        "dropping a {} BBO from {endpoint}: {error:#}",
-                        best_bid_ask.symbol
-                    ),
+                    Err(error) => {
+                        let symbol = best_bid_ask.symbol;
+                        warn!("dropping a {symbol} BBO from {endpoint}: {error:#}");
+                    }
                 }
             }
             Ok(SbeFrame::Trades(trades)) => {
@@ -541,20 +542,20 @@ where
                             taker_side: taker_side(trade.buyer_is_maker),
                             sequence,
                         })),
-                        Err(error) => warn!(
-                            "dropping a {} trade from {endpoint}: {error:#}",
-                            trades.symbol
-                        ),
+                        Err(error) => {
+                            let symbol = trades.symbol;
+                            warn!("dropping a {symbol} trade from {endpoint}: {error:#}");
+                        }
                     }
                 }
             }
             Ok(SbeFrame::Other { template_id }) => {
                 debug!("ignoring SBE template {template_id} from {endpoint}");
             }
-            Err(error) => warn!(
-                "failed to decode SBE from {endpoint}: {error:#}: {}",
-                hex::encode(frame)
-            ),
+            Err(error) => {
+                let frame_hex = hex::encode(frame);
+                warn!("failed to decode SBE from {endpoint}: {error:#}: {frame_hex}");
+            }
         }
     }
 
@@ -589,9 +590,10 @@ async fn read<WebSocket: WebSocketClient>(
 }
 
 fn log_stray_response(endpoint: BinanceEndpoint, response: &Response) {
+    let request_id = &response.id;
     match &response.error {
-        Some(error) => warn!("{endpoint} reported {error} for request {:?}", response.id),
-        None => debug!("late answer from {endpoint} to request {:?}", response.id),
+        Some(error) => warn!("{endpoint} reported {error} for request {request_id:?}"),
+        None => debug!("late answer from {endpoint} to request {request_id:?}"),
     }
 }
 
@@ -622,7 +624,8 @@ fn describe_streams(
         .map(|(endpoint, streams)| {
             let mut names: Vec<&str> = streams.keys().map(String::as_str).collect();
             names.sort_unstable();
-            format!("{endpoint} [{}]", names.join(", "))
+            let joined_names = names.join(", ");
+            format!("{endpoint} [{joined_names}]")
         })
         .collect::<Vec<_>>()
         .join(", ")

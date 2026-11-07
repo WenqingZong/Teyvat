@@ -1,6 +1,7 @@
 //! Client of Phanes Gnosis, which releases gnoses (API keys) over an end-to-end encrypted HTTP
 //! round trip.
 
+use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,7 +22,7 @@ const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The `[phanes_client]` table of the config. Like Phanes itself, each service has its own key
 /// pair. The client's public key is not needed: Noise derives it from the private key.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PhanesClientConfig {
     url: Url,
@@ -31,6 +32,24 @@ pub(crate) struct PhanesClientConfig {
     /// Base64 X25519 public key of Phanes Gnosis.
     #[serde(deserialize_with = "deserialize_key")]
     phanes_gnosis_public_key: SecretBox<StaticKey>,
+}
+
+/// Written by hand so `url` prints as one URL rather than `Url`'s fields; the keys print as
+/// `[REDACTED]`.
+impl Debug for PhanesClientConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        let Self {
+            url,
+            client_gnosis_private_key,
+            phanes_gnosis_public_key,
+        } = self;
+        formatter
+            .debug_struct("PhanesClientConfig")
+            .field("url", &format_args!("{url}"))
+            .field("client_gnosis_private_key", client_gnosis_private_key)
+            .field("phanes_gnosis_public_key", phanes_gnosis_public_key)
+            .finish()
+    }
 }
 
 /// Where gnoses come from; the connector asks only when a topic needs one.

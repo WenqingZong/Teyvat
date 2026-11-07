@@ -18,7 +18,7 @@ pub enum SecretFileError {
     Read { path: PathBuf, source: IoError },
     #[error("{0} must not be readable by group or others (chmod 600)")]
     InsecurePermissions(PathBuf),
-    #[error("invalid {}: {description}", path.display())]
+    #[error("invalid {displayed_path}: {description}", displayed_path = path.display())]
     InvalidToml { path: PathBuf, description: String },
 }
 

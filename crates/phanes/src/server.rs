@@ -16,7 +16,7 @@ use crate::celestia::server::{self as celestia_server, CelestiaState};
 use crate::client_filter::{ClientFilter, filter_clients};
 use crate::gnosis::server::{self as gnosis_server, GnosisState};
 use crate::request_details::RequestDetails;
-use layline::build::build_profile;
+use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::time::server_time;
 
 pub const INFO_PATH: &str = "/info";
@@ -28,6 +28,7 @@ pub struct Info {
     pub server_time: String,
     pub version: String,
     pub build: String,
+    pub git_commit_hash: String,
 }
 
 /// One IP allow list in front of every service; `GET /info` is never filtered. `client_filter` is
@@ -76,6 +77,7 @@ async fn info() -> Json<Info> {
         server_time: server_time(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
         build: build_profile().to_owned(),
+        git_commit_hash: GIT_COMMIT_HASH.to_owned(),
     })
 }
 
@@ -251,5 +253,6 @@ mod tests {
         assert_eq!(info.status, "ok");
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.build, "debug");
+        assert_eq!(info.git_commit_hash, GIT_COMMIT_HASH);
     }
 }

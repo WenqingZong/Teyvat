@@ -1,17 +1,19 @@
 //! The strategy's TOML config, read once at startup; see `deploy/dummy_strategy/strategy.example.toml`.
 
 use std::collections::HashSet;
+use std::fmt::{Debug, Formatter, Result as FormatResult, from_fn};
 use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
 use serde::Deserialize;
+use tracing::info;
 
 use layline::provider_api::topic_set;
 use layline::secrets::read_secret_toml;
 use layline::types::{StrategyName, Topic};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     pub strategy_name: StrategyName,
@@ -25,6 +27,39 @@ pub struct StrategyConfig {
     pub topics: HashSet<Topic>,
 }
 
+/// Written by hand so each topic prints on one line as its `Display`, sorted by it, rather than
+/// as nested structs in `HashSet` order.
+impl Debug for StrategyConfig {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        let Self {
+            strategy_name,
+            provider_address,
+            demo,
+            topics,
+        } = self;
+        let mut topic_names: Vec<String> = topics.iter().map(Topic::to_string).collect();
+        topic_names.sort();
+        let unquoted_topic_names = topic_names
+            .iter()
+            .map(|topic_name| from_fn(move |formatter| formatter.write_str(topic_name)));
+        formatter
+            .debug_struct("StrategyConfig")
+            .field("strategy_name", strategy_name)
+            .field("provider_address", provider_address)
+            .field("demo", demo)
+            .field(
+                "topics",
+                &from_fn(|formatter| {
+                    formatter
+                        .debug_list()
+                        .entries(unquoted_topic_names.clone())
+                        .finish()
+                }),
+            )
+            .finish()
+    }
+}
+
 impl StrategyConfig {
     /// The file must be chmod 600, like every service config.
     pub fn load(path: &Path) -> Result<Self> {
@@ -34,6 +69,8 @@ impl StrategyConfig {
             "{} subscribes to no topics",
             path.display()
         );
+        let path = path.display();
+        info!("loaded {path}: {config:#?}");
         Ok(config)
     }
 }
@@ -83,6 +120,27 @@ ETH-USDC-PERP = ["TRADE"]
             MarketDataType::Trade,
         );
         assert_eq!(HashSet::from([okx_ether_perpetual_trade]), config.topics);
+    }
+
+    /// Topics print one per line, sorted by name, whatever order the file and the set hold them in.
+    #[test]
+    fn debug_output_lists_topics_sorted_one_per_line() {
+        let config = load(&format!(
+            "{MINIMAL_CONFIG}ETH-USDC-SPOT = [\"TRADE\", \"BBO\"]\n\n[topics.Binance]\nBTC-USDT-PERP = [\"BBO\"]\n"
+        ))
+        .expect("the config is valid");
+        let expected = r#"StrategyConfig {
+    strategy_name: "test_strategy",
+    provider_address: 127.0.0.1:6666,
+    demo: true,
+    topics: [
+        Binance/BTC-USDT-PERP/BBO,
+        OKX/ETH-USDC-PERP/TRADE,
+        OKX/ETH-USDC-SPOT/BBO,
+        OKX/ETH-USDC-SPOT/TRADE,
+    ],
+}"#;
+        assert_eq!(expected, format!("{config:#?}"));
     }
 
     #[test]

@@ -55,7 +55,8 @@ impl WebSocketClient for TungsteniteClient {
         let (stream, response) = connect_async(request)
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
-        info!("connected to {url}, status {}", response.status());
+        let status = response.status();
+        info!("connected to {url}, status {status}");
         self.stream = Some(stream);
         Ok(())
     }

@@ -4,11 +4,12 @@ use std::process::{ExitCode, exit};
 use std::sync::Mutex;
 
 use clap::Parser;
-use tracing::error;
+use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
+use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::logging::init_tracing;
-use market_data_provider::config::ProviderConfig;
+use market_data_provider::config::MarketDataProviderConfig;
 use market_data_provider::exit_reason::ExitReason;
 use market_data_provider::server::run;
 
@@ -30,7 +31,10 @@ async fn main() -> ExitCode {
         .lock()
         .expect("nothing panics while holding LOG_GUARD") = Some(init_tracing());
     exit_on_panic();
-    let config = ProviderConfig::load(&arguments.config).unwrap_or_else(|error| fatal(error));
+    let build_profile = build_profile();
+    info!("{build_profile} build of commit {GIT_COMMIT_HASH}");
+    let config =
+        MarketDataProviderConfig::load(&arguments.config).unwrap_or_else(|error| fatal(error));
     run(config).await.unwrap_or_else(|error| fatal(error));
     ExitCode::SUCCESS
 }

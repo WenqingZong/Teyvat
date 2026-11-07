@@ -55,13 +55,13 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 
 - **行情契约**：`types`（一个类型一个文件：`Instrument`、`Topic`、`Bbo`、`Trade` 等）、`shared_memory`（每个策略自己的 ring：文件格式、`MarketDataReader`、`MarketDataWriter`、`SerializedMarketData`）、`provider_api`（行情服务对策略的 HTTP 契约）。
 - **Phanes 协议**：`noise`（Noise_IK 加密层：客户端在消息 1 里带上自己的公钥，服务按公钥认出客户端；公钥和私钥一样放在 `SecretBox` 里）、`gnosis`（目录：`mod.rs` 是协议的服务端和客户端两半，两端不会走样，以及 Phanes 能发放的全部 gnosis 的 `GnosisId` 枚举；每个交易所一个文件放它的 key 类型，如 `gnosis/binance.rs`。每个 id 对应一个 `deny_unknown_fields` 的 key 类型，如 `BinanceApiKey { api_key, secret_key }`、`BinanceSbeApiKey { api_key }`；`Gnosis` trait 由类型给出它的实盘和 demo id，客户端按类型取 gnosis，不会配错 id，收到的 gnosis 直接按该类型解析。新增一种 gnosis 要改这里和 Phanes 的 `[gnoses]`，并重新部署 Phanes 和用到它的服务）。
-- **服务基础设施**：`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件；`read_secret_toml` 读取并解析 600 的 TOML 配置，解析错误不引用原文）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`）、`time`（墙钟时间、`NANOSECONDS_PER_SECOND`、`/info` 的时间格式）、`backoff`（指数退避）。
+- **服务基础设施**：`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件；`read_secret_toml` 读取并解析 600 的 TOML 配置，解析错误不引用原文）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`、`GIT_COMMIT_HASH`：layline 的 `build.rs` 在编译时执行 `git rev-parse HEAD` 写入，只在 HEAD、`refs/heads` 或 `packed-refs` 变化时重跑；不反映未提交的改动，不在 git 仓库里构建会失败）、`time`（墙钟时间、`NANOSECONDS_PER_SECOND`、`/info` 的时间格式）、`backoff`（指数退避）。
 - **`testing`**：所有 crate 的测试共用的 fixture 和检查（`test_keypair`、`test_instrument`、`test_topic`、`test_bbo`、`write_secret_file`、`assert_acyclic_modules`、`assert_grouped_imports` 等）。它是 public 的，因为其他 crate 的测试要用（`#[cfg(test)]` 只对 layline 自己的测试生效），所以生产代码不调用它只靠约定。`MarketDataWriter` 同理：只有行情服务的交易所 worker 会创建它，也是约定。
 
 ## 公共约定
 
 - **配置**：每个服务的全部配置来自一个 TOML 文件（权限 600，经 `layline::secrets::read_secret_toml` 读取），不读环境变量。
-- **日志**：只用 `tracing`；二进制和 example 调用一次 `layline::logging::init_tracing()`，并持有返回的 guard 直到退出（drop 时 flush）。每行是 `时间 级别 文件:行号: 消息`，不打印模块路径（文件和行号已经定位）。
+- **日志**：只用 `tracing`；二进制和 example 调用一次 `layline::logging::init_tracing()`，并持有返回的 guard 直到退出（drop 时 flush）。每行是 `时间 级别 文件:行号: 消息`，不打印模块路径（文件和行号已经定位）。每个服务启动时先以 info 打印构建类型和 commit（`debug build of commit <hash>`），配置 `load` 成功后再打印整份配置（多行 `Debug`，`{:#?}`）；公钥、私钥、gnosis 和 Bark 凭据都是 `secrecy` 类型，打印为 `[REDACTED]`。含 `Url` 或 topic 集合的配置类型手写 `Debug`（解构 `Self` 列出全部字段，加字段时编译器会提醒）：URL 打印为一行，topic 按 `Display` 排序、每行一个。各 crate 的 config 测试用完整的期望输出检查这一点。
 - **推送**：release 构建通过 Bark 推送到手机，缺少 `[bark]` 配置就拒绝启动；debug 构建不需要 Bark，推送改为 `info!` 日志。
 - **时间**：墙钟时间统一来自 `layline::time::get_current_timestamp_nanoseconds()`（`SystemTime`，`NonZeroU64` 纳秒）；热路径只用整数，不格式化日期。
 
@@ -72,6 +72,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | 无警告 | `cargo clippy --workspace --all-targets`，CI 里 `RUSTFLAGS=-Dwarnings`；workspace 级 lint 禁止 `unwrap`、`print!`、`dbg!` |
 | 无模块循环依赖 | 每个 crate 的 `tests/module_dependencies.rs` 调用 `layline::testing::assert_acyclic_modules` |
 | import 分组 | 每个 package 的 `tests/import_groups.rs` 调用 `layline::testing::assert_grouped_imports`：标准库 → 第三方 → 本仓库，空行分隔，组内由 rustfmt 排序 |
+| 格式串风格统一 | 每个 package 的 `tests/format_strings.rs` 调用 `layline::testing::assert_consistent_format_strings`：同一个字符串字面量里不能混用位置占位符（`{}`、`{:?}`、`{0}`）和具名占位符（`{name}`）；表达式先绑定成局部变量再内联。检查 `build.rs`、`src`、`tests`、`benches`、`examples`，跳过注释 |
 | 测试与覆盖率 | `cargo test --workspace`；`cargo llvm-cov --workspace`，CI 要求行覆盖率 ≥ 90% |
 
 CI 配置在 `.github/workflows/rust_ci.yml`，dependabot 每天检查依赖更新。

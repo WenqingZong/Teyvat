@@ -54,18 +54,16 @@ impl WorkerHandle {
             topics: topics.clone(),
             reply_sender,
         };
+        let exchange = self.exchange;
         if self.commands.send(command).is_err() {
-            return failed_reply(topics, &format!("{} worker has stopped", self.exchange));
+            return failed_reply(topics, &format!("{exchange} worker has stopped"));
         }
         match timeout(WORKER_REPLY_TIMEOUT, reply_receiver).await {
             Ok(Ok(worker_reply)) => worker_reply,
-            Ok(Err(_)) => failed_reply(topics, &format!("{} worker has stopped", self.exchange)),
+            Ok(Err(_)) => failed_reply(topics, &format!("{exchange} worker has stopped")),
             Err(_) => failed_reply(
                 topics,
-                &format!(
-                    "{} worker did not answer within {WORKER_REPLY_TIMEOUT:?}",
-                    self.exchange
-                ),
+                &format!("{exchange} worker did not answer within {WORKER_REPLY_TIMEOUT:?}"),
             ),
         }
     }
@@ -91,7 +89,8 @@ pub(super) fn spawn_worker<Connector: ExchangeConnector>(
             runtime.block_on(run_worker(root_directory, new_connector, receiver));
             info!("{} worker stopped", Connector::EXCHANGE);
         })?;
-    info!("{} worker started, demo: {demo}", Connector::EXCHANGE);
+    let exchange = Connector::EXCHANGE;
+    info!("{exchange} worker started, demo: {demo}");
     Ok(WorkerHandle {
         exchange: Connector::EXCHANGE,
         commands,
@@ -161,11 +160,10 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
         for topic in topics.difference(&rings.topics) {
             // The router groups topics by exchange, so a topic of another exchange is a bug; the
             // panic stops the whole provider.
+            let exchange = Connector::EXCHANGE;
             assert_eq!(
-                Connector::EXCHANGE,
-                topic.instrument.exchange,
-                "{} worker was sent {topic}",
-                Connector::EXCHANGE
+                exchange, topic.instrument.exchange,
+                "{exchange} worker was sent {topic}"
             );
             if let Entry::Vacant(entry) = rings.writers.entry(topic.ring_key()) {
                 match MarketDataWriter::open(&self.root_directory, strategy_name, topic.ring_key())
@@ -200,7 +198,8 @@ impl<Connector: ExchangeConnector> ExchangeWorker<Connector> {
             let path = topic
                 .ring_key()
                 .file_path(&self.root_directory, strategy_name);
-            info!("publishing {topic} to {}", path.display());
+            let path = path.display();
+            info!("publishing {topic} to {path}");
             rings.topics.insert(*topic);
         }
         for topic in &dropped {

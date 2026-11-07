@@ -200,15 +200,16 @@ impl<Client: WebSocketClient> WebSocketConnection<Client> {
             Some(frame) => anyhow!("closed by peer: {} {}", frame.code, frame.reason),
             None => anyhow!("closed by peer"),
         };
-        match timeout(
+        let answer_result = timeout(
             self.heartbeat.close_timeout,
             self.send(Message::Close(frame_option)),
         )
-        .await
-        {
+        .await;
+        let url = &self.url;
+        match answer_result {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => debug!("failed to answer Close from {}: {error:#}", self.url),
-            Err(_) => debug!("timed out answering Close from {}", self.url),
+            Ok(Err(error)) => debug!("failed to answer Close from {url}: {error:#}"),
+            Err(_) => debug!("timed out answering Close from {url}"),
         }
         reason
     }
@@ -223,15 +224,20 @@ impl<Client: WebSocketClient> WebSocketConnection<Client> {
             code: CloseCode::Normal,
             reason: Utf8Bytes::from_static(""),
         };
+        let close_timeout = self.heartbeat.close_timeout;
         match self.send(Message::Close(Some(frame))).await {
-            Err(error) => warn!("failed to send Close to {}: {error:#}", self.url),
-            Ok(()) => match timeout(self.heartbeat.close_timeout, self.wait_for_close()).await {
-                Ok(()) => info!("closed {}", self.url),
-                Err(_) => warn!(
-                    "{} did not answer Close within {:?}",
-                    self.url, self.heartbeat.close_timeout
-                ),
-            },
+            Err(error) => {
+                let url = &self.url;
+                warn!("failed to send Close to {url}: {error:#}");
+            }
+            Ok(()) => {
+                let wait_result = timeout(close_timeout, self.wait_for_close()).await;
+                let url = &self.url;
+                match wait_result {
+                    Ok(()) => info!("closed {url}"),
+                    Err(_) => warn!("{url} did not answer Close within {close_timeout:?}"),
+                }
+            }
         }
         self.disconnect();
     }
@@ -242,7 +248,8 @@ impl<Client: WebSocketClient> WebSocketConnection<Client> {
             if frame.is_close() {
                 return;
             }
-            trace!("discarding {frame:?} from closing {}", self.url);
+            let url = &self.url;
+            trace!("discarding {frame:?} from closing {url}");
         }
     }
 

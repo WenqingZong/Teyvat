@@ -76,9 +76,10 @@ struct ProviderSession {
 
 impl ProviderSession {
     fn post(&self, path: &str) -> Result<HashMap<Topic, SubscriptionResult>> {
+        let base_url = &self.base_url;
         let mut response = self
             .agent
-            .post(&format!("{}{path}", self.base_url))
+            .post(&format!("{base_url}{path}"))
             .send_json(&self.request)?;
         let status = response.status();
         if !status.is_success() {
@@ -102,10 +103,8 @@ impl ProviderSession {
                 Err(error) => {
                     failures += 1;
                     let delay = exponential_backoff(failures, INITIAL_RETRY_DELAY, MAX_RETRY_DELAY);
-                    warn!(
-                        "{}{path} failed, retrying in {delay:?}: {error:#}",
-                        self.base_url
-                    );
+                    let base_url = &self.base_url;
+                    warn!("{base_url}{path} failed, retrying in {delay:?}: {error:#}");
                     thread::sleep(delay);
                 }
             }
@@ -179,10 +178,10 @@ fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, Subsc
                 "provider moved {}",
                 subscription.topic
             ),
-            Some(Err(reason)) => error!(
-                "provider rejected {} on resubscription: {reason}",
-                subscription.topic
-            ),
+            Some(Err(reason)) => {
+                let topic = subscription.topic;
+                error!("provider rejected {topic} on resubscription: {reason}");
+            }
             None => panic!(
                 "provider answers every topic, but not {} on resubscription",
                 subscription.topic
@@ -232,10 +231,10 @@ mod tests {
             .collect();
         let body = serde_json::to_string(&SubscriptionResponse { results })
             .expect("serialization is expected to not fail");
+        let content_length = body.len();
         write!(
             &stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{body}"
         )
         .expect("write is expected to not fail");
         requests
@@ -420,10 +419,10 @@ mod tests {
     fn answer_with_status(listener: &TcpListener, status_line: &str, reason: &str) {
         let (stream, _) = listener.accept().expect("accept is expected to not fail");
         read_request(&stream);
+        let content_length = reason.len();
         write!(
             &stream,
-            "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
-            reason.len()
+            "HTTP/1.1 {status_line}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n{reason}"
         )
         .expect("write is expected to not fail");
     }

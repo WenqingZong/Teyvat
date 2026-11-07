@@ -73,6 +73,8 @@ pub struct ProviderInfo {
     pub version: String,
     /// `release` or `debug`.
     pub build: String,
+    /// The commit the provider was built from.
+    pub git_commit_hash: String,
     pub lease_duration_seconds: u64,
 }
 

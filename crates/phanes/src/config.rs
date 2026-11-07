@@ -8,6 +8,7 @@ use std::path::Path;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::Deserialize;
 use strum::IntoEnumIterator;
+use tracing::info;
 
 use crate::clients::{ClientName, Clients};
 use crate::gnosis::config::Gnoses;
@@ -77,6 +78,9 @@ impl PhanesConfig {
         config.check_addresses_are_distinct()?;
         config.check_public_keys_are_distinct()?;
         config.check_allowed_gnoses_exist()?;
+        // Every key, gnosis and Bark credential is a `secrecy` type, which `Debug` redacts.
+        let path = path.display();
+        info!("loaded {path}: {config:#?}");
         Ok(config)
     }
 
@@ -181,23 +185,31 @@ mod tests {
 
         /// Osaka may fetch binance_demo; Tokyo only uses Celestia. binance_real is held for nobody.
         fn valid_text(&self) -> String {
+            let gnosis_private_key = encode_key(self.gnosis_private_key.expose_secret());
+            let celestia_private_key = encode_key(self.celestia_private_key.expose_secret());
+            let osaka_gnosis_public_key = encode_key(self.osaka_gnosis_public_key.expose_secret());
+            let osaka_celestia_public_key =
+                encode_key(self.osaka_celestia_public_key.expose_secret());
+            let tokyo_gnosis_public_key = encode_key(self.tokyo_gnosis_public_key.expose_secret());
+            let tokyo_celestia_public_key =
+                encode_key(self.tokyo_celestia_public_key.expose_secret());
             format!(
                 r#"
 listen_address = "127.0.0.1:8888"
-gnosis_private_key = "{}"
-celestia_private_key = "{}"
+gnosis_private_key = "{gnosis_private_key}"
+celestia_private_key = "{celestia_private_key}"
 
 [clients.Osaka]
 ipv4 = "{OSAKA_IPV4}"
 ipv6 = "{OSAKA_IPV6}"
-client_gnosis_service_public_key = "{}"
-client_celestia_service_public_key = "{}"
+client_gnosis_service_public_key = "{osaka_gnosis_public_key}"
+client_celestia_service_public_key = "{osaka_celestia_public_key}"
 allowed_gnosis_ids = ["binance_demo"]
 
 [clients.Tokyo]
 ipv4 = "{TOKYO_IPV4}"
-client_gnosis_service_public_key = "{}"
-client_celestia_service_public_key = "{}"
+client_gnosis_service_public_key = "{tokyo_gnosis_public_key}"
+client_celestia_service_public_key = "{tokyo_celestia_public_key}"
 allowed_gnosis_ids = []
 
 [gnoses.binance_demo]
@@ -207,13 +219,7 @@ secret_key = "{GNOSIS_SECRET_KEY}"
 [gnoses.binance_real]
 api_key = "never"
 secret_key = "released"
-"#,
-                encode_key(self.gnosis_private_key.expose_secret()),
-                encode_key(self.celestia_private_key.expose_secret()),
-                encode_key(self.osaka_gnosis_public_key.expose_secret()),
-                encode_key(self.osaka_celestia_public_key.expose_secret()),
-                encode_key(self.tokyo_gnosis_public_key.expose_secret()),
-                encode_key(self.tokyo_celestia_public_key.expose_secret()),
+"#
             )
         }
 
@@ -266,6 +272,28 @@ secret_key = "released"
             fixture.celestia_private_key.expose_secret(),
             config.celestia_private_key.expose_secret()
         );
+    }
+
+    #[test]
+    fn debug_output_redacts_keys_and_gnoses() {
+        let fixture = Fixture::new();
+        let debug_output = format!("{:?}", fixture.load_valid());
+        let keys = [
+            &fixture.gnosis_private_key,
+            &fixture.celestia_private_key,
+            &fixture.osaka_gnosis_public_key,
+            &fixture.osaka_celestia_public_key,
+            &fixture.tokyo_gnosis_public_key,
+            &fixture.tokyo_celestia_public_key,
+        ];
+        for key in keys {
+            let key_bytes = format!("{:?}", key.expose_secret());
+            assert!(!debug_output.contains(&key_bytes), "{debug_output}");
+            let encoded_key = encode_key(key.expose_secret());
+            assert!(!debug_output.contains(&encoded_key), "{debug_output}");
+        }
+        assert!(!debug_output.contains(GNOSIS_API_KEY), "{debug_output}");
+        assert!(!debug_output.contains(GNOSIS_SECRET_KEY), "{debug_output}");
     }
 
     #[test]

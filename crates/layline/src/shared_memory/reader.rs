@@ -37,10 +37,10 @@ impl RingReader {
             .open(path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         let length = file.metadata()?.len();
+        let displayed_path = path.display();
         ensure!(
             length == RING_FILE_LENGTH,
-            "{} is {length} bytes, expected {RING_FILE_LENGTH}",
-            path.display()
+            "{displayed_path} is {length} bytes, expected {RING_FILE_LENGTH}"
         );
 
         let memory_map = unsafe { MmapOptions::new().map(&file)? };
@@ -51,8 +51,7 @@ impl RingReader {
             .with_context(|| format!("{} is not a market data ring", path.display()))?;
         ensure!(
             actual_market_data_type == expected_market_data_type,
-            "{} holds {actual_market_data_type}, expected {expected_market_data_type}",
-            path.display()
+            "{displayed_path} holds {actual_market_data_type}, expected {expected_market_data_type}"
         );
         let reader = RingBuffer::new(memory_map.as_ref()).into_reader();
         Ok(Self {
@@ -74,12 +73,16 @@ impl RingReader {
             let length = match message_result.and_then(|message| message.read(&mut buffer.0)) {
                 Ok(length) => length,
                 Err(Overrun(position)) => {
-                    warn!("{} overrun at position {position}", self.path.display());
+                    let path = self.path.display();
+                    warn!("{path} overrun at position {position}");
                     self.reader.reset();
                     break;
                 }
                 // Only `InsufficientBufferSize` is left: no Bbo or Trade is that large.
-                Err(error) => bail!("cannot read a message of {}: {error}", self.path.display()),
+                Err(error) => {
+                    let path = self.path.display();
+                    bail!("cannot read a message of {path}: {error}");
+                }
             };
             let received_at_nanoseconds = get_current_timestamp_nanoseconds();
             let payload = &buffer.0[..length];

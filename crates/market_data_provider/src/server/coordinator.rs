@@ -44,10 +44,10 @@ impl Coordinator {
     ) -> HashMap<Topic, SubscriptionResult> {
         let held = self.registry.held_by(strategy_name);
         if held != *topics {
+            let added_topics = format_topics(topics.difference(&held));
+            let dropped_topics = format_topics(held.difference(topics));
             warn!(
-                "{strategy_name} resubscribed with a different set: added {}, dropped {}",
-                format_topics(topics.difference(&held)),
-                format_topics(held.difference(topics))
+                "{strategy_name} resubscribed with a different set: added {added_topics}, dropped {dropped_topics}"
             );
         }
         self.apply(strategy_name, topics, topics, now).await
@@ -125,16 +125,12 @@ impl Coordinator {
             .into_iter()
             .partition(|(topic, _)| target.contains(topic));
         for (reason, topics) in group_by_reason(&unreleased) {
-            warn!(
-                "failed to release {} of {strategy_name}: {reason}",
-                format_topics(&topics)
-            );
+            let formatted_topics = format_topics(&topics);
+            warn!("failed to release {formatted_topics} of {strategy_name}: {reason}");
         }
         for (reason, topics) in group_by_reason(&refused) {
-            warn!(
-                "{strategy_name} was refused {}: {reason}",
-                format_topics(&topics)
-            );
+            let formatted_topics = format_topics(&topics);
+            warn!("{strategy_name} was refused {formatted_topics}: {reason}");
         }
         failures
     }

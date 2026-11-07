@@ -34,10 +34,8 @@ pub(super) fn stream_name(topic: &Topic) -> String {
         (UnderlyingType::Perpetual, MarketDataType::Bbo) => BOOK_TICKER_CHANNEL,
         (_, MarketDataType::Trade) => TRADE_CHANNEL,
     };
-    format!(
-        "{}@{channel}",
-        venue_symbol(topic.instrument).to_lowercase()
-    )
+    let symbol = venue_symbol(topic.instrument).to_lowercase();
+    format!("{symbol}@{channel}")
 }
 
 /// `stream_name` of an SBE event, which carries its symbol but not its stream. Written into `buffer`,
