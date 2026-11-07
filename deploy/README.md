@@ -12,6 +12,8 @@
 | `common.sh` | 三个部署脚本共用的函数：日志和确认、编译安装二进制、准备配置目录、systemd unit、卸载、在配置里生成 X25519 私钥并推导公钥、`install` / `uninstall` / `reinstall` 分发 |
 | `clickhouse/` | RedmiBook 上 ClickHouse 的手动安装记录 [`clickhouse.md`](clickhouse/clickhouse.md)（尚未接入代码，见 [`plan/database.md`](../plan/database.md)） |
 
+**部署前先在目标机器上执行 `uname -r`，确认 Linux 内核 ≥ 4.2**：每个服务的进程监控（`layline::process_metrics`）从 `tcp_info` 读取 TCP 收发字节数，这两个字段是 4.2 加入的。内核过旧时服务照常运行，但每个监控间隔都会打一条 warn，说明 `tcp_info` 没有字节计数，监控数据缺失。
+
 所有命令都在 **Teyvat 仓库根目录**执行。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），
 但因为所有二进制都在同一个 package 里，构建时会编译全部 crate。
 
@@ -227,6 +229,7 @@ deploy/dummy_strategy/dummy_strategy.sh install
 - `strategy_name`：策略名，也是它在 `/dev/shm/market_data_provider/` 下的 ring 目录名；
 - `provider_address`：行情服务的 HTTP 地址，即 `127.0.0.1:<market_data_provider.toml 的 port>`；
 - `demo`：`true` 表示在交易所的模拟盘交易（行情也来自模拟盘），`false` 为实盘；必须与行情服务配置的 `demo` 一致，否则每个订阅请求都被拒绝（400）；
+- `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）；
 - `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`["BBO", "TRADE"]`），与行情服务 HTTP API 的写法相同。
 
 报告间隔是 dummy_strategy 自己的参数，不在 `strategy.toml` 里，写在 unit 的 `ExecStart`（`--report-interval-seconds 60`）。

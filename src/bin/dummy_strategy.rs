@@ -15,6 +15,7 @@ use dummy_strategy::latency_bench::LatencyBench;
 use dummy_strategy::strategy::Strategy;
 use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::logging::init_tracing;
+use layline::process_metrics::spawn_process_monitor;
 use layline::shared_memory::MarketDataReader;
 
 const FAILURE_EXIT_CODE: i32 = 1;
@@ -50,7 +51,8 @@ fn main() {
     }
 }
 
-/// A panic on any thread, such as the resubscribing or the reporting one, stops the whole strategy.
+/// A panic on any thread, such as the resubscribing, the reporting or the process monitor one, stops
+/// the whole strategy.
 fn exit_on_panic() {
     set_hook(Box::new(|panic_info| {
         exit_with_error(&format!("fatal panic: {panic_info}"))
@@ -71,7 +73,9 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
         provider_address,
         demo,
         topics,
+        process_metrics_interval_seconds,
     } = StrategyConfig::load(config_path)?;
+    spawn_process_monitor(Duration::from_secs(process_metrics_interval_seconds.get()));
     let subscriptions = subscribe(provider_address, strategy_name, demo, topics)?;
     let mut strategy = LatencyBench::new(report_interval);
     MarketDataReader::open(&subscriptions)?.run(|data, received_at_nanoseconds| {

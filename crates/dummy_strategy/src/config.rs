@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Result as FormatResult, from_fn};
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
@@ -25,6 +26,8 @@ pub struct StrategyConfig {
     /// Exchange, then instrument, then market data types, as in the provider's HTTP API.
     #[serde(with = "topic_set")]
     pub topics: HashSet<Topic>,
+    /// How often the process logs its own CPU, memory, threads and TCP traffic.
+    pub process_metrics_interval_seconds: NonZeroU64,
 }
 
 /// Written by hand so each topic prints on one line as its `Display`, sorted by it, rather than
@@ -36,6 +39,7 @@ impl Debug for StrategyConfig {
             provider_address,
             demo,
             topics,
+            process_metrics_interval_seconds,
         } = self;
         let mut topic_names: Vec<String> = topics.iter().map(Topic::to_string).collect();
         topic_names.sort();
@@ -55,6 +59,10 @@ impl Debug for StrategyConfig {
                         .entries(unquoted_topic_names.clone())
                         .finish()
                 }),
+            )
+            .field(
+                "process_metrics_interval_seconds",
+                process_metrics_interval_seconds,
             )
             .finish()
     }
@@ -87,6 +95,7 @@ mod tests {
 strategy_name = "test_strategy"
 provider_address = "127.0.0.1:6666"
 demo = true
+process_metrics_interval_seconds = 10
 
 [topics.OKX]
 ETH-USDC-PERP = ["TRADE"]
@@ -110,6 +119,7 @@ ETH-USDC-PERP = ["TRADE"]
             config.provider_address
         );
         assert!(config.demo);
+        assert_eq!(10, config.process_metrics_interval_seconds.get());
         let okx_ether_perpetual_trade = test_topic(
             test_instrument(
                 Exchange::Okx,
@@ -139,6 +149,7 @@ ETH-USDC-PERP = ["TRADE"]
         OKX/ETH-USDC-SPOT/BBO,
         OKX/ETH-USDC-SPOT/TRADE,
     ],
+    process_metrics_interval_seconds: 10,
 }"#;
         assert_eq!(expected, format!("{config:#?}"));
     }
@@ -146,6 +157,15 @@ ETH-USDC-PERP = ["TRADE"]
     #[test]
     fn unknown_field_is_refused() {
         assert!(load(&format!("unknown = 1\n{MINIMAL_CONFIG}")).is_err());
+    }
+
+    #[test]
+    fn zero_process_metrics_interval_is_refused() {
+        let zero_interval = MINIMAL_CONFIG.replace(
+            "process_metrics_interval_seconds = 10",
+            "process_metrics_interval_seconds = 0",
+        );
+        assert!(load(&zero_interval).is_err());
     }
 
     #[test]

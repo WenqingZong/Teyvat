@@ -5,6 +5,7 @@
 strategy_name = "dummy_strategy"
 provider_address = "127.0.0.1:6666"                  # 127.0.0.1:<port> of market_data_provider.toml
 demo = true                                          # trade on the venues' demo accounts; must equal the provider's demo
+process_metrics_interval_seconds = 10                # how often to log the process's CPU, memory, threads and TCP traffic
 
 # Exchange, then instrument (BASE-QUOTE-SPOT or BASE-QUOTE-PERP), then market data types, as in the
 # provider's HTTP API.
