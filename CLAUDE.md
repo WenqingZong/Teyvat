@@ -32,7 +32,14 @@ Crates hold code only. Everything else lives at the top level:
 
 Because one package holds every binary, building any one of them (e.g. a deploy's `cargo build --release -p teyvat --bin phanes`) compiles every crate.
 
-The two machines: **Osaka** is an Oracle Cloud free AMD instance (1/8 OCPU, 1 GB RAM) with a static public IPv4, which runs the trading processes and never stores API keys on disk. **RedmiBook** is a home laptop (Kali Linux) without a public IP, reachable through a Cloudflare Tunnel, which runs Phanes.
+The machines (details in `architecture/overview.md`):
+
+- **Osaka**: Oracle Cloud free AMD instance in Osaka (1/8 OCPU, 1 GB RAM, 0.48 Gbps, static public IPv4 and static public IPv6, Ubuntu 26.04 x86_64). The **test environment** for verifying correctness; it runs the trading processes now and never stores API keys on disk.
+- **Tokyo**: Oracle Cloud free ARM instance in Tokyo (4 Neoverse-N1 cores, 24 GB RAM, 0.48 Gbps per core, static public IPv4 and static public IPv6, Ubuntu 26.04 **aarch64**). The **production environment**, not yet in use.
+- **Xian**: a cheap NAT cloud server in Xi'an, China, from Jiangsu Security Cloud (2 vCPU, 2 GB RAM, unknown bandwidth, 1000 GB traffic per month, static public IPv4, no public IPv6, Ubuntu 24.04 x86_64). The **benchmark machine**, only for the system's internal latency; not yet in use.
+- **RedmiBook**: a home laptop (Kali Linux) without a public IP, reachable through a Cloudflare Tunnel, which runs Phanes and, later, the ClickHouse database.
+
+Development happens in WSL2 (Ubuntu 24.04) on a separate Windows 11 laptop (Intel Core Ultra 5 235U).
 
 Private strategies will later join as a git submodule outside `crates/` (e.g. `strategies/`), listed in the workspace's `exclude` and keeping their own `Cargo.lock`, so their names and dependencies never appear in this repository's lockfile.
 

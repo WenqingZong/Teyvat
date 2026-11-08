@@ -11,8 +11,8 @@ cargo build --release --bins --examples
 | 二进制 | 说明 | 部署位置 |
 |---|---|---|
 | `phanes` | 天理法涅斯，系统总控：Gnosis 发放 API Key，Celestia 接收进程监控数据 | RedmiBook |
-| `market_data_provider` | 连接交易所，经共享内存向策略发布行情 | Osaka |
-| `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | Osaka |
+| `market_data_provider` | 连接交易所，经共享内存向策略发布行情 | Osaka（测试环境） |
+| `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | Osaka（测试环境） |
 | example `fetch` / `bark_push` / `celestia` | 测试工具：模拟 Osaka 取 key、发一条 Bark 推送、模拟进程监控 | 按需拷贝 |
 
 其余代码都是 `crates/` 下的库：

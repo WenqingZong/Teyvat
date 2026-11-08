@@ -2,12 +2,18 @@
 
 Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神。本文描述**已经实现**的整体结构；各组件的细节见同目录下的其他文档，尚未实现的功能见 [`plan/`](../plan/)。
 
-## 两台机器
+## 机器
 
-| 名称 | 硬件与网络 | 运行什么 |
+| 名称 | 硬件与网络 | 用途 |
 |---|---|---|
-| **Osaka** | Oracle Cloud 永久免费 AMD 实例（1/8 OCPU、1 GB 内存、50 GB 硬盘），静态公网 IPv4，位于大阪 | 交易相关进程：行情服务、策略。**磁盘上不存 API Key**，启动时向 Phanes 取。 |
-| **RedmiBook** | 个人笔记本（i7-8565U、8 GB、Kali Linux），家用 WiFi，无公网 IP，经 Cloudflare Tunnel 对外提供服务 | Phanes（总控） |
+| **Osaka** | Oracle Cloud 永久免费 AMD 实例，位于大阪：1/8 OCPU（AMD EPYC 7551，2 vCPU @ 2.0 GHz）、1 GB 内存、无 swap、44 GiB 硬盘，网络 0.48 Gbps，静态公网 IPv4, 静态公网IPv6，Ubuntu 26.04（x86_64） | **测试环境**，验证实现的正确性：现在运行行情服务和策略。**磁盘上不存 API Key**，启动时向 Phanes 取。 |
+| **Tokyo** | Oracle Cloud 永久免费 ARM 实例，位于东京：4 核 Neoverse-N1、24 GB 内存、无 swap、192 GiB 硬盘，网络每核 0.48 Gbps，静态公网IPv4, 静态公网IPv6, Ubuntu 26.04（**aarch64**，部署时要按 aarch64 编译） | **生产环境**，暂未启用。 |
+| **Xian** | 江苏安全云的廉价 NAT 云服务器，位于陕西西安：2 vCPU（Intel Xeon Platinum 8173M @ 2.0 GHz）、2 GB 内存，网速未知，每月流量上限 1000 GB，静态公网IPv4, 无IPv6, Ubuntu 24.04（x86_64） | **基准测试机**，只用于测量系统内部延迟，暂未启用。 |
+| **RedmiBook** | 个人笔记本（i7-8565U、8 GB、Kali Linux），家用 WiFi，无公网 IP，经 Cloudflare Tunnel 对外提供服务 | Phanes（总控），以及以后的 ClickHouse 数据库。 |
+
+代码在另一台笔记本（Intel Core Ultra 5 235U、Windows 11）的 WSL2（Ubuntu 24.04）里开发。
+
+下图是现在的部署：交易进程在 Osaka。
 
 ```text
 +-- Osaka ---------------------------------------------------+
