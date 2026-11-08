@@ -18,7 +18,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::{info, warn};
 use url::{ParseError, Url};
 
-use super::{Ack, Batch, CELESTIA_PATH, CelestiaError, Initiator, Session};
+use super::{Ack, Batch, CELESTIA_PATH, CelestiaError, Hello, Initiator, Session};
 use crate::backoff::exponential_backoff;
 use crate::noise::{StaticKey, deserialize_key};
 use crate::process_metrics::ProcessSample;
@@ -156,11 +156,12 @@ pub async fn run_celestia_reporter(
     } = config;
     let celestia_url =
         build_celestia_url(&celestia_client.url).expect("ReporterConfig::new accepted the URL");
-    let mut outbox = Outbox::new(first_sequence, buffered_batches, process_name);
+    let hello = Hello { process_name };
+    let mut outbox = Outbox::new(first_sequence, buffered_batches);
     let mut failures = 0;
     loop {
         let Some(connect_result) = take_samples_while(
-            connect(&celestia_url, &celestia_client),
+            connect(&celestia_url, &celestia_client, &hello),
             &mut sample_receiver,
             &mut outbox,
         )
@@ -221,17 +222,15 @@ pub struct Outbox {
     next_sequence: u64,
     pending: VecDeque<Batch>,
     capacity: usize,
-    process_name: String,
 }
 
 impl Outbox {
     /// Seed `first_sequence` from the clock so a restarted client never reuses a sequence.
-    pub fn new(first_sequence: u64, capacity: usize, process_name: String) -> Self {
+    pub fn new(first_sequence: u64, capacity: usize) -> Self {
         Self {
             next_sequence: first_sequence,
             pending: VecDeque::new(),
             capacity,
-            process_name,
         }
     }
 
@@ -244,7 +243,6 @@ impl Outbox {
         }
         self.pending.push_back(Batch {
             sequence: self.next_sequence,
-            process_name: self.process_name.clone(),
             samples,
         });
         self.next_sequence += 1;
@@ -287,16 +285,19 @@ fn build_celestia_url(base_url: &Url) -> Result<Url, CelestiaUrlError> {
     Ok(url)
 }
 
-/// `celestia_url` is the WebSocket URL of `/celestia` on Phanes, made from `celestia_client.url`.
+/// `celestia_url` is the WebSocket URL of `/celestia` on Phanes, made from `celestia_client.url`;
+/// `hello` names this process to Phanes.
 async fn connect(
     celestia_url: &Url,
     celestia_client: &CelestiaClientConfig,
+    hello: &Hello,
 ) -> Result<Connection, ClientError> {
     let (mut socket, _) = connect_async(celestia_url.as_str()).await?;
     let session = handshake(
         &mut socket,
         &celestia_client.client_celestia_private_key,
         &celestia_client.phanes_celestia_public_key,
+        hello,
     )
     .await?;
     Ok(Connection { socket, session })
@@ -384,8 +385,10 @@ async fn handshake(
     socket: &mut Socket,
     client_private_key: &SecretBox<StaticKey>,
     celestia_public_key: &SecretBox<StaticKey>,
+    hello: &Hello,
 ) -> Result<Session, ClientError> {
-    let (initiator, first_message) = Initiator::start(client_private_key, celestia_public_key)?;
+    let (initiator, first_message) =
+        Initiator::start(client_private_key, celestia_public_key, hello)?;
     socket.send(Message::Binary(first_message.into())).await?;
     let reply = timeout(HANDSHAKE_TIMEOUT, socket.next())
         .await
@@ -409,7 +412,7 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     use super::*;
-    use crate::celestia::Responder;
+    use crate::celestia::{Accepted, Responder};
     use crate::testing::{test_keypair, test_process_sample};
 
     const PROCESS_NAME: &str = "celestia_test";
@@ -451,7 +454,11 @@ mod tests {
         else {
             return;
         };
-        let (mut session, second_message) = responder.finish().expect("message 2 encrypts");
+        let Accepted {
+            mut session,
+            second_message,
+            ..
+        } = responder.finish().expect("the client sends a hello");
         if socket
             .send(Message::Binary(second_message.into()))
             .await
@@ -504,7 +511,10 @@ mod tests {
 
     async fn connect_to(celestia_client: &CelestiaClientConfig) -> Result<Connection, ClientError> {
         let celestia_url = build_celestia_url(&celestia_client.url).expect("the url is http");
-        connect(&celestia_url, celestia_client).await
+        let hello = Hello {
+            process_name: PROCESS_NAME.to_owned(),
+        };
+        connect(&celestia_url, celestia_client, &hello).await
     }
 
     #[test]
@@ -550,7 +560,7 @@ mod tests {
     #[tokio::test]
     async fn session_delivers_pending_and_new_batches() {
         let (url, client_private_key, celestia_public_key) = celestia_server().await;
-        let mut outbox = Outbox::new(10, 100, PROCESS_NAME.to_owned());
+        let mut outbox = Outbox::new(10, 100);
         outbox.push(vec![test_process_sample()]);
         let (sender, mut receiver) = channel(8);
         for _ in 0..2 {
@@ -592,7 +602,7 @@ mod tests {
     /// Samples go into the outbox while the reporter connects or backs off.
     #[tokio::test]
     async fn samples_wait_in_the_outbox_while_disconnected() {
-        let mut outbox = Outbox::new(0, 10, PROCESS_NAME.to_owned());
+        let mut outbox = Outbox::new(0, 10);
         let (sender, mut receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
         // The test holds `sender` until the end, so a sender stays alive while `monitor` is done.
         let monitor_sender = sender.clone();
@@ -669,7 +679,7 @@ mod tests {
 
     #[test]
     fn outbox_assigns_increasing_sequences_and_drops_acknowledged() {
-        let mut outbox = Outbox::new(100, 10, PROCESS_NAME.to_owned());
+        let mut outbox = Outbox::new(100, 10);
         assert!(outbox.is_empty());
         for _ in 0..3 {
             outbox.push(vec![test_process_sample()]);
@@ -683,7 +693,7 @@ mod tests {
 
     #[test]
     fn full_outbox_drops_oldest() {
-        let mut outbox = Outbox::new(0, 2, PROCESS_NAME.to_owned());
+        let mut outbox = Outbox::new(0, 2);
         for _ in 0..3 {
             outbox.push(Vec::new());
         }

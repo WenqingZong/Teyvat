@@ -60,6 +60,19 @@ pub enum Notification {
     Crashed {
         reason: String,
     },
+    /// A reporting process finished the Celestia handshake: `client` is the machine its key
+    /// belongs to, `process_name` the process its `Hello` named.
+    CelestiaConnected {
+        client: ClientName,
+        process_name: String,
+    },
+    /// The connection of a reporting process that `CelestiaConnected` announced ended, for any
+    /// reason: a clean close, a dropped link, an idle timeout or an error, which `reason` names.
+    CelestiaDisconnected {
+        client: ClientName,
+        process_name: String,
+        reason: String,
+    },
 }
 
 impl Notification {
@@ -131,6 +144,26 @@ impl Notification {
                 format!("原因: {reason}"),
                 ALARM_SOUND,
             ),
+            Self::CelestiaConnected {
+                client,
+                process_name,
+            } => (
+                "已连接至天空岛".to_owned(),
+                format_reporter(client, process_name),
+                DEFAULT_SOUND,
+            ),
+            Self::CelestiaDisconnected {
+                client,
+                process_name,
+                reason,
+            } => {
+                let reporter = format_reporter(client, process_name);
+                (
+                    "天空岛监控丢失".to_owned(),
+                    format!("{reporter}\n原因: {reason}"),
+                    DEFAULT_SOUND,
+                )
+            }
         };
         BarkMessage {
             title,
@@ -139,6 +172,11 @@ impl Notification {
             group: GROUP.to_owned(),
         }
     }
+}
+
+/// The body of the Celestia connection pushes: which machine, and which process on it.
+fn format_reporter(client: &ClientName, process_name: &str) -> String {
+    format!("魔神: {client}\n服务: {process_name}")
 }
 
 /// Pushes at most one `Unauthenticated` per interval and counts the rest.
@@ -320,6 +358,36 @@ mod tests {
         }
         .to_bark_message();
         assert!(message.body.contains("(缺失或无法解析)"));
+    }
+
+    #[test]
+    fn celestia_connected_message_names_client_and_process() {
+        let message = Notification::CelestiaConnected {
+            client: "Osaka".into(),
+            process_name: "market_data_provider".to_owned(),
+        }
+        .to_bark_message();
+        assert_eq!(message.title, "已连接至天空岛");
+        assert_eq!(message.body, "魔神: Osaka\n服务: market_data_provider");
+        assert_eq!(message.sound, DEFAULT_SOUND);
+        assert_eq!(message.group, GROUP);
+    }
+
+    #[test]
+    fn celestia_disconnected_message_names_client_process_and_reason() {
+        let message = Notification::CelestiaDisconnected {
+            client: "Osaka".into(),
+            process_name: "market_data_provider".to_owned(),
+            reason: "no message within 90s".to_owned(),
+        }
+        .to_bark_message();
+        assert_eq!(message.title, "天空岛监控丢失");
+        assert_eq!(
+            message.body,
+            "魔神: Osaka\n服务: market_data_provider\n原因: no message within 90s"
+        );
+        assert_eq!(message.sound, DEFAULT_SOUND);
+        assert_eq!(message.group, GROUP);
     }
 
     #[test]

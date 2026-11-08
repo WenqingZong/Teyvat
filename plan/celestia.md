@@ -98,7 +98,7 @@ Celestia 出任何错（断线、磁盘满、编码失败）都只能**降级**�
 - 路由：`GET /celestia` 升级为 WebSocket，挂在已有的 Cloudflare Tunnel 后面。
 - 流程：
   1. WebSocket 建立。
-  2. 两条消息完成 `Noise_IK` 握手（D1 的新密钥，prologue `celestia`），Phanes 按第 1 条消息里的公钥认出客户端。握手失败或认不出客户端直接断开，Bark 推送节流沿用 Gnosis 的做法。
+  2. 两条消息完成 `Noise_IK` 握手（D1 的新密钥，prologue `celestia`），Phanes 按第 1 条消息里的公钥认出客户端，再按它载荷里的 `Hello` 认出进程。握手失败或认不出客户端直接断开，Bark 推送节流沿用 Gnosis 的做法。
   3. 进入 transport 模式，每个 WS 帧是一个密文 `Batch`。
   4. 解密 → 校验 → 写入 ClickHouse → **写成功后**回加密的 `Ack { sequence }`。
 - 心跳：双方每 30 秒发一次 ping，防止 Cloudflare 回收空闲连接。断线后 Osaka 指数退避重连。
@@ -143,7 +143,7 @@ Bark 和 `Notifier` 在 `layline::bark`。
 1. **【已完成】** 改造为 workspace，把共用协议抽出来：Teyvat workspace，Noise 层和 Gnosis 协议在 `layline`。Gnosis 的行为不变，测试全过。
 2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/layline/src/celestia/mod.rs`。
 3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、每个客户端的 Celestia 公钥、密钥由部署脚本用 openssl 生成并写进 `phanes.toml`，均已完成；写 ClickHouse、去重未做。
-4. 写 `celestia-client`：采集、spool、发送、重连、限速补发。**【部分完成】** 采集是 `layline::process_metrics`（进程 runtime 上的 async 任务：CPU、内存分 anon/file/shmem、按线程的 CPU 和上下文切换、fd 数、TCP 收发，网络用 netlink `sock_diag` 进程口径，取代原计划的 systemd `IPAccounting`；间隔来自各服务配置的 `process_metrics_interval_seconds`）；发送是 `layline::celestia::client`（async 任务、单一内存 Outbox、断线期间照常收样本、重连补发；`[celestia_client]` 配置表，整台机器共用一把 Celestia 密钥，`Batch` 带 `process_name` 区分进程），已接入 market_data_provider 和 dummy_strategy。spool（磁盘缓存）和限速补发未做。
+4. 写 `celestia-client`：采集、spool、发送、重连、限速补发。**【部分完成】** 采集是 `layline::process_metrics`（进程 runtime 上的 async 任务：CPU、内存分 anon/file/shmem、按线程的 CPU 和上下文切换、fd 数、TCP 收发，网络用 netlink `sock_diag` 进程口径，取代原计划的 systemd `IPAccounting`；间隔来自各服务配置的 `process_metrics_interval_seconds`）；发送是 `layline::celestia::client`（async 任务、单一内存 Outbox、断线期间照常收样本、重连补发；`[celestia_client]` 配置表，整台机器共用一把 Celestia 密钥，握手第 1 帧的 `Hello` 带 `process_name` 区分进程），已接入 market_data_provider 和 dummy_strategy。spool（磁盘缓存）和限速补发未做。
 5. **【部分完成】** 写 `examples/`：Celestia 冒烟测试（`examples/celestia.rs`：监控自己并经 `layline::celestia::client` 上报）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
 6. 部署：ClickHouse、Grafana、systemd unit，扩展部署脚本，配置 cloudflared 路由和 Cloudflare Access。
 7. Grafana 看板（CPU、内存、网络、内部指标），配置以 JSON 形式入库。

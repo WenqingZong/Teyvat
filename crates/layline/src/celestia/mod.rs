@@ -1,10 +1,11 @@
 //! Celestia wire protocol, shared by Phanes (RedmiBook) and its client (Osaka).
 //!
-//! One WebSocket per connection. Binary frames 1 and 2 are the `Noise_IK` handshake with
-//! empty payloads: frame 1 carries the client's public key, which Phanes checks before it
-//! answers with frame 2. Every later frame is a transport message carrying a postcard-encoded
-//! [`Batch`] (client to server) or [`Ack`] (server to client). Phanes runs the server side;
-//! [`client`] is the client every reporting process runs.
+//! One WebSocket per reporting process. Binary frames 1 and 2 are the `Noise_IK` handshake:
+//! frame 1 carries the client's public key and a postcard-encoded [`Hello`] naming the process,
+//! which Phanes checks before it answers with frame 2, whose payload is empty. Every later frame
+//! is a transport message carrying a postcard-encoded [`Batch`] (client to server) or [`Ack`]
+//! (server to client). Phanes runs the server side; [`client`] is the client every reporting
+//! process runs.
 
 pub mod client;
 
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use snow::{Error as NoiseError, HandshakeState, TransportState};
 
 use crate::noise::{
-    StaticKey, build_initiator, build_responder, decrypt, encrypt, read_first_message,
+    SecretBuffer, StaticKey, build_initiator, build_responder, decrypt, encrypt, read_first_message,
 };
 use crate::process_metrics::ProcessSample;
 
@@ -23,14 +24,18 @@ use crate::process_metrics::ProcessSample;
 pub const CELESTIA_PROLOGUE: &[u8] = b"celestia";
 pub const CELESTIA_PATH: &str = "/celestia";
 
+/// The payload of handshake frame 1: which process of the client is connecting, such as
+/// `market_data_provider`. The Noise key authenticates the client, a machine, which all its
+/// processes share; the name only tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hello {
+    pub process_name: String,
+}
+
 /// `sequence` increases across reconnects and restarts, so the server can deduplicate resends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub sequence: u64,
-    /// Which process of the client sent it, such as `market_data_provider`. The Noise key
-    /// authenticates the client, a machine, which all its processes share; the name only tells
-    /// them apart.
-    pub process_name: String,
     pub samples: Vec<ProcessSample>,
 }
 
@@ -55,10 +60,11 @@ impl Initiator {
     pub fn start(
         client_private_key: &SecretBox<StaticKey>,
         celestia_public_key: &SecretBox<StaticKey>,
+        hello: &Hello,
     ) -> Result<(Self, Vec<u8>), CelestiaError> {
         let mut state =
             build_initiator(CELESTIA_PROLOGUE, client_private_key, celestia_public_key)?;
-        let first_message = encrypt(&mut state, &[])?;
+        let first_message = encrypt(&mut state, &to_stdvec(hello)?)?;
         Ok((Self(state), first_message))
     }
 
@@ -72,6 +78,16 @@ impl Initiator {
 pub struct Responder {
     state: HandshakeState,
     client_public_key: SecretBox<StaticKey>,
+    /// Decoded only by `finish`, so nothing of an unidentified client's payload is used.
+    hello_payload: SecretBuffer,
+}
+
+/// What `Responder::finish` yields once the caller has identified the client.
+pub struct Accepted {
+    pub session: Session,
+    pub hello: Hello,
+    /// Completes the client's handshake.
+    pub second_message: Vec<u8>,
 }
 
 impl Responder {
@@ -83,10 +99,11 @@ impl Responder {
         first_message: &[u8],
     ) -> Result<Self, CelestiaError> {
         let mut state = build_responder(CELESTIA_PROLOGUE, celestia_private_key)?;
-        let (client_public_key, _empty_payload) = read_first_message(&mut state, first_message)?;
+        let (client_public_key, hello_payload) = read_first_message(&mut state, first_message)?;
         Ok(Self {
             state,
             client_public_key,
+            hello_payload,
         })
     }
 
@@ -95,10 +112,16 @@ impl Responder {
         &self.client_public_key
     }
 
-    /// The established session, and the second message that completes the client's handshake.
-    pub fn finish(mut self) -> Result<(Session, Vec<u8>), CelestiaError> {
+    /// Decodes the client's `Hello` and answers it. Fails with `CelestiaError::Payload` on a
+    /// first message whose payload is not a `Hello`.
+    pub fn finish(mut self) -> Result<Accepted, CelestiaError> {
+        let hello = from_bytes(self.hello_payload.expose_secret())?;
         let second_message = encrypt(&mut self.state, &[])?;
-        Ok((Session(self.state.into_transport_mode()?), second_message))
+        Ok(Accepted {
+            session: Session(self.state.into_transport_mode()?),
+            hello,
+            second_message,
+        })
     }
 }
 
@@ -129,18 +152,32 @@ mod tests {
     use crate::testing::{test_keypair, test_process_sample};
     use crate::time::get_current_timestamp_nanoseconds;
 
+    const PROCESS_NAME: &str = "market_data_provider";
+
+    fn test_hello() -> Hello {
+        Hello {
+            process_name: PROCESS_NAME.to_owned(),
+        }
+    }
+
     fn connected_sessions() -> (Session, Session) {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, client_public_key) = test_keypair();
         let (initiator, first_message) =
-            Initiator::start(&client_private_key, &celestia_public_key).expect("client starts");
+            Initiator::start(&client_private_key, &celestia_public_key, &test_hello())
+                .expect("client starts");
         let responder = Responder::read_first_message(&celestia_private_key, &first_message)
             .expect("server reads the first message");
         assert_eq!(
             client_public_key.expose_secret(),
             responder.client_public_key().expose_secret()
         );
-        let (server_session, second_message) = responder.finish().expect("server answers");
+        let Accepted {
+            session: server_session,
+            hello,
+            second_message,
+        } = responder.finish().expect("server answers");
+        assert_eq!(hello, test_hello());
         let client_session = initiator
             .finish(&second_message)
             .expect("client finishes handshake");
@@ -152,7 +189,6 @@ mod tests {
         let (mut client, mut server) = connected_sessions();
         let batch = Batch {
             sequence: 7,
-            process_name: "market_data_provider".to_owned(),
             samples: vec![test_process_sample()],
         };
         let ciphertext = client.encrypt(&batch).expect("client encrypts batch");
@@ -179,8 +215,22 @@ mod tests {
         let (impostor_private_key, _) = test_keypair();
         let (client_private_key, _) = test_keypair();
         let (_, first_message) =
-            Initiator::start(&client_private_key, &celestia_public_key).expect("client starts");
+            Initiator::start(&client_private_key, &celestia_public_key, &test_hello())
+                .expect("client starts");
         assert!(Responder::read_first_message(&impostor_private_key, &first_message).is_err());
+    }
+
+    #[test]
+    fn first_message_without_a_hello_fails_to_finish() {
+        let (celestia_private_key, celestia_public_key) = test_keypair();
+        let (client_private_key, _) = test_keypair();
+        let mut state =
+            build_initiator(CELESTIA_PROLOGUE, &client_private_key, &celestia_public_key)
+                .expect("initiator builds");
+        let first_message = encrypt(&mut state, &[]).expect("empty message 1 encrypts");
+        let responder = Responder::read_first_message(&celestia_private_key, &first_message)
+            .expect("the handshake itself is valid");
+        assert!(matches!(responder.finish(), Err(CelestiaError::Payload(_))));
     }
 
     #[test]
