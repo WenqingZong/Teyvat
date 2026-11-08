@@ -24,8 +24,7 @@ install_service() {
     install_binary_and_config strategy.example.toml
     copy_celestia_table
     install_unit
-    log "restarting $SERVICE"
-    sudo systemctl restart "$SERVICE"
+    restart_service
     check_running
 }
 

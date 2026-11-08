@@ -27,8 +27,7 @@ install_service() {
     grep -q '<API ' "$CONFIG_FILE" && missing+=("the keys in the [gnoses.<gnosis_id>] tables of $CONFIG_FILE")
     grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
     if report_missing "${missing[@]}"; then
-        log "restarting phanes"
-        sudo systemctl restart phanes
+        restart_service
         check_health
     fi
     print_public_keys

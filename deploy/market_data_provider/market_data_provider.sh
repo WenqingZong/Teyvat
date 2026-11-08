@@ -34,8 +34,7 @@ install_service() {
     grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
     grep -q '^demo *=' "$CONFIG_FILE" || missing+=("demo = true|false in $CONFIG_FILE (see deploy/market_data_provider/market_data_provider.example.toml)")
     if report_missing "${missing[@]}"; then
-        log "restarting $SERVICE"
-        sudo systemctl restart "$SERVICE"
+        restart_service
         check_health
     fi
     print_phanes_instructions

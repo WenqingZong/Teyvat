@@ -9,12 +9,16 @@
 | `phanes/` | Phanes 的部署脚本 `phanes.sh`、systemd unit `phanes.service`、配置模板 `phanes.example.toml`（RedmiBook） |
 | `market_data_provider/` | 行情服务的部署脚本 `market_data_provider.sh`、systemd unit `market_data_provider.service`、配置模板 `market_data_provider.example.toml`（Osaka） |
 | `dummy_strategy/` | 占位策略的部署脚本 `dummy_strategy.sh`、systemd unit `dummy_strategy.service`、配置模板 `strategy.example.toml`（Osaka，和行情服务同机） |
-| `common.sh` | 三个部署脚本共用的函数：日志和确认、编译安装二进制、准备配置目录、systemd unit、卸载、在配置里生成 X25519 私钥并推导公钥、`install` / `uninstall` / `reinstall` 分发 |
+| `common.sh` | 三个部署脚本共用的函数：日志和确认、编译安装二进制、准备配置目录、systemd unit 和 journal 上限、重启（先 `reset-failed`）、卸载、在配置里生成 X25519 私钥并推导公钥、`install` / `uninstall` / `reinstall` 分发 |
 | `clickhouse/` | RedmiBook 上 ClickHouse 的手动安装记录 [`clickhouse.md`](clickhouse/clickhouse.md)（尚未接入代码，见 [`plan/database.md`](../plan/database.md)） |
 
 **部署前先在目标机器上执行 `uname -r`，确认 Linux 内核 ≥ 4.2**：每个服务的进程监控（`layline::process_metrics`）从 `tcp_info` 读取 TCP 收发字节数，这两个字段是 4.2 加入的。内核过旧时服务照常运行，但每个监控间隔都会打一条 warn，说明 `tcp_info` 没有字节计数，监控数据缺失。
 
-所有命令都在 **Teyvat 仓库根目录**执行。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），
+所有命令都在 **Teyvat 仓库根目录**执行。
+
+每个服务的 systemd unit 都限制 600 秒内最多启动 5 次（`StartLimitIntervalSec=600`、`StartLimitBurst=5`）。配置有误时服务会连续启动失败，次数用满后 systemd 拒绝再启动（`Start request repeated too quickly`），修好配置也一样。各脚本的 `install` 在重启前会先 `reset-failed`，所以修好配置后再跑一次 `install` 即可；手动重启则要先 `sudo systemctl reset-failed <服务>`，再 `sudo systemctl restart <服务>`。
+
+每个服务的日志写在自己的 journal namespace 里（unit 的 `LogNamespace=<服务>`），由一个独立的 journald 实例管理，它只读 `/etc/systemd/journald@<服务>.conf`，不读 `/etc/systemd/journald.conf`。`install` 会写这个文件：每个服务的 journal 最多 20 MB（`SystemMaxUse`、`RuntimeMaxUse`），最多保留 7 天（`MaxRetentionSec`），超出时 journald 先删最老的日志文件；`uninstall` 会删掉它。查看占用：`journalctl --namespace=<服务> --disk-usage`。部署脚本只编译自己的二进制（`cargo build --release -p teyvat --bin <名字>`），
 但因为所有二进制都在同一个 package 里，构建时会编译全部 crate。
 
 ## Phanes（RedmiBook）
@@ -26,6 +30,7 @@
 | `/usr/local/bin/phanes` | 二进制 |
 | `/etc/phanes/phanes.toml` | 配置（600；监听地址、Gnosis 和 Celestia 私钥、每个客户端的 IP、两个公钥和允许的 gnosis、待发放的 gnosis、Bark 凭据） |
 | `/etc/systemd/system/phanes.service` | systemd unit |
+| `/etc/systemd/journald@phanes.conf` | Phanes 的 journal 上限（20 MB、7 天） |
 
 ### RedmiBook 部署
 

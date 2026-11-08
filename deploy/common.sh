@@ -1,9 +1,17 @@
 # Sourced by every deploy script after it sets SERVICE, BINARY, CONFIG_DIRECTORY and CONFIG_FILE:
-# logging, prompts, building and installing the binary, systemd, removal, and X25519 keys in configs.
+# logging, prompts, building and installing the binary, systemd and journal limits, removal, and X25519
+# keys in configs.
 
 set -euo pipefail
 
 readonly UNIT_FILE=/etc/systemd/system/$SERVICE.service
+# The unit's LogNamespace=$SERVICE gives the service a journald instance of its own, which reads only
+# this file: /etc/systemd/journald.conf does not apply to it.
+readonly JOURNALD_CONFIG_FILE=/etc/systemd/journald@$SERVICE.conf
+# Each service keeps at most this much journal, on disk and in memory, and nothing older than a week;
+# journald deletes the oldest journal files first.
+readonly JOURNAL_MAX_USE=20M
+readonly JOURNAL_MAX_RETENTION=7day
 # A raw X25519 key, private or public, is the last 32 bytes of its DER encoding; a private key's DER is
 # this PKCS#8 prefix followed by the raw key.
 readonly X25519_KEY_BYTES=32
@@ -40,11 +48,23 @@ install_binary_and_config() {
     [[ -f $CONFIG_FILE ]] || install -m 600 "deploy/$SERVICE/$1" "$CONFIG_FILE"
 }
 
+# Installs the unit and the limits of the service's journal.
 install_unit() {
     log "installing systemd unit"
     sed "s/<your user>/$USER/" "deploy/$SERVICE/$SERVICE.service" | sudo tee "$UNIT_FILE" >/dev/null
     sudo systemctl daemon-reload
     sudo systemctl enable --quiet "$SERVICE"
+    install_journal_limits
+}
+
+install_journal_limits() {
+    log "limiting the $SERVICE journal to $JOURNAL_MAX_USE and $JOURNAL_MAX_RETENTION"
+    printf '[Journal]\nSystemMaxUse=%s\nRuntimeMaxUse=%s\nMaxRetentionSec=%s\n' \
+        "$JOURNAL_MAX_USE" "$JOURNAL_MAX_USE" "$JOURNAL_MAX_RETENTION" \
+        | sudo tee "$JOURNALD_CONFIG_FILE" >/dev/null
+    # A running journald instance reads its config only when it starts; one that is not running
+    # starts with the service and reads it then.
+    sudo systemctl try-restart "systemd-journald@$SERVICE.service"
 }
 
 # Lists the placeholders still in the config, given as arguments, and fails if there are any.
@@ -52,11 +72,21 @@ report_missing() {
     (($# > 0)) || return 0
     warn "not starting yet; fill in:"
     printf '     - %s\n' "$@" >&2
-    warn "then run: sudo systemctl restart $SERVICE"
+    warn "then run install again"
     return 1
 }
 
-# Stops and removes the service: its unit, its binary, the paths given as arguments and its journal logs.
+# Restarts the service, clearing its failed state first: after StartLimitBurst failed starts within
+# StartLimitIntervalSec (a bad config, say), systemd refuses every start until reset-failed, even once
+# the cause is fixed.
+restart_service() {
+    log "restarting $SERVICE"
+    sudo systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+    sudo systemctl restart "$SERVICE"
+}
+
+# Stops and removes the service: its unit, its binary, the paths given as arguments, and its journal
+# logs and limits.
 remove_service() {
     if systemctl list-unit-files "$SERVICE.service" >/dev/null 2>&1; then
         log "stopping and disabling $SERVICE"
@@ -72,6 +102,7 @@ remove_service() {
     sudo systemctl stop "systemd-journald@$SERVICE.service" "systemd-journald@$SERVICE.socket" \
         "systemd-journald-varlink@$SERVICE.socket" >/dev/null 2>&1 || true
     sudo sh -c "rm -rf /var/log/journal/*.$SERVICE /run/log/journal/*.$SERVICE"
+    sudo rm -f "$JOURNALD_CONFIG_FILE"
 }
 
 # Fills the placeholder $1 of the config with a fresh X25519 private key in base64. A filled-in key is
