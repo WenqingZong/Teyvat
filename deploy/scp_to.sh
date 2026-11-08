@@ -39,10 +39,10 @@ done
 
 printf '\nsucceeded: %d\n' "${#succeeded_hosts[@]}"
 for host in "${succeeded_hosts[@]}"; do
-    printf '  %s\n' "$host"
+    printf '    %s\n' "$host"
 done
 printf 'failed: %d\n' "${#failed_hosts[@]}"
 for host in "${failed_hosts[@]}"; do
-    printf '  %s\n' "$host"
+    printf '    %s\n' "$host"
 done
 ((${#failed_hosts[@]} == 0))
