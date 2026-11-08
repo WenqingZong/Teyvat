@@ -91,13 +91,13 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::celestia::proto::CELESTIA_PATH;
     use crate::client_filter::CLIENT_IP_HEADER;
     use crate::clients::tests::test_client;
     use crate::clients::{ClientName, Clients};
     use crate::config::DEFAULT_MAX_CLOCK_SKEW_SECONDS;
     use crate::gnosis::config::Gnoses;
     use crate::notify::Notification;
+    use layline::celestia::CELESTIA_PATH;
     use layline::gnosis::GNOSIS_PATH;
     use layline::testing::test_keypair;
 

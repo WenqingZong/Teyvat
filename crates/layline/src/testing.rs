@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{Permissions, read_dir, read_to_string, set_permissions, write};
 use std::iter::{once, repeat_n};
+use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,7 @@ use rust_decimal::dec;
 use secrecy::SecretBox;
 
 use crate::noise::{StaticKey, generate_keypair};
+use crate::process_metrics::{MemoryUsage, ProcessSample, ThreadSample};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{
     Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Side, StrategyName,
@@ -45,6 +47,41 @@ pub fn test_subscription(
     Subscription {
         topic,
         path: topic.ring_key().file_path(root_directory, strategy_name),
+    }
+}
+
+/// A two-thread sample with every field set, as Celestia sends it.
+pub fn test_process_sample() -> ProcessSample {
+    ProcessSample {
+        timestamp_seconds: NonZeroU32::new(1_800_000_000).expect("not zero"),
+        cpu_percent: 12.5,
+        memory: MemoryUsage {
+            anonymous_kibibytes: 4096,
+            file_kibibytes: 8192,
+            shared_memory_kibibytes: 1024,
+        },
+        open_file_descriptors: 12,
+        voluntary_context_switches_per_second: 3.5,
+        involuntary_context_switches_per_second: 0.5,
+        tcp_received_bytes_per_second: 1024.0,
+        tcp_sent_bytes_per_second: 512.0,
+        threads: vec![
+            ThreadSample {
+                thread_id: 100,
+                name: "main".to_owned(),
+                cpu_percent: 12.0,
+                voluntary_context_switches_per_second: 3.0,
+                involuntary_context_switches_per_second: 0.5,
+            },
+            ThreadSample {
+                thread_id: 101,
+                name: "process_monitor".to_owned(),
+                cpu_percent: 0.5,
+                voluntary_context_switches_per_second: 0.5,
+                involuntary_context_switches_per_second: 0.0,
+            },
+        ],
+        sampling_duration_microseconds: 2000,
     }
 }
 

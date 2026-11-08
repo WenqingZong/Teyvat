@@ -2,7 +2,7 @@ mod alert;
 pub mod config;
 mod exchanges;
 pub mod exit_reason;
-mod phanes_client;
+mod gnosis_client;
 pub mod server;
 mod time;
 mod utils;

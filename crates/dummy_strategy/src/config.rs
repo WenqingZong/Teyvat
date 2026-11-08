@@ -10,6 +10,7 @@ use anyhow::{Result, ensure};
 use serde::Deserialize;
 use tracing::info;
 
+use layline::celestia::client::CelestiaClientConfig;
 use layline::provider_api::topic_set;
 use layline::secrets::read_secret_toml;
 use layline::types::{StrategyName, Topic};
@@ -28,6 +29,8 @@ pub struct StrategyConfig {
     pub topics: HashSet<Topic>,
     /// How often the process logs its own CPU, memory, threads and TCP traffic.
     pub process_metrics_interval_seconds: NonZeroU64,
+    /// Where the process metrics go: this machine's Celestia key, the same as the provider's.
+    pub celestia_client: CelestiaClientConfig,
 }
 
 /// Written by hand so each topic prints on one line as its `Display`, sorted by it, rather than
@@ -40,6 +43,7 @@ impl Debug for StrategyConfig {
             demo,
             topics,
             process_metrics_interval_seconds,
+            celestia_client,
         } = self;
         let mut topic_names: Vec<String> = topics.iter().map(Topic::to_string).collect();
         topic_names.sort();
@@ -64,6 +68,7 @@ impl Debug for StrategyConfig {
                 "process_metrics_interval_seconds",
                 process_metrics_interval_seconds,
             )
+            .field("celestia_client", celestia_client)
             .finish()
     }
 }
@@ -96,6 +101,11 @@ strategy_name = "test_strategy"
 provider_address = "127.0.0.1:6666"
 demo = true
 process_metrics_interval_seconds = 10
+
+[celestia_client]
+url = "https://phanes.example"
+client_celestia_private_key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+phanes_celestia_public_key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 
 [topics.OKX]
 ETH-USDC-PERP = ["TRADE"]
@@ -150,6 +160,11 @@ ETH-USDC-PERP = ["TRADE"]
         OKX/ETH-USDC-SPOT/TRADE,
     ],
     process_metrics_interval_seconds: 10,
+    celestia_client: CelestiaClientConfig {
+        url: https://phanes.example/,
+        client_celestia_private_key: SecretBox<[u8; 32]>([REDACTED]),
+        phanes_celestia_public_key: SecretBox<[u8; 32]>([REDACTED]),
+    },
 }"#;
         assert_eq!(expected, format!("{config:#?}"));
     }

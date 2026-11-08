@@ -27,12 +27,8 @@ tracing.workspace = true
 tracing-appender.workspace = true
 
 [dev-dependencies]
-axum = { workspace = true, features = ["ws"] }
-futures.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["fs", "process"] }
-tokio-tungstenite.workspace = true
 url.workspace = true
 
 [[bin]]
@@ -57,11 +53,10 @@ path = "examples/fetch.rs"
 name = "bark_push"
 path = "examples/bark_push.rs"
 
-# Osaka-side process monitor simulator; its client and sampler modules carry their own tests.
+# Celestia smoke test: monitors itself and reports to Phanes, as the services do.
 [[example]]
 name = "celestia"
-path = "examples/celestia/main.rs"
-test = true
+path = "examples/celestia.rs"
 
 [lints]
 workspace = true

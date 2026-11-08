@@ -94,7 +94,7 @@ fn spawn_exchange_worker(
                 BinanceConnector::new(
                     demo,
                     |_| TungsteniteClient::default(),
-                    context.phanes_client,
+                    context.gnosis_client,
                     context.notifier,
                     RealClock,
                 )

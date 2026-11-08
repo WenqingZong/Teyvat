@@ -54,7 +54,7 @@ deploy/phanes/phanes.sh install
 - `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）。
 - 每个客户端一张 `[clients.<名字>]` 表（模板里是 `[clients.Osaka]`）：
   - `ipv4` 必填，`ipv6` 可选：Cloudflare 看到的公网 IP（Osaka 有 IPv6，访问 Cloudflare 时可能走 IPv6，记得填上）。IP 无效或同一 IP 出现在两个客户端下，Phanes 拒绝启动。
-  - `client_gnosis_service_public_key`、`client_celestia_service_public_key`：该客户端的 Gnosis 和 Celestia 公钥（见下文 Osaka 第 1 步）。Phanes 按公钥认出客户端，所以同一个服务里两个客户端的公钥不能相同；公钥解不出来，Phanes 拒绝启动。
+  - `client_gnosis_service_public_key`、`client_celestia_service_public_key`：该客户端的 Gnosis 和 Celestia 公钥：交易机器上由 `deploy/market_data_provider/market_data_provider.sh install` 打印（Celestia 公钥是整台机器的，行情服务和策略共用）；只跑 example 的机器见下文 Osaka 第 1 步。Phanes 按公钥认出客户端，所以同一个服务里两个客户端的公钥不能相同；公钥解不出来，Phanes 拒绝启动。
   - `allowed_gnosis_ids`：该客户端能取的 gnosis，只能是 `layline::gnosis::GnosisId` 里的 id（`binance_real`、`binance_demo`、`binance_sbe_real`、`binance_sbe_demo`），可以为空；写错 id，或引用了下面没有表的 gnosis，Phanes 拒绝启动。
 - 每个要发放的 gnosis 一张 `[gnoses.<gnosis_id>]` 表，字段就是该 key 类型的字段：交易 key（`binance_real`、`binance_demo`）要 `api_key` 和 `secret_key`，SBE key（`binance_sbe_real`、`binance_sbe_demo`）只要 `api_key`。缺字段、多字段、未知 id，Phanes 都拒绝启动，报错只给行号和字段名，不会把 key 打进日志。
 - `[bark]` 的 `device_key`，以及 `encryption_key`（32 位，Bark App 里设为 AES-256-CBC）。
@@ -104,7 +104,7 @@ Osaka 每次重启都要取 key，RedmiBook 必须在线：
 
 #### 1. 生成客户端密钥（只需 openssl）
 
-Gnosis 和 Celestia 各一对：
+只给 `examples/` 用；部署了行情服务的机器不需要这一步，它的密钥由行情服务的安装生成（`celestia` example 也可以直接用那把 Celestia 私钥）。Gnosis 和 Celestia 各一对：
 
 ```bash
 sudo mkdir -p /etc/phanes-client && sudo chown $USER: /etc/phanes-client && chmod 700 /etc/phanes-client
@@ -156,8 +156,8 @@ scp target/release/examples/fetch osaka:~/
 
 #### 进程监控（简化版）
 
-`examples/celestia/` 模拟 Osaka 端（`client.rs` 发送与补发、`sampler.rs` 采样）：每秒采样一个进程，发给 Phanes。
-没收到 ack 的数据在内存里最多缓存 1 小时，断线后指数退避重连（1s → 60s）并补发。协议和实现见 [`architecture/phanes.md`](../architecture/phanes.md)。
+`examples/celestia.rs` 是冒烟测试：不用部署任何服务，就能验证 Osaka 经 Cloudflare 到 Phanes Celestia 的整条链路。它像服务一样监控自己，每个间隔把样本发给 Phanes。
+断线时样本在内存里最多缓存 1 小时，指数退避重连（1s → 60s）后补发。协议和实现见 [`architecture/phanes.md`](../architecture/phanes.md)。
 
 ```bash
 cargo build --release --example celestia
@@ -166,15 +166,13 @@ scp target/release/examples/celestia osaka:~/
 
 ```bash
 ./celestia --url https://phanes.wenqing.dev \
-  --client-private-key-file /etc/phanes-client/celestia_client.key \
-  --celestia-public-key "<Phanes 的 Celestia 公钥>" --systemd-unit my_app.service   # 或 --process-id <pid>
+  --client-private-key-file celestia_client.key \
+  --celestia-public-key "<Phanes 的 Celestia 公钥>"   # 可选：--process-name（默认 celestia_example）、--process-metrics-interval-seconds（默认 10）
 ```
 
-- `--systemd-unit`：CPU、内存、网络都有。网络按进程口径统计，需要该 unit 开 `IPAccounting=yes`，否则网络为 0。
-- `--process-id`：网络为 0。
-- 两个参数必须且只能给一个。
+`celestia_client.key` 存这台机器的 base64 Celestia 私钥（行情服务配置里 `[celestia_client]` 的 `client_celestia_private_key`，或第 1 步生成的），权限必须是 600。
 
-RedmiBook 的日志里每秒一行 `Osaka #<sequence>: time .. ms, cpu ..%, memory .. MiB, received .. B/s, sent .. B/s`。
+RedmiBook 的日志里每个间隔两行，以 `Osaka/celestia_example #<sequence>` 开头：第一行是进程指标和样本时间（Unix 秒），第二行是各线程的指标。
 握手失败（公钥不配对）或某帧解密失败（伪造 / 篡改）属于安全事件：直接断开，手机收到"检测到未授权的魔神: 未授权的天空岛监控连接"（10 分钟节流）。
 断线、长时间没数据等不推送，只记日志。
 
@@ -191,16 +189,17 @@ deploy/market_data_provider/market_data_provider.sh install
 ```
 
 首次运行会：编译 release 二进制、安装 systemd unit、创建 `/etc/market_data_provider/`（从
-`deploy/market_data_provider/market_data_provider.example.toml` 复制的配置，以及用 openssl 生成的 Gnosis 客户端密钥：
-私钥直接填进配置的 `client_gnosis_private_key`；公钥不存文件，安装时由脚本从私钥推出并打印，只用来交给 Phanes，行情服务运行时用不到），然后停下，列出
+`deploy/market_data_provider/market_data_provider.example.toml` 复制的配置，以及用 openssl 生成的 Gnosis 客户端密钥和**这台机器的** Celestia 客户端密钥：
+私钥直接填进配置的 `client_gnosis_private_key` 和 `[celestia_client]` 的 `client_celestia_private_key`；公钥不存文件，安装时由脚本从私钥推出并打印，只用来交给 Phanes，行情服务运行时用不到），然后停下，列出
 `/etc/market_data_provider/market_data_provider.toml` 里待填的占位符：
 
-- `[phanes_client]` 的 `url` 和 `phanes_gnosis_public_key`（即 Phanes 主机上 `deploy/phanes/phanes.sh install` 打印的 Gnosis 公钥）；
+- `[gnosis_client]` 的 `url` 和 `phanes_gnosis_public_key`（即 Phanes 主机上 `deploy/phanes/phanes.sh install` 打印的 Gnosis 公钥）；
+- `[celestia_client]` 的 `url`（同上）和 `phanes_celestia_public_key`（同一处打印的 Celestia 公钥）。进程监控经它上报给 Phanes，进程名是 `market_data_provider`；这张表也是这台机器上每个策略的上报配置，策略的安装从这里拷走；
 - `[bark]` 凭据（release 构建缺少它会拒绝启动）；
 - `demo`：`false` 为实盘行情，`true` 为交易所的 demo 行情；
 - `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）。
 
-在 Phanes 主机上，把安装时打印的公钥填进 `/etc/phanes/phanes.toml` 里这台机器的 `[clients.<名字>]` 表的 `client_gnosis_service_public_key`，
+在 Phanes 主机上，把安装时打印的两个公钥填进 `/etc/phanes/phanes.toml` 里这台机器的 `[clients.<名字>]` 表的 `client_gnosis_service_public_key` 和 `client_celestia_service_public_key`，
 确认它的 `allowed_gnosis_ids` 包含 `binance_sbe_real`（实盘）或 `binance_sbe_demo`（demo），且 `[gnoses]` 里有这张表，然后重启 Phanes。
 再跑一次 `deploy/market_data_provider/market_data_provider.sh install`：这次会启动服务并检查 `/health`。
 
@@ -210,7 +209,7 @@ deploy/market_data_provider/market_data_provider.sh install
 | 看日志 | `journalctl --namespace=market_data_provider -u market_data_provider -f` |
 | 状态 | `systemctl status market_data_provider`、`curl localhost:6666/subscribed` |
 | 彻底删除 | `deploy/market_data_provider/market_data_provider.sh uninstall`（先停掉策略：它会删除 ring 文件） |
-| 从零重装 | `deploy/market_data_provider/market_data_provider.sh reinstall`（**会生成新的 Gnosis 客户端密钥**，Phanes 要换公钥） |
+| 从零重装 | `deploy/market_data_provider/market_data_provider.sh reinstall`（**会生成新的 Gnosis 和 Celestia 客户端密钥**，Phanes 要换两个公钥，每个策略都要再 `install` 一次以拷走新的 Celestia 密钥） |
 
 安装时会为该用户开启 linger：否则 systemd-logind 会在该用户最后一个 SSH 会话结束时删掉其 `/dev/shm` 下的 ring 文件，
 而策略还在读它们。
@@ -224,14 +223,15 @@ deploy/dummy_strategy/dummy_strategy.sh install
 ```
 
 脚本会编译 release 二进制、安装 systemd unit，并把 `deploy/dummy_strategy/strategy.example.toml` 复制为
-`/etc/dummy_strategy/strategy.toml`（600，已有则保留），然后重启服务，并在几秒后确认它仍在运行。配置无效时进程会退出，日志里有原因。
+`/etc/dummy_strategy/strategy.toml`（600，已有则保留），**每次**都从行情服务的配置拷来 `[celestia_client]` 的设置（所以必须先装好行情服务、填好它的 `[celestia_client]`），然后重启服务，并在几秒后确认它仍在运行。配置无效时进程会退出，日志里有原因。
 
 `strategy.toml` 是所有策略共用的格式：
 
 - `strategy_name`：策略名，也是它在 `/dev/shm/market_data_provider/` 下的 ring 目录名；
 - `provider_address`：行情服务的 HTTP 地址，即 `127.0.0.1:<market_data_provider.toml 的 port>`；
 - `demo`：`true` 表示在交易所的模拟盘交易（行情也来自模拟盘），`false` 为实盘；必须与行情服务配置的 `demo` 一致，否则每个订阅请求都被拒绝（400）；
-- `process_metrics_interval_seconds`：多少秒打一次本进程的 CPU、内存、线程和 TCP 流量日志，必须大于 0（模板为 10）；
+- `process_metrics_interval_seconds`：多少秒采样一次本进程的 CPU、内存、线程和 TCP 流量（打日志并上报 Phanes），必须大于 0（模板为 10）；
+- `[celestia_client]`：上报进程监控用，由安装从行情服务的配置拷来，不用手填；上报的进程名就是 `strategy_name`；
 - `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`["BBO", "TRADE"]`），与行情服务 HTTP API 的写法相同。
 
 报告间隔是 dummy_strategy 自己的参数，不在 `strategy.toml` 里，写在 unit 的 `ExecStart`（`--report-interval-seconds 60`）。

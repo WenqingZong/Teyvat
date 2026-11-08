@@ -12,7 +12,7 @@ process_metrics_interval_seconds = 10                # how often to log the proc
 ipv4 = "<Osaka IPv4>"                              # required: the address Cloudflare reports in CF-Connecting-IP
 ipv6 = "<Osaka IPv6>"                              # optional
 client_gnosis_service_public_key = "<base64 Gnosis public key of the client>"
-client_celestia_service_public_key = "<base64 Celestia public key of the client>"
+client_celestia_service_public_key = "<base64 Celestia public key of the client, printed by its market_data_provider install>"
 allowed_gnosis_ids = ["binance_demo", "binance_sbe_demo"]   # may be empty
 
 # One table per gnosis Phanes holds, named by its GnosisId, with the fields of its key type.

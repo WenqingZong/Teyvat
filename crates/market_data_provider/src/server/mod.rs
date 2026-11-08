@@ -17,7 +17,7 @@ use tokio::time::interval;
 use crate::DEFAULT_ROOT_DIRECTORY;
 use crate::config::MarketDataProviderConfig;
 use crate::exchanges::{ConnectorContext, ExchangeRouter};
-use crate::phanes_client::PhanesClient;
+use crate::gnosis_client::GnosisClient;
 use coordinator::Coordinator;
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;
@@ -53,7 +53,7 @@ pub async fn serve(
     lease_duration: Duration,
 ) -> Result<()> {
     let context = ConnectorContext {
-        phanes_client: PhanesClient::new(config.phanes_client)?,
+        gnosis_client: GnosisClient::new(config.gnosis_client)?,
         notifier: Notifier::new(RELEASE_BUILD, config.bark)?,
     };
     create_dir_all(&root_directory)

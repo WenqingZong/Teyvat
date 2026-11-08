@@ -12,6 +12,7 @@
 //! key type, and a client fetches a gnosis by its type, which picks the id.
 
 pub mod binance;
+pub mod client;
 
 use std::num::NonZeroU64;
 

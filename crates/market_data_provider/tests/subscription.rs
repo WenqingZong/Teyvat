@@ -77,12 +77,13 @@ fn topics() -> HashSet<Topic> {
     ])
 }
 
-/// The `[phanes_client]` table only has to parse, since OKX never asks for a key.
+/// The `[gnosis_client]` and `[celestia_client]` tables only have to parse: OKX never asks for a key, and
+/// `serve` reports nothing to Celestia.
 fn config(port: u16, demo: bool) -> MarketDataProviderConfig {
     let directory = tempdir().expect("temp dir creation is expected to not fail");
     let config_file = directory.path().join("market_data_provider.toml");
     let text = format!(
-        "port = {port}\ndemo = {demo}\nprocess_metrics_interval_seconds = 10\n\n[phanes_client]\nurl = \"https://phanes.invalid\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
+        "port = {port}\ndemo = {demo}\nprocess_metrics_interval_seconds = 10\n\n[gnosis_client]\nurl = \"https://phanes.invalid\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n\n[celestia_client]\nurl = \"https://phanes.invalid\"\nclient_celestia_private_key = \"{DUMMY_KEY}\"\nphanes_celestia_public_key = \"{DUMMY_KEY}\"\n"
     );
     write_secret_file(&config_file, &text);
     MarketDataProviderConfig::load(&config_file).expect("the config is expected to load")

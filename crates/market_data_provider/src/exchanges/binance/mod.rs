@@ -24,7 +24,7 @@ use super::websocket::{
 };
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
-use crate::phanes_client::{GnosisSource, PhanesClient, fetch_gnosis_or_panic};
+use crate::gnosis_client::{GnosisClient, GnosisSource, fetch_gnosis_or_panic};
 use crate::utils::{Clock, RealClock};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use layline::bark::Notifier;
@@ -68,7 +68,7 @@ enum FrameOutcome {
 
 pub(crate) struct BinanceConnector<
     WebSocket = TungsteniteClient,
-    KeySource = PhanesClient,
+    KeySource = GnosisClient,
     Alerter = Notifier,
     TimeSource = RealClock,
 > {
@@ -650,7 +650,7 @@ mod tests {
         MockVenue, MockVenueConnection, MockWebSocketClient, Responder, mock_websocket,
     };
     use crate::exit_reason::ExitReason;
-    use crate::phanes_client::tests::MockGnosisSource;
+    use crate::gnosis_client::tests::MockGnosisSource;
     use crate::utils::tests::MockClock;
     use layline::gnosis::{Gnosis, GnosisId};
     use layline::testing::{test_instrument, test_topic};
@@ -1430,7 +1430,7 @@ mod tests {
             let mut connector = BinanceConnector::new(
                 demo,
                 |_| TungsteniteClient::default(),
-                context.phanes_client,
+                context.gnosis_client,
                 context.notifier,
                 RealClock,
             );

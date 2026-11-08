@@ -8,10 +8,12 @@ authors.workspace = true
 [dependencies]
 layline.workspace = true
 anyhow.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
-ureq.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 rust_decimal.workspace = true

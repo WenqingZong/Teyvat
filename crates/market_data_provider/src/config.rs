@@ -7,8 +7,9 @@ use anyhow::Result;
 use serde::Deserialize;
 use tracing::info;
 
-use crate::phanes_client::PhanesClientConfig;
 use layline::bark::BarkConfig;
+use layline::celestia::client::CelestiaClientConfig;
+use layline::gnosis::client::GnosisClientConfig;
 use layline::secrets::read_secret_toml;
 
 #[derive(Debug, Deserialize)]
@@ -20,7 +21,9 @@ pub struct MarketDataProviderConfig {
     pub demo: bool,
     /// How often the process logs its own CPU, memory, threads and TCP traffic.
     pub process_metrics_interval_seconds: NonZeroU64,
-    pub(crate) phanes_client: PhanesClientConfig,
+    pub(crate) gnosis_client: GnosisClientConfig,
+    /// Where the process metrics go: this machine's Celestia key, shared with its strategies.
+    pub celestia_client: CelestiaClientConfig,
     /// Required by release builds only; debug builds log alerts instead.
     pub(crate) bark: Option<BarkConfig>,
 }
@@ -76,7 +79,7 @@ mod tests {
 
         fn valid_text(&self) -> String {
             format!(
-                "port = 6666\ndemo = false\nprocess_metrics_interval_seconds = 10\n\n[phanes_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
+                "port = 6666\ndemo = false\nprocess_metrics_interval_seconds = 10\n\n[gnosis_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n\n[celestia_client]\nurl = \"https://phanes.example\"\nclient_celestia_private_key = \"{DUMMY_KEY}\"\nphanes_celestia_public_key = \"{DUMMY_KEY}\"\n"
             )
         }
 
@@ -100,10 +103,15 @@ mod tests {
     port: 6666,
     demo: false,
     process_metrics_interval_seconds: 10,
-    phanes_client: PhanesClientConfig {
+    gnosis_client: GnosisClientConfig {
         url: https://phanes.example/,
         client_gnosis_private_key: SecretBox<[u8; 32]>([REDACTED]),
         phanes_gnosis_public_key: SecretBox<[u8; 32]>([REDACTED]),
+    },
+    celestia_client: CelestiaClientConfig {
+        url: https://phanes.example/,
+        client_celestia_private_key: SecretBox<[u8; 32]>([REDACTED]),
+        phanes_celestia_public_key: SecretBox<[u8; 32]>([REDACTED]),
     },
     bark: Some(
         BarkConfig {

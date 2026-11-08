@@ -1,5 +1,7 @@
 //! Parsers for the `/proc/self` text files the process monitor reads.
 
+use serde::{Deserialize, Serialize};
+
 /// `/proc` reports CPU time in USER_HZ ticks, which Linux fixes at 100 per second.
 pub const CPU_TICKS_PER_SECOND: f32 = 100.0;
 /// Index of utime among the `/proc/<pid>/stat` fields after the command name; stime follows.
@@ -14,7 +16,7 @@ const SOCKET_LINK_SUFFIX: &str = "]";
 
 /// Resident memory split by kind; their sum is VmRSS. In KiB, the unit `/proc` reports them in,
 /// so nothing is rounded; `u32` holds up to 4 TiB.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryUsage {
     /// Private to this process: heap, stacks.
     pub anonymous_kibibytes: u32,

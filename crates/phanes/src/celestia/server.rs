@@ -17,16 +17,17 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::celestia::proto::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder, Session};
 use crate::client_filter::IpClientName;
 use crate::clients::{ClientName, Clients, identify};
 use crate::notify::{Notification, ThrottledNotificationSender};
 use crate::request_details::{LOG_INDENT, RequestDetails, RequestHead};
 use crate::service::Service;
+use layline::celestia::{Ack, Batch, CELESTIA_PATH, CelestiaError, Responder, Session};
 use layline::noise::{MAX_NOISE_MESSAGE_LENGTH, StaticKey};
+use layline::process_metrics::THREAD_METRICS_LEGEND;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// The client sends a sample every second and pings when idle, so silence means it is gone.
+/// The client pings every 30 seconds besides sending its samples, so silence means it is gone.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct CelestiaState {
@@ -164,9 +165,21 @@ async fn exchange_batches(
                     },
                     CelestiaError::Payload(_) => ConnectionError::Celestia(error),
                 })?;
-                let sequence = batch.sequence;
-                for sample in &batch.samples {
-                    info!("{client} #{sequence}: {sample}");
+                let Batch {
+                    sequence,
+                    process_name,
+                    samples,
+                } = batch;
+                // The timestamp tells a resent sample from a fresh one.
+                for sample in &samples {
+                    let timestamp_seconds = sample.timestamp_seconds;
+                    info!(
+                        "{client}/{process_name} #{sequence} taken at {timestamp_seconds}: process metrics: {sample}"
+                    );
+                    let threads = sample.format_threads();
+                    info!(
+                        "{client}/{process_name} #{sequence}: thread metrics ({THREAD_METRICS_LEGEND}): {threads}"
+                    );
                 }
                 let ack = session
                     .encrypt(&Ack { sequence })
@@ -253,11 +266,10 @@ mod tests {
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
     use super::*;
-    use crate::celestia::proto::Initiator;
-    use crate::celestia::proto::tests::sample;
     use crate::clients::ClientConfig;
     use crate::clients::tests::test_client;
-    use layline::testing::test_keypair;
+    use layline::celestia::Initiator;
+    use layline::testing::{test_keypair, test_process_sample};
 
     /// Long enough for the server task to push after the socket closes.
     const NOTIFICATION_WAIT: Duration = Duration::from_millis(500);
@@ -377,7 +389,8 @@ mod tests {
         for sequence in [7, 8] {
             let batch = Batch {
                 sequence,
-                samples: vec![sample()],
+                process_name: "market_data_provider".to_owned(),
+                samples: vec![test_process_sample()],
             };
             let ciphertext = session.encrypt(&batch).expect("client encrypts batch");
             socket
