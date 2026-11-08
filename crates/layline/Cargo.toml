@@ -12,8 +12,13 @@ base64.workspace = true
 bcast.workspace = true
 cbc.workspace = true
 chrono.workspace = true
+futures.workspace = true
 hex.workspace = true
 memmap2.workspace = true
+netlink-packet-core.workspace = true
+netlink-packet-sock-diag.workspace = true
+netlink-sys.workspace = true
+postcard.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 rkyv.workspace = true
@@ -24,6 +29,8 @@ serde_json.workspace = true
 snow.workspace = true
 strum.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
@@ -32,7 +39,6 @@ url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

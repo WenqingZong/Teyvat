@@ -2,16 +2,24 @@ use std::panic::{panic_any, set_hook};
 use std::path::PathBuf;
 use std::process::{ExitCode, exit};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use clap::Parser;
+use tokio::spawn;
+use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use layline::build::{GIT_COMMIT_HASH, build_profile};
+use layline::celestia::client::{ReporterConfig, SAMPLE_CHANNEL_CAPACITY, run_celestia_reporter};
 use layline::logging::init_tracing;
+use layline::process_metrics::run_process_monitor;
 use market_data_provider::config::MarketDataProviderConfig;
 use market_data_provider::exit_reason::ExitReason;
 use market_data_provider::server::run;
+
+/// How Phanes' log names this process.
+const PROCESS_NAME: &str = "market_data_provider";
 
 /// Dropping the guard flushes buffered log lines, on a normal exit and in the panic hook alike.
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
@@ -35,6 +43,21 @@ async fn main() -> ExitCode {
     info!("{build_profile} build of commit {GIT_COMMIT_HASH}");
     let config =
         MarketDataProviderConfig::load(&arguments.config).unwrap_or_else(|error| fatal(error));
+    let reporter_config =
+        ReporterConfig::new(config.celestia_client.clone(), PROCESS_NAME.to_owned())
+            .unwrap_or_else(|error| fatal(error.into()));
+    let process_metrics_interval =
+        Duration::from_secs(config.process_metrics_interval_seconds.get());
+    let (sample_sender, sample_receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
+    spawn(run_process_monitor(
+        process_metrics_interval,
+        Some(sample_sender),
+    ));
+    spawn(run_celestia_reporter(
+        reporter_config,
+        process_metrics_interval,
+        sample_receiver,
+    ));
     run(config).await.unwrap_or_else(|error| fatal(error));
     ExitCode::SUCCESS
 }
@@ -45,7 +68,7 @@ fn fatal(error: anyhow::Error) -> ! {
     panic_any(ExitReason::FatalError);
 }
 
-/// A panic on any thread stops the whole provider. A panic raised with an `ExitReason` payload,
+/// A panic on any thread or task, the process monitor's included, stops the whole provider. A panic raised with an `ExitReason` payload,
 /// such as an exchange worker failing to get its API key, exits with that reason's code.
 fn exit_on_panic() {
     set_hook(Box::new(|panic_info| {

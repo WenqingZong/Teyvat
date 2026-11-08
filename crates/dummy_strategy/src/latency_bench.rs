@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::mem::take;
 use std::num::NonZeroU64;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::thread;
 use std::time::Duration;
 
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::info;
 
 use crate::strategy::Strategy;
@@ -27,26 +27,25 @@ struct Report {
     samples: HashMap<Topic, LatencySamples>,
 }
 
-/// Records latencies per message and hands each window to a reporter thread, which sorts and logs
-/// percentiles; the reading thread only appends, so measuring does not delay the messages measured.
+/// Records latencies per message and hands each window to the reporter, a task off the hot path that
+/// sorts and logs percentiles; the reading thread only appends, so measuring does not delay the
+/// messages measured.
 pub struct LatencyBench {
     report_interval: Duration,
     window_start_nanoseconds: NonZeroU64,
     samples: HashMap<Topic, LatencySamples>,
-    reports: Sender<Report>,
+    reports: UnboundedSender<Report>,
 }
 
 impl LatencyBench {
-    pub fn new(report_interval: Duration) -> Self {
-        let (reports, receiver) = channel();
-        thread::Builder::new()
-            .name("latency-report".to_owned())
-            .spawn(move || log_reports(&receiver))
-            .expect("the reporter thread is expected to start");
+    /// Starts the reporter on `runtime`, off the hot path; it stops once the bench is dropped.
+    pub fn new(report_interval: Duration, runtime: &Handle) -> Self {
+        let (reports, receiver) = unbounded_channel();
+        runtime.spawn(log_reports(receiver));
         Self::reporting_to(report_interval, reports)
     }
 
-    fn reporting_to(report_interval: Duration, reports: Sender<Report>) -> Self {
+    fn reporting_to(report_interval: Duration, reports: UnboundedSender<Report>) -> Self {
         Self {
             report_interval,
             window_start_nanoseconds: get_current_timestamp_nanoseconds(),
@@ -91,14 +90,14 @@ impl LatencyBench {
             };
             self.reports
                 .send(report)
-                .expect("the reporter thread runs as long as the process");
+                .expect("the reporter runs as long as the process");
             self.window_start_nanoseconds = handled_at_nanoseconds;
         }
     }
 }
 
-fn log_reports(reports: &Receiver<Report>) {
-    while let Ok(report) = reports.recv() {
+async fn log_reports(mut reports: UnboundedReceiver<Report>) {
+    while let Some(report) = reports.recv().await {
         for line in report_lines(report) {
             info!("{line}");
         }
@@ -261,7 +260,7 @@ mod tests {
 
     #[test]
     fn each_window_is_reported_per_topic_and_overall() {
-        let (reports, receiver) = channel();
+        let (reports, mut receiver) = unbounded_channel();
         let mut bench = LatencyBench::reporting_to(Duration::from_secs(3600), reports);
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 2_000, 5_000)), now);
@@ -295,18 +294,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the reporter thread runs as long as the process")]
+    #[should_panic(expected = "the reporter runs as long as the process")]
     fn a_stopped_reporter_panics() {
-        let (reports, receiver) = channel();
+        let (reports, receiver) = unbounded_channel();
         drop(receiver);
         let mut bench = LatencyBench::reporting_to(Duration::ZERO, reports);
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 1, 1)), now);
     }
 
-    #[test]
-    fn reporter_thread_runs_until_the_bench_is_dropped() {
-        let bench = LatencyBench::new(Duration::from_secs(60));
+    #[tokio::test]
+    async fn reporter_runs_until_the_bench_is_dropped() {
+        let bench = LatencyBench::new(Duration::from_secs(60), &Handle::current());
         drop(bench);
     }
 }

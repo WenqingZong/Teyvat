@@ -1,56 +1,23 @@
 //! Client of Phanes Gnosis, which releases gnoses (API keys) over an end-to-end encrypted HTTP
 //! round trip.
 
-use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use reqwest::{Client, StatusCode};
 use secrecy::SecretBox;
-use serde::Deserialize;
 use tracing::info;
 use url::Url;
 
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::utils::{Clock, RealClock};
+use layline::gnosis::client::GnosisClientConfig;
 use layline::gnosis::{GNOSIS_PATH, Gnosis, Initiator, Request, Response};
-use layline::noise::{StaticKey, deserialize_key};
+use layline::noise::StaticKey;
 
 const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// The `[phanes_client]` table of the config. Like Phanes itself, each service has its own key
-/// pair. The client's public key is not needed: Noise derives it from the private key.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PhanesClientConfig {
-    url: Url,
-    /// Base64 X25519 private key this client authenticates to Gnosis with.
-    #[serde(deserialize_with = "deserialize_key")]
-    client_gnosis_private_key: SecretBox<StaticKey>,
-    /// Base64 X25519 public key of Phanes Gnosis.
-    #[serde(deserialize_with = "deserialize_key")]
-    phanes_gnosis_public_key: SecretBox<StaticKey>,
-}
-
-/// Written by hand so `url` prints as one URL rather than `Url`'s fields; the keys print as
-/// `[REDACTED]`.
-impl Debug for PhanesClientConfig {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let Self {
-            url,
-            client_gnosis_private_key,
-            phanes_gnosis_public_key,
-        } = self;
-        formatter
-            .debug_struct("PhanesClientConfig")
-            .field("url", &format_args!("{url}"))
-            .field("client_gnosis_private_key", client_gnosis_private_key)
-            .field("phanes_gnosis_public_key", phanes_gnosis_public_key)
-            .finish()
-    }
-}
 
 /// Where gnoses come from; the connector asks only when a topic needs one.
 pub(crate) trait GnosisSource {
@@ -102,7 +69,7 @@ impl GnosisHttp for ReqwestGnosisHttp {
 
 /// Clones share the keys, so every exchange worker can hold one.
 #[derive(Clone)]
-pub(crate) struct PhanesClient<Http = ReqwestGnosisHttp, TimeSource = RealClock> {
+pub(crate) struct GnosisClient<Http = ReqwestGnosisHttp, TimeSource = RealClock> {
     url: Url,
     client_gnosis_private_key: Arc<SecretBox<StaticKey>>,
     phanes_gnosis_public_key: Arc<SecretBox<StaticKey>>,
@@ -110,9 +77,9 @@ pub(crate) struct PhanesClient<Http = ReqwestGnosisHttp, TimeSource = RealClock>
     clock: TimeSource,
 }
 
-impl PhanesClient {
+impl GnosisClient {
     /// Both keys were checked when the config was parsed.
-    pub(crate) fn new(config: PhanesClientConfig) -> Result<Self> {
+    pub(crate) fn new(config: GnosisClientConfig) -> Result<Self> {
         let client = Client::builder().timeout(GNOSIS_REQUEST_TIMEOUT).build()?;
         Ok(Self {
             url: config.url,
@@ -124,7 +91,7 @@ impl PhanesClient {
     }
 }
 
-impl<Http: GnosisHttp, TimeSource: Clock> GnosisSource for PhanesClient<Http, TimeSource> {
+impl<Http: GnosisHttp, TimeSource: Clock> GnosisSource for GnosisClient<Http, TimeSource> {
     async fn fetch_gnosis<Key: Gnosis>(&self, demo: bool) -> Result<Key> {
         let (initiator, first_message) = Initiator::write_request(
             &self.client_gnosis_private_key,
@@ -183,11 +150,11 @@ pub(crate) mod tests {
         format!(r#"{{"api_key": "{GRANTED_SECRET}"}}"#)
     }
 
-    /// For code that needs a production `PhanesClient` but never fetches a gnosis.
-    pub(crate) fn unreachable_phanes_client() -> PhanesClient {
+    /// For code that needs a production `GnosisClient` but never fetches a gnosis.
+    pub(crate) fn unreachable_gnosis_client() -> GnosisClient {
         let (client_gnosis_private_key, _) = test_keypair();
         let (_, phanes_gnosis_public_key) = test_keypair();
-        PhanesClient {
+        GnosisClient {
             url: Url::parse("https://phanes.invalid").expect("the test URL is valid"),
             client_gnosis_private_key: Arc::new(client_gnosis_private_key),
             phanes_gnosis_public_key: Arc::new(phanes_gnosis_public_key),
@@ -274,12 +241,12 @@ pub(crate) mod tests {
     }
 
     /// A client wired to an in-process Phanes that grants `GRANTED_GNOSIS_ID`, and a mock clock.
-    struct PhanesFixture {
-        client: PhanesClient<GnosisHttpMock, MockClock>,
+    struct GnosisClientFixture {
+        client: GnosisClient<GnosisHttpMock, MockClock>,
         clock: MockClock,
     }
 
-    impl PhanesFixture {
+    impl GnosisClientFixture {
         fn new() -> Self {
             let (phanes_gnosis_private_key, phanes_gnosis_public_key) = test_keypair();
             let (client_gnosis_private_key, client_gnosis_public_key) = test_keypair();
@@ -291,7 +258,7 @@ pub(crate) mod tests {
                 behaviour: PhanesBehaviour::Normal,
                 requests: RefCell::new(Vec::new()),
             };
-            let client = PhanesClient {
+            let client = GnosisClient {
                 url: Url::parse(PHANES_URL).expect("PHANES_URL is a valid URL"),
                 client_gnosis_private_key: Arc::new(client_gnosis_private_key),
                 phanes_gnosis_public_key: Arc::new(phanes_gnosis_public_key),
@@ -327,7 +294,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn granted_gnosis_is_returned_and_request_carries_clock_time() {
-        let fixture = PhanesFixture::new();
+        let fixture = GnosisClientFixture::new();
         fixture.clock.advance(Duration::from_secs(5));
         let sbe_api_key: BinanceSbeApiKey = fixture
             .client
@@ -342,14 +309,14 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn denied_gnosis_is_an_error() {
         assert_eq!(DENIED_GNOSIS_ID, BinanceApiKey::gnosis_id(false));
-        PhanesFixture::new()
+        GnosisClientFixture::new()
             .expect_error::<BinanceApiKey>(DENIAL_REASON)
             .await;
     }
 
     #[tokio::test]
     async fn unknown_client_gets_not_found() {
-        let mut fixture = PhanesFixture::new();
+        let mut fixture = GnosisClientFixture::new();
         fixture.phanes_behaves(PhanesBehaviour::ForgetClient);
         fixture.expect_error::<BinanceSbeApiKey>("404").await;
         fixture.expect_phanes_received(&[]);
@@ -357,7 +324,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn unreachable_phanes_is_an_error() {
-        let mut fixture = PhanesFixture::new();
+        let mut fixture = GnosisClientFixture::new();
         fixture.phanes_behaves(PhanesBehaviour::Offline);
         fixture
             .expect_error::<BinanceSbeApiKey>("unreachable")
@@ -366,7 +333,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn garbled_reply_is_rejected() {
-        let mut fixture = PhanesFixture::new();
+        let mut fixture = GnosisClientFixture::new();
         fixture.phanes_behaves(PhanesBehaviour::Garbage);
         fixture.expect_error::<BinanceSbeApiKey>("noise").await;
     }
@@ -424,11 +391,11 @@ pub(crate) mod tests {
         assert!(!alert.contains("dummy-misnamed-secret"), "{alert}");
     }
 
-    /// The `[phanes_client]` table holding both keys, as written.
-    fn phanes_client_table(
+    /// The `[gnosis_client]` table holding both keys, as written.
+    fn gnosis_client_table(
         client_gnosis_private_key: &str,
         phanes_gnosis_public_key: &str,
-    ) -> Result<PhanesClientConfig, TomlError> {
+    ) -> Result<GnosisClientConfig, TomlError> {
         toml::from_str(&format!(
             "url = \"{PHANES_URL}\"\nclient_gnosis_private_key = \"{client_gnosis_private_key}\"\nphanes_gnosis_public_key = \"{phanes_gnosis_public_key}\""
         ))
@@ -440,9 +407,9 @@ pub(crate) mod tests {
         let (_, public_key) = test_keypair();
         let encoded_private_key = encode_key(private_key.expose_secret());
         let encoded_public_key = encode_key(public_key.expose_secret());
-        let config = phanes_client_table(&encoded_private_key, &encoded_public_key)
-            .expect("the [phanes_client] table is expected to parse");
-        let client = PhanesClient::new(config).expect("the config is valid");
+        let config = gnosis_client_table(&encoded_private_key, &encoded_public_key)
+            .expect("the [gnosis_client] table is expected to parse");
+        let client = GnosisClient::new(config).expect("the config is valid");
         assert_eq!(
             private_key.expose_secret(),
             client.client_gnosis_private_key.expose_secret()
@@ -451,7 +418,7 @@ pub(crate) mod tests {
             public_key.expose_secret(),
             client.phanes_gnosis_public_key.expose_secret()
         );
-        assert!(phanes_client_table("not base64!", &encoded_public_key).is_err());
-        assert!(phanes_client_table(&encoded_private_key, "not base64!").is_err());
+        assert!(gnosis_client_table("not base64!", &encoded_public_key).is_err());
+        assert!(gnosis_client_table(&encoded_private_key, "not base64!").is_err());
     }
 }

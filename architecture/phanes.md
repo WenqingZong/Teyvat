@@ -5,7 +5,7 @@
 一个进程、一个端口上同时运行两个服务：
 
 - **Gnosis**（API Key 发放，寓意天理发放神之心）：Osaka 上的程序启动时经 Cloudflare Tunnel 来取 API Key。请求和回复都是 Noise `IK` 密文，Cloudflare 只能看到乱码。每次发放、拒绝、服务挂掉都通过 Bark 推送到手机。
-- **Celestia**（进程监控，寓意天空岛俯瞰提瓦特众生）：Osaka 每秒上报业务进程的 CPU、内存、网络（进程口径），经 WebSocket + Noise `IK` 加密传输。**目前 Phanes 收到后只打日志并回 ack**，入库和看板还没做。
+- **Celestia**（进程监控，寓意天空岛俯瞰提瓦特众生）：Osaka 上的进程每隔一个监控间隔上报自己的 CPU、内存、线程、TCP 流量（`layline::process_metrics` 的样本），经 WebSocket + Noise `IK` 加密传输。**目前 Phanes 收到后只打日志并回 ack**，入库和看板还没做。
 
 ```text
 Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (RedmiBook)
@@ -29,7 +29,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 
 - **Noise `IK`**：`Noise_IK_25519_ChaChaPoly_BLAKE2s`（`snow` crate）。客户端事先知道服务的公钥，并在消息 1 里加密带上自己的公钥；Phanes 读完消息 1 才知道对方是谁，再拿这个公钥去查 `[clients]`。只有持有对应私钥的一方才写得出这条消息，所以公钥就是客户端的身份。查不到的公钥按未认证处理，消息 1 的载荷不会被使用。选 `IK` 而不是 `KK`：`KK` 要求服务事先知道对方是谁，多个客户端时只能先靠 IP 猜公钥（debug 构建没有 IP）或逐个试；`IK` 是"一个服务端、多个客户端"的标准做法。
 - **Gnosis 协议**：prologue `gnosis`，一次 HTTP POST 完成握手加请求/回复。消息 1 的载荷是 `{gnosis_id, timestamp, nonce}`，消息 2 的载荷是 `Response<Key>`：`Granted { gnosis }` 直接带 key 本身（如 `{"api_key": "..."}`），客户端按它要的 key 类型解析（`deny_unknown_fields`，字段不符就报错），或 `Denied { reason }`。虽然业务上是"取" key，但用 POST 而不是 GET：握手消息只能放在 body 里（GET 的 body 没有标准语义，Cloudflare 等中间层可能丢弃；放进 URL 又会让密文进入各级日志）；请求有副作用、不幂等（nonce 记入防重放表，每次都触发 Bark 推送）；GET 的响应还可能被 CDN 缓存。
-- **Celestia 协议**：Noise 参数相同，prologue `celestia`，`GET /celestia` 升级为 WebSocket。前两帧是握手（空载荷），Phanes 收到第 1 帧、认出客户端之后才回第 2 帧；之后每帧是一个 postcard 编码的密文：客户端 → Phanes 为 `Batch{sequence, samples}`，Phanes → 客户端为 `Ack{sequence}`。一条连接一次握手，不需要时间窗口和 nonce。虽然数据是客户端发给 Phanes，但必须用 GET：WebSocket 标准（RFC 6455）规定升级握手只能是带 `Upgrade: websocket` 头的 GET；升级之后不再有 HTTP 方法，双方的数据都走同一条连接上的帧。
+- **Celestia 协议**：Noise 参数相同，prologue `celestia`，`GET /celestia` 升级为 WebSocket。前两帧是握手（空载荷），Phanes 收到第 1 帧、认出客户端之后才回第 2 帧；之后每帧是一个 postcard 编码的密文：客户端 → Phanes 为 `Batch{sequence, process_name, samples}`（`samples` 是 `layline::process_metrics::ProcessSample`），Phanes → 客户端为 `Ack{sequence}`。一条连接一次握手，不需要时间窗口和 nonce。虽然数据是客户端发给 Phanes，但必须用 GET：WebSocket 标准（RFC 6455）规定升级握手只能是带 `Upgrade: websocket` 头的 GET；升级之后不再有 HTTP 方法，双方的数据都走同一条连接上的帧。
 - **以客户端为单位授权**：每个客户端一张 `[clients.<名字>]` 表：`ipv4` 必填、`ipv6` 可选、`client_gnosis_service_public_key`、`client_celestia_service_public_key`、`allowed_gnosis_ids`（可为空，只用 Celestia 的客户端就是空）。任何客户端都可以访问任何服务；Gnosis 认出客户端之后，只发放它 `allowed_gnosis_ids` 里的 gnosis，其余回 `Denied`。以后加客户端（Tokyo、Osaka2）只需加一张表。
 - **gnosis 写在 `phanes.toml` 里**：顶层 `[gnoses.<gnosis_id>]`，每张表的字段就是该 id 的 key 类型（`binance_{real,demo}` 为 `api_key` + `secret_key`，`binance_sbe_{real,demo}` 只有 `api_key`）。解析配置时 serde 就会拒绝未知 id、缺字段、多字段和类型不符的 key，不需要手写检查。Phanes 可以持有暂时没有客户端被允许的 gnosis；某个 `allowed_gnosis_ids` 引用了没有表的 id，拒绝启动。
 - **密钥**：每个服务在两端各有一对专用的 X25519 密钥（不复用 SSH 密钥，服务之间也不复用），公钥经现有的 SSH 通道交换。公钥泄露本身无害，但不应让白名单之外的人知道，所以代码里公钥和私钥一样放在 `SecretBox<StaticKey>` 里：`Debug` 脱敏、drop 时清零、不打进日志。同一个服务里两个客户端的公钥不能相同（否则分不出是谁），否则拒绝启动。
@@ -43,35 +43,40 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 
 ## 代码结构
 
-- 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）以及所有 gnosis 的 id 和 key 类型都在 `layline::gnosis`（`mod.rs` 放协议、`GnosisId` 和 `Gnosis` trait，每个交易所一个文件放它的 key 类型，如 `binance.rs`），这里只有服务端。Celestia 协议目前在本 crate 之外没有客户端，所以 `celestia/proto.rs` 留在这里；等第二个 crate 需要它时再移进 layline。
+- 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）以及所有 gnosis 的 id 和 key 类型都在 `layline::gnosis`（`mod.rs` 放协议、`GnosisId` 和 `Gnosis` trait，每个交易所一个文件放它的 key 类型，如 `binance.rs`），这里只有服务端。Celestia 同理：协议和上报端都在 `layline::celestia`（`mod.rs` 是协议，`client.rs` 是各进程用的上报端），这里只有服务端。
 - `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`decode_key`（私钥和公钥同一个解码函数，都得到 `SecretBox<StaticKey>`）、`build_initiator(prologue, ..)` / `build_responder(prologue, ..)`、`read_first_message`（服务端读消息 1，得到载荷和客户端公钥；Noise 只在本地用私钥做 DH，消息里只有加密的公钥）、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
 - `src/clients.rs`：`ClientName`（`String` 的类型别名）、`ClientConfig`（一张 `[clients.<名字>]` 表）和 `Clients`（全部客户端，`Arc` 共享给 IP 白名单和各服务，只有这一份，不派生其他表）。`identify(clients, 服务, 公钥, IP 所属的客户端)` 在其中找出持有该服务公钥的客户端（客户端只有几个，逐个比较），并检查 IP 属于同一个客户端（debug 构建没有 IP，只看公钥）。它是叶子模块。
 - `src/gnosis/config.rs`：`Gnoses`（`[gnoses]` 表，每个 `GnosisId` 一个同名字段，类型为该 id 的 key 类型；穷尽的 `match` 保证新增 id 时必须加字段，测试保证字段名和 id 拼写一致）和 `AnyGnosis`（任意一种 key，序列化成 key 本身）。
 - `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 按公钥认出客户端（并核对 IP）→ 时间窗口 → nonce 防重放 → 该客户端的 `allowed_gnosis_ids` 里有这个 id，再从 `Gnoses` 取出（`load` 已保证有表）。gnosis id 是 `layline::gnosis::GnosisId` 枚举：请求里的未知 id 解析失败，按畸形请求拒绝。握手失败或认不出客户端回空 404（推送 10 分钟节流）；认出之后的拒绝回加密的 `Denied{reason}`。加密回复（Gnosis 的消息 2、Celestia 的消息 2 和 ack）对正确的代码不会失败，所以用 `expect`：真失败了就是 bug，panic 经 panic hook 让 Phanes 推送崩溃并退出。
-- `src/celestia/`：`proto.rs`（`ProcessSample`/`Batch`/`Ack`、`Initiator`、`Responder`（`read_first_message` → `client_public_key` → `finish`）、`Session`）；`server.rs`（`GET /celestia`：握手并认出客户端 → 解密 → 打日志 → 回 ack；认不出或解密失败断开并节流推送；90 秒没有消息就断开）。
+- `src/celestia/`：`server.rs`（协议的 `Batch`/`Ack`、`Responder`（`read_first_message` → `client_public_key` → `finish`）、`Session` 来自 `layline::celestia`；`GET /celestia`：握手并认出客户端 → 解密 → 按客户端和进程名打日志 → 回 ack；认不出或解密失败断开并节流推送；90 秒没有消息就断开）。
 - `src/service.rs`：`Service` 枚举（Gnosis / Celestia）和 `Language`；`to_string(Language)` 给出英文日志名或中文推送名。它是叶子模块，服务可以引用自己的名字而不必 import `server`，避免循环依赖。
 - `src/server.rs`：`router()` / `run()`，把所有服务合并到一个 axum `Router`，并在服务路由上挂唯一的 `ClientFilter`（为 `None` 时不挂；`/info` 始终不挂），以及 `GET /info`（JSON：status / server_time（UTC）/ version / build / git_commit_hash）。
 - `src/client_filter.rs`：IP 白名单中间件 `filter_clients`，全局一个 `ClientFilter`；放行的请求在扩展里带上 IP 所属的 `ClientName`，handler 用 `IpClientName` 取出（没挂中间件时为 `None`）。
 - `src/config.rs`：`PhanesConfig`，Rust 字段名和 TOML 完全一致：`[clients.<名字>]`（`ClientConfig`，公钥在解析时就解码，无效即解析失败）和 `[gnoses]`。`load` 解析完立刻检查：IP 不重复、所有公钥（跨客户端、跨服务）不重复、允许的 gnosis 都有表；任何一项不过，Phanes 拒绝启动，之后的服务过程都假设配置合法。配置和私钥文件经 `layline::secrets` 读取。
 - `src/request_details.rs`：被拒请求的快照 `RequestDetails`（`RequestHead` 加载荷）；`Display` 输出跟在日志消息后面的多行完整内容（4 空格缩进；header 值用 `Debug` 打印，带引号并转义非 ASCII 字节，伪造不出单独一行；载荷 hex 每行 32 字节），`summarize()` 输出推送摘要。
 - `src/notify.rs`：推送事件（启动 / 发放 / 拒绝 / 未认证 / 白名单拦截 / 挂了）及其中文文案；后台任务经 `layline::bark::Notifier` 发送：release 构建走 Bark，缺 `[bark]` 就报错退出；debug 构建（本机开发）不需要 Bark，推送改为 `info!` 日志。`enqueue` 把推送放进队列，发送端已关闭时只记一条 error；`ThrottledNotificationSender` 在它前面加一个 `UnauthenticatedThrottle`。未认证的推送按 `Service` 区分，各自有独立的 `ThrottledNotificationSender`；白名单拦截不分服务，一个。
-- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen` 向终端打印一对新的 base64 密钥（不写文件，也不进日志，私钥只应填进它主人的配置），用于新客户端或换密钥；`phanes serve --config <phanes.toml>` 由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
-- 仓库根目录的 `examples/`（只给测试用的代码放这里，不放进 crate）：`fetch.rs` 模拟客户端取 gnosis（按任意 id 取，所以把 gnosis 当 JSON 打出来）；`bark_push.rs` 发一条 Bark 推送；`celestia/` 是简化版的客户端进程监控（`client.rs` 内存 `Outbox`、重连补发、30 秒心跳；`sampler.rs` 读 `/proc` 和 `systemctl show`，拿不到网络数据时填 0）。celestia example 的测试经根 `Cargo.toml` 的 `test = true` 随 `cargo test --workspace` 运行。
+- `src/bin/phanes.rs`（仓库根目录）：`phanes keygen` 向终端打印一对新的 base64 密钥（不写文件，也不进日志，私钥只应填进它主人的配置），用于新客户端或换密钥；`phanes serve --config <phanes.toml>` 加载配置后启动进程监控（`layline::process_metrics`，间隔为 `process_metrics_interval_seconds`，见 [`overview.md`](overview.md)「进程监控」），整个服务由 supervisor 包裹：任何 panic（panic hook）或致命错误 → 记日志 → 推送"天理陷入沉睡" → 退出码 1。
+- 仓库根目录的 `examples/`（只给测试用的代码放这里，不放进 crate）：`fetch.rs` 模拟客户端取 gnosis（按任意 id 取，所以把 gnosis 当 JSON 打出来）；`bark_push.rs` 发一条 Bark 推送；`celestia.rs` 是 Celestia 的冒烟测试：一个监控自己、并经 `layline::celestia::client` 上报给 Phanes 的进程，和服务的做法相同，不部署任何服务就能验证到 Phanes 的整条链路。
 
 ## Celestia 简化版的现状
 
-`examples/celestia/` 每秒采样一个进程发给 Phanes。没收到 ack 的数据在内存里最多缓存 1 小时，断线后指数退避重连（1 s → 60 s）并补发。
+market_data_provider 和每个策略都把 `layline::process_metrics` 的样本经 `layline::celestia::client` 上报给 Phanes（Phanes 自己只打本地日志），间隔是各自配置里的 `process_metrics_interval_seconds`：
 
-- `--systemd-unit`：CPU、内存、网络都有。网络按进程口径统计，需要该 unit 开 `IPAccounting=yes`，否则为 0。
-- `--process-id`：网络为 0。两个参数必须且只能给一个。
+- **配置**：两者的配置里有同样的 `[celestia_client]` 表（`CelestiaClientConfig`：`url`、`client_celestia_private_key`、`phanes_celestia_public_key`）。私钥是**机器**的：market_data_provider 的安装生成它，并打印公钥给这台机器的 `[clients.<名字>].client_celestia_service_public_key`；策略的安装每次都从 market_data_provider 的配置把这张表的设置拷过来。
+- **上报端**（`run_celestia_reporter`）：和监控一样是 async 任务，放在进程不在热路径上的 runtime 上（见 [`overview.md`](overview.md)「线程模型」）。`ReporterConfig::new` 在启动时把 URL 换成 `/celestia` 的 WebSocket 地址，scheme 不对就拒绝启动。监控任务经 `run_process_monitor` 把样本 `try_send` 进一个容量为 1 的 channel；上报端**不论连上与否都立即取走**（连接、握手和退避期间也一样，靠 `take_samples_while` 和它们一起 `select!`），放进唯一的缓冲 `Outbox`，每个样本一个 `Batch`，收到 ack 才删除。`Outbox` 最多存一小时，满了丢最老的。断线后按 `layline::backoff::exponential_backoff` 重连（1 s → 60 s），重连后补发 `Outbox` 里的全部。上报出任何错都只 warn 并重连，不让进程退出。
+- **进程身份**：Noise 密钥认证的是机器，同一台机器上的进程共用它；`Batch` 里的 `process_name` 只用来区分它们：market_data_provider 是 `market_data_provider`，策略是它的 `strategy_name`。
+- **Phanes 端**：每个样本打两行，和本地的格式相同，前面加上 `<客户端>/<进程名> #<sequence>`；第一行还有样本的 `timestamp_seconds`，区分补发的旧样本和新样本：
 
-RedmiBook 的日志里每秒一行 `Osaka #<sequence>: time .. ms, cpu ..%, memory .. MiB, received .. B/s, sent .. B/s`。
+```text
+Osaka/market_data_provider #1794080694544 taken at 1794080757: process metrics: cpu 0.6%, memory anon 6.8 MiB / ... , sampled in 2155 µs
+Osaka/market_data_provider #1794080694544: thread metrics (cpu, voluntary/involuntary context switches per second): market_data_pro#45988 0.2% 1.3/0.0; ...
+```
 
-目前的简化：缓存在内存里，Osaka 端进程重启会丢掉未确认的数据；网络数据靠每秒调一次 `systemctl show`；Phanes 端只打日志、不去重。完整设计见 [`plan/celestia.md`](../plan/celestia.md)。
+`examples/celestia.rs` 是同一套上报的冒烟测试。目前的简化：缓存在内存里，进程重启会丢掉未确认的数据；Phanes 端只打日志、不去重、不入库。完整设计见 [`plan/celestia.md`](../plan/celestia.md)。
 
 ## 客户端如何使用 Gnosis
 
-客户端上的 crate（如 `market_data_provider`）依赖 workspace 里的 `layline`，按 key 类型取 gnosis，类型决定 id（`Gnosis::gnosis_id(demo)`），参考 `market_data_provider/src/phanes_client.rs` 和 `examples/fetch.rs`：
+客户端上的 crate（如 `market_data_provider`）依赖 workspace 里的 `layline`，按 key 类型取 gnosis，类型决定 id（`Gnosis::gnosis_id(demo)`），参考 `market_data_provider/src/gnosis_client.rs` 和 `examples/fetch.rs`：
 
 ```rust
 let request = Request::new(BinanceSbeApiKey::gnosis_id(demo), get_current_timestamp_nanoseconds());

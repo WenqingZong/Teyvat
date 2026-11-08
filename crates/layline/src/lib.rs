@@ -4,9 +4,11 @@
 pub mod backoff;
 pub mod bark;
 pub mod build;
+pub mod celestia;
 pub mod gnosis;
 pub mod logging;
 pub mod noise;
+pub mod process_metrics;
 pub mod provider_api;
 pub mod secrets;
 pub mod shared_memory;

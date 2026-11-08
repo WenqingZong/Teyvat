@@ -10,10 +10,8 @@ layline.workspace = true
 axum = { workspace = true, features = ["ws"] }
 futures.workspace = true
 hex.workspace = true
-postcard.workspace = true
 secrecy.workspace = true
 serde.workspace = true
-snow.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }

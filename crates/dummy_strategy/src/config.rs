@@ -3,12 +3,14 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter, Result as FormatResult, from_fn};
 use std::net::SocketAddr;
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use tracing::info;
 
+use layline::celestia::client::CelestiaClientConfig;
 use layline::provider_api::topic_set;
 use layline::secrets::read_secret_toml;
 use layline::types::{StrategyName, Topic};
@@ -25,6 +27,10 @@ pub struct StrategyConfig {
     /// Exchange, then instrument, then market data types, as in the provider's HTTP API.
     #[serde(with = "topic_set")]
     pub topics: HashSet<Topic>,
+    /// How often the process logs its own CPU, memory, threads and TCP traffic.
+    pub process_metrics_interval_seconds: NonZeroU64,
+    /// Where the process metrics go: this machine's Celestia key, the same as the provider's.
+    pub celestia_client: CelestiaClientConfig,
 }
 
 /// Written by hand so each topic prints on one line as its `Display`, sorted by it, rather than
@@ -36,6 +42,8 @@ impl Debug for StrategyConfig {
             provider_address,
             demo,
             topics,
+            process_metrics_interval_seconds,
+            celestia_client,
         } = self;
         let mut topic_names: Vec<String> = topics.iter().map(Topic::to_string).collect();
         topic_names.sort();
@@ -56,6 +64,11 @@ impl Debug for StrategyConfig {
                         .finish()
                 }),
             )
+            .field(
+                "process_metrics_interval_seconds",
+                process_metrics_interval_seconds,
+            )
+            .field("celestia_client", celestia_client)
             .finish()
     }
 }
@@ -87,6 +100,12 @@ mod tests {
 strategy_name = "test_strategy"
 provider_address = "127.0.0.1:6666"
 demo = true
+process_metrics_interval_seconds = 10
+
+[celestia_client]
+url = "https://phanes.example"
+client_celestia_private_key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+phanes_celestia_public_key = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 
 [topics.OKX]
 ETH-USDC-PERP = ["TRADE"]
@@ -110,6 +129,7 @@ ETH-USDC-PERP = ["TRADE"]
             config.provider_address
         );
         assert!(config.demo);
+        assert_eq!(10, config.process_metrics_interval_seconds.get());
         let okx_ether_perpetual_trade = test_topic(
             test_instrument(
                 Exchange::Okx,
@@ -139,6 +159,12 @@ ETH-USDC-PERP = ["TRADE"]
         OKX/ETH-USDC-SPOT/BBO,
         OKX/ETH-USDC-SPOT/TRADE,
     ],
+    process_metrics_interval_seconds: 10,
+    celestia_client: CelestiaClientConfig {
+        url: https://phanes.example/,
+        client_celestia_private_key: SecretBox<[u8; 32]>([REDACTED]),
+        phanes_celestia_public_key: SecretBox<[u8; 32]>([REDACTED]),
+    },
 }"#;
         assert_eq!(expected, format!("{config:#?}"));
     }
@@ -146,6 +172,15 @@ ETH-USDC-PERP = ["TRADE"]
     #[test]
     fn unknown_field_is_refused() {
         assert!(load(&format!("unknown = 1\n{MINIMAL_CONFIG}")).is_err());
+    }
+
+    #[test]
+    fn zero_process_metrics_interval_is_refused() {
+        let zero_interval = MINIMAL_CONFIG.replace(
+            "process_metrics_interval_seconds = 10",
+            "process_metrics_interval_seconds = 0",
+        );
+        assert!(load(&zero_interval).is_err());
     }
 
     #[test]

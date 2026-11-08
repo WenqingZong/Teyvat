@@ -3,10 +3,10 @@
 //! One WebSocket per connection. Binary frames 1 and 2 are the `Noise_IK` handshake with
 //! empty payloads: frame 1 carries the client's public key, which Phanes checks before it
 //! answers with frame 2. Every later frame is a transport message carrying a postcard-encoded
-//! [`Batch`] (client to server) or [`Ack`] (server to client).
+//! [`Batch`] (client to server) or [`Ack`] (server to client). Phanes runs the server side;
+//! [`client`] is the client every reporting process runs.
 
-use std::fmt::{Display, Formatter, Result as FormatResult};
-use std::time::Duration;
+pub mod client;
 
 use postcard::{Error as PostcardError, from_bytes, to_stdvec};
 use secrecy::{ExposeSecret, SecretBox};
@@ -14,36 +14,23 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use snow::{Error as NoiseError, HandshakeState, TransportState};
 
-use layline::noise::{
+use crate::noise::{
     StaticKey, build_initiator, build_responder, decrypt, encrypt, read_first_message,
 };
+use crate::process_metrics::ProcessSample;
 
 /// Mixed into the handshake hash, so Gnosis messages can't open a Celestia session.
 pub const CELESTIA_PROLOGUE: &[u8] = b"celestia";
 pub const CELESTIA_PATH: &str = "/celestia";
 
-const BYTES_PER_MEBIBYTE: f64 = 1024.0 * 1024.0;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProcessSample {
-    /// Since the Unix epoch.
-    pub timestamp: Duration,
-    /// 100.0 means one full core.
-    pub cpu_percent: f64,
-    pub resident_memory_bytes: u64,
-    pub network: NetworkRate,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct NetworkRate {
-    pub received_bytes_per_second: f64,
-    pub sent_bytes_per_second: f64,
-}
-
 /// `sequence` increases across reconnects and restarts, so the server can deduplicate resends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub sequence: u64,
+    /// Which process of the client sent it, such as `market_data_provider`. The Noise key
+    /// authenticates the client, a machine, which all its processes share; the name only tells
+    /// them apart.
+    pub process_name: String,
     pub samples: Vec<ProcessSample>,
 }
 
@@ -59,20 +46,6 @@ pub enum CelestiaError {
     Noise(#[from] NoiseError),
     #[error("payload: {0}")]
     Payload(#[from] PostcardError),
-}
-
-impl Display for ProcessSample {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let milliseconds = self.timestamp.as_millis();
-        let cpu_percent = self.cpu_percent;
-        let memory_mebibytes = self.resident_memory_bytes as f64 / BYTES_PER_MEBIBYTE;
-        let received = self.network.received_bytes_per_second;
-        let sent = self.network.sent_bytes_per_second;
-        write!(
-            formatter,
-            "time {milliseconds} ms, cpu {cpu_percent:.1}%, memory {memory_mebibytes:.1} MiB, received {received:.0} B/s, sent {sent:.0} B/s"
-        )
-    }
 }
 
 /// Client side: send the first message, then finish with the server's reply.
@@ -150,23 +123,11 @@ impl Session {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
-    use layline::gnosis::{GnosisId, Initiator as GnosisInitiator, Request};
-    use layline::testing::test_keypair;
-    use layline::time::get_current_timestamp_nanoseconds;
-
-    pub(crate) fn sample() -> ProcessSample {
-        ProcessSample {
-            timestamp: Duration::from_millis(1_700_000_000_000),
-            cpu_percent: 12.5,
-            resident_memory_bytes: 64 * 1024 * 1024,
-            network: NetworkRate {
-                received_bytes_per_second: 1024.0,
-                sent_bytes_per_second: 512.0,
-            },
-        }
-    }
+    use crate::gnosis::{GnosisId, Initiator as GnosisInitiator, Request};
+    use crate::testing::{test_keypair, test_process_sample};
+    use crate::time::get_current_timestamp_nanoseconds;
 
     fn connected_sessions() -> (Session, Session) {
         let (celestia_private_key, celestia_public_key) = test_keypair();
@@ -191,7 +152,8 @@ pub(crate) mod tests {
         let (mut client, mut server) = connected_sessions();
         let batch = Batch {
             sequence: 7,
-            samples: vec![sample()],
+            process_name: "market_data_provider".to_owned(),
+            samples: vec![test_process_sample()],
         };
         let ciphertext = client.encrypt(&batch).expect("client encrypts batch");
         assert_eq!(
@@ -244,14 +206,5 @@ pub(crate) mod tests {
         )
         .expect("gnosis request is written");
         assert!(Responder::read_first_message(&celestia_private_key, &gnosis_message).is_err());
-    }
-
-    #[test]
-    fn displays_sample() {
-        assert!(
-            sample()
-                .to_string()
-                .ends_with("cpu 12.5%, memory 64.0 MiB, received 1024 B/s, sent 512 B/s")
-        );
     }
 }

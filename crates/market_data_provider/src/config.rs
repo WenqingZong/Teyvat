@@ -1,13 +1,15 @@
 //! The provider's TOML config, read once at startup; see `deploy/market_data_provider/market_data_provider.example.toml`.
 
+use std::num::NonZeroU64;
 use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
 use tracing::info;
 
-use crate::phanes_client::PhanesClientConfig;
 use layline::bark::BarkConfig;
+use layline::celestia::client::CelestiaClientConfig;
+use layline::gnosis::client::GnosisClientConfig;
 use layline::secrets::read_secret_toml;
 
 #[derive(Debug, Deserialize)]
@@ -17,7 +19,11 @@ pub struct MarketDataProviderConfig {
     pub port: u16,
     /// Serve the venues' demo-trading data; every subscription request must ask for the same environment.
     pub demo: bool,
-    pub(crate) phanes_client: PhanesClientConfig,
+    /// How often the process logs its own CPU, memory, threads and TCP traffic.
+    pub process_metrics_interval_seconds: NonZeroU64,
+    pub(crate) gnosis_client: GnosisClientConfig,
+    /// Where the process metrics go: this machine's Celestia key, shared with its strategies.
+    pub celestia_client: CelestiaClientConfig,
     /// Required by release builds only; debug builds log alerts instead.
     pub(crate) bark: Option<BarkConfig>,
 }
@@ -73,7 +79,7 @@ mod tests {
 
         fn valid_text(&self) -> String {
             format!(
-                "port = 6666\ndemo = false\n\n[phanes_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n"
+                "port = 6666\ndemo = false\nprocess_metrics_interval_seconds = 10\n\n[gnosis_client]\nurl = \"https://phanes.example\"\nclient_gnosis_private_key = \"{DUMMY_KEY}\"\nphanes_gnosis_public_key = \"{DUMMY_KEY}\"\n\n[celestia_client]\nurl = \"https://phanes.example\"\nclient_celestia_private_key = \"{DUMMY_KEY}\"\nphanes_celestia_public_key = \"{DUMMY_KEY}\"\n"
             )
         }
 
@@ -96,10 +102,16 @@ mod tests {
         let expected = r#"MarketDataProviderConfig {
     port: 6666,
     demo: false,
-    phanes_client: PhanesClientConfig {
+    process_metrics_interval_seconds: 10,
+    gnosis_client: GnosisClientConfig {
         url: https://phanes.example/,
         client_gnosis_private_key: SecretBox<[u8; 32]>([REDACTED]),
         phanes_gnosis_public_key: SecretBox<[u8; 32]>([REDACTED]),
+    },
+    celestia_client: CelestiaClientConfig {
+        url: https://phanes.example/,
+        client_celestia_private_key: SecretBox<[u8; 32]>([REDACTED]),
+        phanes_celestia_public_key: SecretBox<[u8; 32]>([REDACTED]),
     },
     bark: Some(
         BarkConfig {
@@ -118,6 +130,16 @@ mod tests {
         assert!(fixture.load("port = 6666\n").is_err());
         let unknown_field = format!("unknown = 1\n{}", fixture.valid_text());
         assert!(fixture.load(&unknown_field).is_err());
+    }
+
+    #[test]
+    fn zero_process_metrics_interval_is_refused() {
+        let fixture = ConfigFixture::new();
+        let text = fixture.valid_text().replace(
+            "process_metrics_interval_seconds = 10",
+            "process_metrics_interval_seconds = 0",
+        );
+        assert!(fixture.load(&text).is_err());
     }
 
     #[test]

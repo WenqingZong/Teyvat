@@ -1,6 +1,6 @@
 # Osaka 监控（Celestia）计划
 
-状态：简化版已实现（Phanes 收数据只打日志；Osaka 端为 `examples/celestia/`，内存缓存），已实现部分见 [`architecture/phanes.md`](../architecture/phanes.md)。实施进度见 §8。标 **【待定】** 的条目需要确认后再动手。
+状态：简化版已实现：market_data_provider 和策略用 `layline::process_metrics` 采样、经 `layline::celestia::client` 上报（内存缓存、重连补发），Phanes 收到后只打日志。已实现部分见 [`architecture/phanes.md`](../architecture/phanes.md)「Celestia 简化版的现状」和 [`architecture/overview.md`](../architecture/overview.md)「进程监控」。实施进度见 §8。标 **【待定】** 的条目需要确认后再动手。
 
 ## 1. 目标
 
@@ -63,10 +63,7 @@ Osaka (inside the business process)                              RedmiBook
 
 - **CPU**：每秒读 `/proc/self/stat`（utime + stime），按差值算使用率。
 - **内存**：每秒读 `/proc/self/statm` 的 RSS。
-- **网络**（进程口径，D7）：
-  - 业务程序由 systemd 管理，unit 开 `IPAccounting=yes`；客户端每秒经 D-Bus 读 `IPIngressBytes` / `IPEgressBytes`，按差值算速率。
-  - 不能用 systemd 时的兜底：netlink `sock_diag` 读本进程 TCP socket 的 `tcp_info` 字节数（不含已关闭连接和 UDP）。
-  - 【待定 Q2】业务程序是否已经或可以由 systemd 管理。
+- **网络**（进程口径，D7）：netlink `sock_diag` 读本进程 TCP socket 的 `tcp_info` 字节数（不含两次采样之间开关的连接和 UDP），已实现，见 `architecture/overview.md`「进程监控」。不依赖 systemd，本地运行也有数。
 - **内部数据**：业务代码调用 `record(name, value)`，写入有界 channel。channel 满了就丢弃，并累加 `celestia_dropped` 计数，**绝不阻塞业务逻辑**。
 - 时间戳由 Osaka 打（毫秒），假设 Osaka 的 NTP 正常。
 
@@ -135,19 +132,19 @@ Teyvat 已经是 cargo workspace，共用代码在 `layline`（只有被两个�
 | 位置 | 内容 | 状态 |
 |---|---|---|
 | `layline::noise` | Noise 参数、握手、加解密，Gnosis 和 Celestia 共用 | 已有 |
-| `crates/phanes/src/celestia/proto.rs` | Celestia 协议（`ProcessSample`、`Batch`、`Ack`、握手、编解码） | 已有。正式的 `celestia_client` crate 出现后，它有了第二个使用者，按规则移入 `layline` |
+| `layline::celestia` | Celestia 协议（`Batch`、`Ack`、握手、编解码），样本类型是 `layline::process_metrics::ProcessSample` | 已有 |
 | `crates/phanes`（Celestia 模块） | 接收、写 ClickHouse、去重、告警 | 接收、解密、回 ack、安全事件推送已有；ClickHouse 和去重未做 |
-| `celestia_client`（新 crate） | 采集、spool、发送（库） | 未做；`examples/celestia/` 是内存缓存的简化版 |
+| `layline::process_metrics`、`layline::celestia::client` | 采集、发送 | 已有（内存缓存）；spool 未做 |
 
 Bark 和 `Notifier` 在 `layline::bark`。
 
 ## 8. 实施步骤（确认后执行）
 
 1. **【已完成】** 改造为 workspace，把共用协议抽出来：Teyvat workspace，Noise 层和 Gnosis 协议在 `layline`。Gnosis 的行为不变，测试全过。
-2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/phanes/src/celestia/proto.rs`。
+2. **【已完成】** 定义 Celestia 协议（消息类型、握手、编解码），加单元测试：`crates/layline/src/celestia/mod.rs`。
 3. **【部分完成】** 在 `phanes` 里加 Celestia 模块：WS + Noise + ack、每个客户端的 Celestia 公钥、密钥由部署脚本用 openssl 生成并写进 `phanes.toml`，均已完成；写 ClickHouse、去重未做。
-4. 写 `celestia-client`：采集（含 systemd `IPAccounting` 进程口径网络）、spool、发送、重连、限速补发。
-5. **【部分完成】** 写 `examples/`：模拟 Osaka 程序（`examples/celestia/`，内存缓存、重连补发）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
+4. 写 `celestia-client`：采集、spool、发送、重连、限速补发。**【部分完成】** 采集是 `layline::process_metrics`（进程 runtime 上的 async 任务：CPU、内存分 anon/file/shmem、按线程的 CPU 和上下文切换、fd 数、TCP 收发，网络用 netlink `sock_diag` 进程口径，取代原计划的 systemd `IPAccounting`；间隔来自各服务配置的 `process_metrics_interval_seconds`）；发送是 `layline::celestia::client`（async 任务、单一内存 Outbox、断线期间照常收样本、重连补发；`[celestia_client]` 配置表，整台机器共用一把 Celestia 密钥，`Batch` 带 `process_name` 区分进程），已接入 market_data_provider 和 dummy_strategy。spool（磁盘缓存）和限速补发未做。
+5. **【部分完成】** 写 `examples/`：Celestia 冒烟测试（`examples/celestia.rs`：监控自己并经 `layline::celestia::client` 上报）已完成；基于磁盘 spool 的断网补发测试随第 4 步一起做。
 6. 部署：ClickHouse、Grafana、systemd unit，扩展部署脚本，配置 cloudflared 路由和 Cloudflare Access。
 7. Grafana 看板（CPU、内存、网络、内部指标），配置以 JSON 形式入库。
 8. **【已完成】** 告警：安全事件推送。
@@ -157,7 +154,6 @@ Bark 和 `Notifier` 在 `layline::bark`。
 
 | # | 问题 | 推荐 |
 |---|---|---|
-| Q2 | 业务程序能否由 systemd 管理并开 `IPAccounting`？ | 能 |
 | Q4 | 内部数据的形态：都是"名字 + 数值"吗？有没有直方图、标签、字符串事件？指标名是固定的一组还是会动态增加？是否需要阈值告警？ | 需要你给一份样例 |
 | Q5 | 公网看板让 Cloudflare 能看到图表明文，能否接受？ | 接受（数据不含密钥），加 Cloudflare Access |
 | Q6 | 内部数据每个点原样传，还是允许 Osaka 按秒聚合？ | 原样传（量很小） |

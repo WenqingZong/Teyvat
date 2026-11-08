@@ -25,6 +25,7 @@ use layline::bark::Notifier;
 use layline::build::{GIT_COMMIT_HASH, RELEASE_BUILD, build_profile};
 use layline::logging::init_tracing;
 use layline::noise::{encode_key, generate_keypair};
+use layline::process_metrics::run_process_monitor;
 use phanes::celestia::server::CelestiaState;
 use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter};
 use phanes::clients::ClientName;
@@ -138,6 +139,10 @@ async fn supervise(config_path: &Path) -> ExitCode {
 
     let (panic_sender, mut panic_receiver) = unbounded_channel();
     install_panic_hook(panic_sender);
+    // After the hook, so a panicking monitor is reported like any other panic.
+    let process_metrics_interval =
+        Duration::from_secs(config.process_metrics_interval_seconds.get());
+    spawn(run_process_monitor(process_metrics_interval, None));
 
     let mut service = spawn(run_service(config, Arc::clone(&notifier)));
     let crash_reason = tokio::select! {

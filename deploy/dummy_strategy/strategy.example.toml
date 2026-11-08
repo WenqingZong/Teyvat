@@ -5,6 +5,14 @@
 strategy_name = "dummy_strategy"
 provider_address = "127.0.0.1:6666"                  # 127.0.0.1:<port> of market_data_provider.toml
 demo = true                                          # trade on the venues' demo accounts; must equal the provider's demo
+process_metrics_interval_seconds = 10                # how often to log the process's CPU, memory, threads and TCP traffic
+
+# Where the process metrics go. The install copies this whole table from the market data provider's
+# config, which holds this machine's Celestia key, on every install; leave the placeholders.
+[celestia_client]
+url = "<copied from /etc/market_data_provider/market_data_provider.toml by the install>"
+client_celestia_private_key = "<copied from /etc/market_data_provider/market_data_provider.toml by the install>"
+phanes_celestia_public_key = "<copied from /etc/market_data_provider/market_data_provider.toml by the install>"
 
 # Exchange, then instrument (BASE-QUOTE-SPOT or BASE-QUOTE-PERP), then market data types, as in the
 # provider's HTTP API.

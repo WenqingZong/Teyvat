@@ -6,18 +6,25 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use tokio::runtime::Builder as RuntimeBuilder;
+use tokio::sync::mpsc::channel;
 use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
-use dummy_strategy::client::subscribe;
+use dummy_strategy::client::ProviderSession;
 use dummy_strategy::config::StrategyConfig;
 use dummy_strategy::latency_bench::LatencyBench;
 use dummy_strategy::strategy::Strategy;
 use layline::build::{GIT_COMMIT_HASH, build_profile};
+use layline::celestia::client::{ReporterConfig, SAMPLE_CHANNEL_CAPACITY, run_celestia_reporter};
 use layline::logging::init_tracing;
+use layline::process_metrics::run_process_monitor;
 use layline::shared_memory::MarketDataReader;
 
 const FAILURE_EXIT_CODE: i32 = 1;
+/// Everything but the hot path runs as tasks on this one thread: none of it is busy.
+const BACKGROUND_WORKER_THREADS: usize = 1;
+const BACKGROUND_THREAD_NAME: &str = "background";
 
 /// Dropping the guard flushes buffered log lines; `exit` runs no destructors, so it is dropped by hand.
 static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
@@ -50,7 +57,8 @@ fn main() {
     }
 }
 
-/// A panic on any thread, such as the resubscribing or the reporting one, stops the whole strategy.
+/// A panic anywhere, the hot path or a background task such as resubscribing, stops the whole
+/// strategy: the hook runs before tokio would only end the panicking task.
 fn exit_on_panic() {
     set_hook(Box::new(|panic_info| {
         exit_with_error(&format!("fatal panic: {panic_info}"))
@@ -71,9 +79,33 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
         provider_address,
         demo,
         topics,
+        process_metrics_interval_seconds,
+        celestia_client,
     } = StrategyConfig::load(config_path)?;
-    let subscriptions = subscribe(provider_address, strategy_name, demo, topics)?;
-    let mut strategy = LatencyBench::new(report_interval);
+    // Phanes' log names the process after the strategy.
+    let reporter_config = ReporterConfig::new(celestia_client, strategy_name.clone())?;
+    // The main thread polls the rings; the background runtime does everything else. It lives as
+    // long as `run`, which returns only on a fatal error.
+    let background = RuntimeBuilder::new_multi_thread()
+        .worker_threads(BACKGROUND_WORKER_THREADS)
+        .thread_name(BACKGROUND_THREAD_NAME)
+        .enable_all()
+        .build()?;
+    let process_metrics_interval = Duration::from_secs(process_metrics_interval_seconds.get());
+    let (sample_sender, sample_receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
+    background.spawn(run_process_monitor(
+        process_metrics_interval,
+        Some(sample_sender),
+    ));
+    background.spawn(run_celestia_reporter(
+        reporter_config,
+        process_metrics_interval,
+        sample_receiver,
+    ));
+    let provider_session = ProviderSession::new(provider_address, strategy_name, demo, topics)?;
+    let subscriptions = background.block_on(provider_session.subscribe())?;
+    background.spawn(provider_session.resubscribe_forever(subscriptions.clone()));
+    let mut strategy = LatencyBench::new(report_interval, background.handle());
     MarketDataReader::open(&subscriptions)?.run(|data, received_at_nanoseconds| {
         strategy.on_market_data(&data, received_at_nanoseconds)
     })

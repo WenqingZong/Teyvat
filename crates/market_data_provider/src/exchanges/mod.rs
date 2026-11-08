@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use anyhow::Result;
 use strum::IntoEnumIterator;
 
-use crate::phanes_client::PhanesClient;
+use crate::gnosis_client::GnosisClient;
 use binance::BinanceConnector;
 use layline::bark::Notifier;
 use layline::types::{ConnectedApi, ConnectedApis};
@@ -22,7 +22,7 @@ pub(crate) use router::ExchangeRouter;
 /// What every connector may need besides its venue; each worker gets its own clone.
 #[derive(Clone)]
 pub(crate) struct ConnectorContext {
-    pub(crate) phanes_client: PhanesClient,
+    pub(crate) gnosis_client: GnosisClient,
     pub(crate) notifier: Notifier,
 }
 
@@ -62,12 +62,12 @@ pub(crate) fn connected_apis() -> ConnectedApis {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::phanes_client::tests::unreachable_phanes_client;
+    use crate::gnosis_client::tests::unreachable_gnosis_client;
 
     /// For connectors that never fetch a key or alert, such as OKX's.
     pub(crate) fn test_connector_context() -> ConnectorContext {
         ConnectorContext {
-            phanes_client: unreachable_phanes_client(),
+            gnosis_client: unreachable_gnosis_client(),
             notifier: Notifier::Log,
         }
     }
