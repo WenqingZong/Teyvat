@@ -66,8 +66,22 @@ pub enum Notification {
         client: ClientName,
         process_name: String,
     },
-    /// The connection of a reporting process that `CelestiaConnected` announced ended, for any
-    /// reason: a clean close, a dropped link, an idle timeout or an error, which `reason` names.
+    /// A reporting process connected again while Phanes still held its old connection, whose
+    /// link had died unnoticed; `silence` is how long ago the old connection last heard from it.
+    CelestiaReconnected {
+        client: ClientName,
+        process_name: String,
+        silence: Duration,
+    },
+    /// A reporting process closed its connection on purpose; `reason` is the one it gave, such as
+    /// the signal that stopped it.
+    CelestiaClosed {
+        client: ClientName,
+        process_name: String,
+        reason: String,
+    },
+    /// The connection of a reporting process was lost: a dropped link, an idle timeout or an
+    /// error, which `reason` names.
     CelestiaDisconnected {
         client: ClientName,
         process_name: String,
@@ -152,6 +166,31 @@ impl Notification {
                 format_reporter(client, process_name),
                 DEFAULT_SOUND,
             ),
+            Self::CelestiaReconnected {
+                client,
+                process_name,
+                silence,
+            } => {
+                let reporter = format_reporter(client, process_name);
+                let silence_seconds = silence.as_secs();
+                (
+                    "已重新连接至天空岛".to_owned(),
+                    format!("{reporter}\n旧连接最后一条消息: {silence_seconds} 秒前"),
+                    DEFAULT_SOUND,
+                )
+            }
+            Self::CelestiaClosed {
+                client,
+                process_name,
+                reason,
+            } => {
+                let reporter = format_reporter(client, process_name);
+                (
+                    "魔神断绝了与天空岛的连接".to_owned(),
+                    format!("{reporter}\n原因: {reason}"),
+                    DEFAULT_SOUND,
+                )
+            }
             Self::CelestiaDisconnected {
                 client,
                 process_name,
@@ -388,6 +427,36 @@ mod tests {
         );
         assert_eq!(message.sound, DEFAULT_SOUND);
         assert_eq!(message.group, GROUP);
+    }
+
+    #[test]
+    fn celestia_closed_message_names_client_process_and_reason() {
+        let message = Notification::CelestiaClosed {
+            client: "Osaka".into(),
+            process_name: "market_data_provider".to_owned(),
+            reason: "SIGINT".to_owned(),
+        }
+        .to_bark_message();
+        assert_eq!(message.title, "魔神断绝了与天空岛的连接");
+        assert_eq!(
+            message.body,
+            "魔神: Osaka\n服务: market_data_provider\n原因: SIGINT"
+        );
+    }
+
+    #[test]
+    fn celestia_reconnected_message_names_client_process_and_silence() {
+        let message = Notification::CelestiaReconnected {
+            client: "Osaka".into(),
+            process_name: "market_data_provider".to_owned(),
+            silence: Duration::from_secs(42),
+        }
+        .to_bark_message();
+        assert_eq!(message.title, "已重新连接至天空岛");
+        assert_eq!(
+            message.body,
+            "魔神: Osaka\n服务: market_data_provider\n旧连接最后一条消息: 42 秒前"
+        );
     }
 
     #[test]

@@ -12,7 +12,6 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::Parser;
 use secrecy::SecretString;
-use tokio::signal::ctrl_c;
 use tokio::spawn;
 use tokio::sync::mpsc::channel;
 use tracing::info;
@@ -25,6 +24,7 @@ use layline::logging::init_tracing;
 use layline::noise::decode_key;
 use layline::process_metrics::run_process_monitor;
 use layline::secrets::read_secret_file;
+use layline::shutdown::shutdown_signal;
 
 #[derive(Parser)]
 struct Arguments {
@@ -59,12 +59,13 @@ async fn main() -> Result<()> {
     let interval = Duration::from_secs(arguments.process_metrics_interval_seconds.get());
     let (sample_sender, sample_receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
     spawn(run_process_monitor(interval, Some(sample_sender)));
-    spawn(run_celestia_reporter(
+    run_celestia_reporter(
         reporter_config,
         interval,
         sample_receiver,
-    ));
-    ctrl_c().await?;
-    info!("ctrl-c, exiting");
+        shutdown_signal(),
+    )
+    .await;
+    info!("exiting");
     Ok(())
 }

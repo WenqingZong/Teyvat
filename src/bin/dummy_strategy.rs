@@ -20,7 +20,9 @@ use layline::celestia::client::{ReporterConfig, SAMPLE_CHANNEL_CAPACITY, run_cel
 use layline::logging::init_tracing;
 use layline::process_metrics::run_process_monitor;
 use layline::shared_memory::MarketDataReader;
+use layline::shutdown::shutdown_signal;
 
+const SUCCESS_EXIT_CODE: i32 = 0;
 const FAILURE_EXIT_CODE: i32 = 1;
 /// Everything but the hot path runs as tasks on this one thread: none of it is busy.
 const BACKGROUND_WORKER_THREADS: usize = 1;
@@ -67,10 +69,14 @@ fn exit_on_panic() {
 
 fn exit_with_error(message: &str) -> ! {
     error!("{message}");
+    flush_logs_and_exit(FAILURE_EXIT_CODE);
+}
+
+fn flush_logs_and_exit(code: i32) -> ! {
     if let Ok(mut log_guard_option) = LOG_GUARD.lock() {
         drop(log_guard_option.take());
     }
-    exit(FAILURE_EXIT_CODE);
+    exit(code);
 }
 
 fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
@@ -97,11 +103,19 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
         process_metrics_interval,
         Some(sample_sender),
     ));
-    background.spawn(run_celestia_reporter(
+    let reporter = run_celestia_reporter(
         reporter_config,
         process_metrics_interval,
         sample_receiver,
-    ));
+        shutdown_signal(),
+    );
+    // The reporter stops on SIGINT or SIGTERM once it has told Phanes why; the strategy stops with
+    // it, from here because the main thread never leaves the ring loop.
+    background.spawn(async {
+        reporter.await;
+        info!("shutting down");
+        flush_logs_and_exit(SUCCESS_EXIT_CODE);
+    });
     let provider_session = ProviderSession::new(provider_address, strategy_name, demo, topics)?;
     let subscriptions = background.block_on(provider_session.subscribe())?;
     background.spawn(provider_session.resubscribe_forever(subscriptions.clone()));

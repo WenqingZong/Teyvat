@@ -1,6 +1,5 @@
 use std::any::Any;
 use std::backtrace::Backtrace;
-use std::future::pending;
 use std::io::{Error as IoError, Write, stdout};
 use std::net::SocketAddr;
 use std::panic::set_hook;
@@ -14,8 +13,6 @@ use clap::{Parser, Subcommand};
 use secrecy::{ExposeSecret, SecretSlice, SecretString};
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
-use tokio::signal::ctrl_c;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::spawn;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::time::timeout;
@@ -26,6 +23,7 @@ use layline::build::{GIT_COMMIT_HASH, RELEASE_BUILD, build_profile};
 use layline::logging::init_tracing;
 use layline::noise::{encode_key, generate_keypair};
 use layline::process_metrics::run_process_monitor;
+use layline::shutdown::shutdown_signal;
 use phanes::celestia::server::CelestiaState;
 use phanes::client_filter::{CLIENT_IP_HEADER, ClientFilter};
 use phanes::clients::ClientName;
@@ -263,27 +261,4 @@ async fn report_crash(notifier: &Notifier, reason: String) -> ExitCode {
         Err(_) => error!("timed out sending crash notification"),
     }
     ExitCode::FAILURE
-}
-
-async fn shutdown_signal() -> &'static str {
-    let mut terminate = match signal(SignalKind::terminate()) {
-        Ok(signal) => signal,
-        Err(error) => {
-            error!("cannot listen for SIGTERM: {error}");
-            return match ctrl_c().await {
-                Ok(()) => "ctrl-c",
-                Err(_) => pending().await,
-            };
-        }
-    };
-    tokio::select! {
-        _ = terminate.recv() => "SIGTERM",
-        result = ctrl_c() => match result {
-            Ok(()) => "ctrl-c",
-            Err(error) => {
-                error!("cannot listen for ctrl-c: {error}");
-                pending().await
-            }
-        },
-    }
 }

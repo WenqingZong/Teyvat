@@ -22,7 +22,7 @@ anyhow.workspace = true
 clap.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 

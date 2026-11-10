@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use clap::Parser;
-use tokio::spawn;
 use tokio::sync::mpsc::channel;
+use tokio::{select, spawn};
 use tracing::{error, info};
 use tracing_appender::non_blocking::WorkerGuard;
 
@@ -14,6 +14,7 @@ use layline::build::{GIT_COMMIT_HASH, build_profile};
 use layline::celestia::client::{ReporterConfig, SAMPLE_CHANNEL_CAPACITY, run_celestia_reporter};
 use layline::logging::init_tracing;
 use layline::process_metrics::run_process_monitor;
+use layline::shutdown::shutdown_signal;
 use market_data_provider::config::MarketDataProviderConfig;
 use market_data_provider::exit_reason::ExitReason;
 use market_data_provider::server::run;
@@ -53,12 +54,19 @@ async fn main() -> ExitCode {
         process_metrics_interval,
         Some(sample_sender),
     ));
-    spawn(run_celestia_reporter(
+    let reporter = spawn(run_celestia_reporter(
         reporter_config,
         process_metrics_interval,
         sample_receiver,
+        shutdown_signal(),
     ));
-    run(config).await.unwrap_or_else(|error| fatal(error));
+    // The reporter stops on SIGINT or SIGTERM once it has told Phanes why; the provider stops with it.
+    select! {
+        run_result = run(config) => run_result.unwrap_or_else(|error| fatal(error)),
+        reporter_result = reporter => reporter_result.expect("a panic exits through the hook"),
+    }
+    info!("shutting down");
+    flush_logs();
     ExitCode::SUCCESS
 }
 

@@ -12,6 +12,7 @@ pub mod process_metrics;
 pub mod provider_api;
 pub mod secrets;
 pub mod shared_memory;
+pub mod shutdown;
 pub mod testing;
 pub mod time;
 pub mod types;

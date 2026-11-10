@@ -3,7 +3,7 @@
 //! when Phanes acknowledges it; after a reconnect, everything still in it is sent again.
 use std::collections::VecDeque;
 use std::fmt::{Debug, Formatter, Result as FormatResult};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::mpsc::Receiver;
 use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tracing::{info, warn};
@@ -22,6 +24,7 @@ use super::{Ack, Batch, CELESTIA_PATH, CelestiaError, Hello, Initiator, Session}
 use crate::backoff::exponential_backoff;
 use crate::noise::{StaticKey, deserialize_key};
 use crate::process_metrics::ProcessSample;
+use crate::shutdown::ShutdownSignal;
 use crate::time::since_unix_epoch;
 
 /// The reporter takes each sample as it arrives, so the channel from the monitor needs no room for
@@ -33,7 +36,11 @@ const BUFFERED_DURATION: Duration = Duration::from_secs(3600);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long shutdown waits for outstanding acks, and again for Phanes to answer the close.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// The close reason when the session ends because every sample sender is gone, so Phanes can tell
+/// it from a stop by signal.
+const NO_MORE_SAMPLES_REASON: &str = "no more samples to report";
 /// Keeps Cloudflare from closing the connection while no samples flow.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -138,12 +145,15 @@ struct Connection {
 }
 
 /// Reports every sample from `sample_receiver`, which arrive one every `sample_interval`. Returns
-/// only once every sample sender is gone. It never stops the process: a failed connection is
-/// logged and retried with exponential backoff, and samples keep going into the outbox meanwhile.
+/// once `shutdown_future` resolves, after closing the connection with the signal as the reason so Phanes
+/// knows the stop was intended, or once every sample sender is gone. It never stops the process
+/// on its own: a failed connection is logged and retried with exponential backoff, and samples
+/// keep going into the outbox meanwhile.
 pub async fn run_celestia_reporter(
     config: ReporterConfig,
     sample_interval: Duration,
     mut sample_receiver: Receiver<ProcessSample>,
+    shutdown_future: impl Future<Output = ShutdownSignal>,
 ) {
     let buffered_batches =
         (BUFFERED_DURATION.as_secs_f64() / sample_interval.as_secs_f64()).ceil() as usize;
@@ -158,12 +168,18 @@ pub async fn run_celestia_reporter(
         build_celestia_url(&celestia_client.url).expect("ReporterConfig::new accepted the URL");
     let hello = Hello { process_name };
     let mut outbox = Outbox::new(first_sequence, buffered_batches);
+    let mut shutdown_watcher = pin!(async {
+        let signal = shutdown_future.await;
+        info!("received {signal}, stopping the Celestia reporter");
+        signal
+    });
     let mut failures = 0;
     loop {
         let Some(connect_result) = take_samples_while(
             connect(&celestia_url, &celestia_client, &hello),
             &mut sample_receiver,
             &mut outbox,
+            shutdown_watcher.as_mut(),
         )
         .await
         else {
@@ -172,8 +188,13 @@ pub async fn run_celestia_reporter(
         let session_result = match connect_result {
             Ok(connection) => {
                 let started = Instant::now();
-                let session_result =
-                    exchange_batches(connection, &mut outbox, &mut sample_receiver).await;
+                let session_result = exchange_batches(
+                    connection,
+                    &mut outbox,
+                    &mut sample_receiver,
+                    shutdown_watcher.as_mut(),
+                )
+                .await;
                 // A session that lasted a while means the link was healthy, so retry quickly.
                 if started.elapsed() > MAX_BACKOFF {
                     failures = 0;
@@ -189,22 +210,29 @@ pub async fn run_celestia_reporter(
         failures += 1;
         let backoff = exponential_backoff(failures, INITIAL_BACKOFF, MAX_BACKOFF);
         info!("reconnecting to Celestia in {backoff:?}");
-        if take_samples_while(sleep(backoff), &mut sample_receiver, &mut outbox)
-            .await
-            .is_none()
+        if take_samples_while(
+            sleep(backoff),
+            &mut sample_receiver,
+            &mut outbox,
+            shutdown_watcher.as_mut(),
+        )
+        .await
+        .is_none()
         {
             break;
         }
     }
-    info!("no more samples to report, Celestia reporter stopped");
+    info!("Celestia reporter stopped");
 }
 
 /// Drives `future` to completion while moving every sample that arrives meanwhile into the
-/// outbox, so no sample waits on a connection. `None` once every sample sender is gone.
+/// outbox, so no sample waits on a connection. `None` once every sample sender is gone or
+/// `shutdown_watcher` resolves.
 async fn take_samples_while<Output>(
     future: impl Future<Output = Output>,
     sample_receiver: &mut Receiver<ProcessSample>,
     outbox: &mut Outbox,
+    mut shutdown_watcher: Pin<&mut impl Future<Output = ShutdownSignal>>,
 ) -> Option<Output> {
     let mut future = pin!(future);
     loop {
@@ -213,6 +241,7 @@ async fn take_samples_while<Output>(
             sample_option = sample_receiver.recv() => {
                 outbox.push(vec![sample_option?]);
             }
+            _ = &mut shutdown_watcher => return None,
         }
     }
 }
@@ -304,11 +333,13 @@ async fn connect(
 }
 
 /// Resends everything pending, then sends each new sample as it arrives, until an error. Returns
-/// `Ok` only after every sample sender is gone and the pending acks are drained.
+/// `Ok` only after `shutdown_watcher` resolves or every sample sender is gone, and the pending acks
+/// are drained.
 async fn exchange_batches(
     connection: Connection,
     outbox: &mut Outbox,
     sample_receiver: &mut Receiver<ProcessSample>,
+    mut shutdown_watcher: Pin<&mut impl Future<Output = ShutdownSignal>>,
 ) -> Result<(), ClientError> {
     let Connection {
         mut socket,
@@ -329,13 +360,29 @@ async fn exchange_batches(
         select! {
             sample_option = sample_receiver.recv() => {
                 let Some(sample) = sample_option else {
-                    return drain(socket, session, outbox).await;
+                    let close_frame = CloseFrame {
+                        code: CloseCode::Normal,
+                        reason: NO_MORE_SAMPLES_REASON.into(),
+                    };
+                    return drain(socket, session, outbox, close_frame).await;
                 };
                 let ciphertext = session.encrypt(outbox.push(vec![sample]))?;
                 socket.send(Message::Binary(ciphertext.into())).await?;
             }
             message = socket.next() => receive_ack(message, &mut session, outbox)?,
             _ = heartbeat.tick() => socket.send(Message::Ping(Vec::new().into())).await?,
+            signal = &mut shutdown_watcher => {
+                let close_frame = CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: signal.to_string().into(),
+                };
+                // `shutdown_watcher` has resolved and must not be polled again, so a failed close
+                // still ends the reporter instead of reconnecting.
+                if let Err(error) = drain(socket, session, outbox, close_frame).await {
+                    warn!("closing the Celestia connection failed: {error}");
+                }
+                return Ok(());
+            }
         }
     }
 }
@@ -358,11 +405,14 @@ fn receive_ack(
     }
 }
 
-/// On shutdown, waits briefly for outstanding acks before closing.
+/// On shutdown, waits briefly for outstanding acks before closing with `close_frame`, whose reason
+/// tells Phanes why the session ended, then for Phanes' answer, so Phanes sees the whole closing
+/// handshake before the process exits.
 async fn drain(
     mut socket: Socket,
     mut session: Session,
     outbox: &mut Outbox,
+    close_frame: CloseFrame,
 ) -> Result<(), ClientError> {
     let waiting = async {
         while !outbox.is_empty() {
@@ -377,7 +427,16 @@ async fn drain(
             warn!("{unacknowledged_batches} batches still unacknowledged at shutdown")
         }
     }
-    socket.close(None).await?;
+    socket.close(Some(close_frame)).await?;
+    // The stream ends once Phanes' close arrives.
+    if timeout(DRAIN_TIMEOUT, async {
+        while socket.next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        warn!("Phanes did not answer the close in time");
+    }
     Ok(())
 }
 
@@ -403,12 +462,12 @@ async fn handshake(
 
 #[cfg(test)]
 mod tests {
-    use std::future::pending;
+    use std::future::{pending, ready};
     use std::sync::Arc;
 
     use tokio::net::{TcpListener, TcpStream};
     use tokio::spawn;
-    use tokio::sync::mpsc::channel;
+    use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, channel, unbounded_channel};
     use tokio_tungstenite::accept_async;
 
     use super::*;
@@ -423,9 +482,14 @@ mod tests {
     const DUMMY_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=";
 
     /// A Celestia server as Phanes runs one, except that it serves any client: it completes every
-    /// handshake made for its key and acknowledges every batch. Returns its base URL and the keys a
-    /// client needs.
-    async fn celestia_server() -> (Url, SecretBox<StaticKey>, SecretBox<StaticKey>) {
+    /// handshake made for its key and acknowledges every batch. Returns its base URL, the keys a
+    /// client needs and the reason of every close frame it receives.
+    async fn celestia_server() -> (
+        Url,
+        SecretBox<StaticKey>,
+        SecretBox<StaticKey>,
+        UnboundedReceiver<String>,
+    ) {
         let (celestia_private_key, celestia_public_key) = test_keypair();
         let (client_private_key, _) = test_keypair();
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -433,17 +497,31 @@ mod tests {
             .expect("test listener binds");
         let address = listener.local_addr().expect("listener has an address");
         let celestia_private_key = Arc::new(celestia_private_key);
+        let (close_reason_sender, close_reason_receiver) = unbounded_channel();
         spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                spawn(answer_connection(stream, Arc::clone(&celestia_private_key)));
+                spawn(answer_connection(
+                    stream,
+                    Arc::clone(&celestia_private_key),
+                    close_reason_sender.clone(),
+                ));
             }
         });
         let base_url = url(&format!("http://{address}"));
-        (base_url, client_private_key, celestia_public_key)
+        (
+            base_url,
+            client_private_key,
+            celestia_public_key,
+            close_reason_receiver,
+        )
     }
 
     /// Ends the connection on anything Phanes would refuse.
-    async fn answer_connection(stream: TcpStream, celestia_private_key: Arc<SecretBox<StaticKey>>) {
+    async fn answer_connection(
+        stream: TcpStream,
+        celestia_private_key: Arc<SecretBox<StaticKey>>,
+        close_reason_sender: UnboundedSender<String>,
+    ) {
         let Ok(mut socket) = accept_async(stream).await else {
             return;
         };
@@ -467,18 +545,29 @@ mod tests {
             return;
         }
         while let Some(Ok(message)) = socket.next().await {
-            if let Message::Binary(ciphertext) = message {
-                let batch: Batch = session
-                    .decrypt(&ciphertext)
-                    .expect("the client sends batches");
-                let ack = session
-                    .encrypt(&Ack {
-                        sequence: batch.sequence,
-                    })
-                    .expect("an ack encrypts");
-                if socket.send(Message::Binary(ack.into())).await.is_err() {
-                    return;
+            match message {
+                Message::Binary(ciphertext) => {
+                    let batch: Batch = session
+                        .decrypt(&ciphertext)
+                        .expect("the client sends batches");
+                    let ack = session
+                        .encrypt(&Ack {
+                            sequence: batch.sequence,
+                        })
+                        .expect("an ack encrypts");
+                    if socket.send(Message::Binary(ack.into())).await.is_err() {
+                        return;
+                    }
                 }
+                Message::Close(close_frame_option) => {
+                    let close_reason = close_frame_option
+                        .map(|close_frame| close_frame.reason.to_string())
+                        .unwrap_or_default();
+                    close_reason_sender
+                        .send(close_reason)
+                        .expect("the test holds the receiver");
+                }
+                _ => {}
             }
         }
     }
@@ -559,7 +648,8 @@ mod tests {
 
     #[tokio::test]
     async fn session_delivers_pending_and_new_batches() {
-        let (url, client_private_key, celestia_public_key) = celestia_server().await;
+        let (url, client_private_key, celestia_public_key, mut close_reason_receiver) =
+            celestia_server().await;
         let mut outbox = Outbox::new(10, 100);
         outbox.push(vec![test_process_sample()]);
         let (sender, mut receiver) = channel(8);
@@ -574,15 +664,40 @@ mod tests {
         let connection = connect_to(&client_config(url, client_private_key, celestia_public_key))
             .await
             .expect("the client connects");
-        exchange_batches(connection, &mut outbox, &mut receiver)
+        exchange_batches(connection, &mut outbox, &mut receiver, pin!(pending()))
             .await
             .expect("session ends cleanly after the channel closes");
         assert!(outbox.is_empty(), "every batch was acknowledged");
+        assert_eq!(
+            close_reason_receiver.recv().await.as_deref(),
+            Some(NO_MORE_SAMPLES_REASON)
+        );
+    }
+
+    /// The close tells Phanes which signal stopped the process, so it can tell a stop from a loss.
+    #[tokio::test]
+    async fn shutdown_closes_the_session_with_the_signal_as_the_reason() {
+        let (url, client_private_key, celestia_public_key, mut close_reason_receiver) =
+            celestia_server().await;
+        let mut outbox = Outbox::new(0, 10);
+        // The sender stays alive, so only the signal can end the session.
+        let (_sender, mut receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
+        let connection = connect_to(&client_config(url, client_private_key, celestia_public_key))
+            .await
+            .expect("the client connects");
+        let shutdown_watcher = pin!(ready(ShutdownSignal::Terminate));
+        exchange_batches(connection, &mut outbox, &mut receiver, shutdown_watcher)
+            .await
+            .expect("the session closes cleanly");
+        assert_eq!(
+            close_reason_receiver.recv().await.as_deref(),
+            Some("SIGTERM")
+        );
     }
 
     #[tokio::test]
     async fn handshake_for_another_server_fails() {
-        let (url, client_private_key, _) = celestia_server().await;
+        let (url, client_private_key, _, _) = celestia_server().await;
         let (_, other_celestia_public_key) = test_keypair();
         let result = connect_to(&client_config(
             url,
@@ -614,12 +729,19 @@ mod tests {
                     .expect("the reporter takes samples");
             }
         });
-        let output = take_samples_while(sleep(SAMPLE_INTERVAL), &mut receiver, &mut outbox).await;
+        let output = take_samples_while(
+            sleep(SAMPLE_INTERVAL),
+            &mut receiver,
+            &mut outbox,
+            pin!(pending()),
+        )
+        .await;
         assert_eq!(Some(()), output);
         assert_eq!(3, outbox.len());
         monitor.await.expect("the monitor is expected to not panic");
         drop(sender);
-        let output = take_samples_while(pending::<()>(), &mut receiver, &mut outbox).await;
+        let output =
+            take_samples_while(pending::<()>(), &mut receiver, &mut outbox, pin!(pending())).await;
         assert_eq!(None, output, "every sender is gone");
     }
 
@@ -627,12 +749,13 @@ mod tests {
     /// acknowledged every sample.
     #[tokio::test]
     async fn reporter_delivers_every_sample_then_stops() {
-        let (url, client_private_key, celestia_public_key) = celestia_server().await;
+        let (url, client_private_key, celestia_public_key, _) = celestia_server().await;
         let (sender, receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
         let reporter = spawn(run_celestia_reporter(
             reporter_config(client_config(url, client_private_key, celestia_public_key)),
             SAMPLE_INTERVAL,
             receiver,
+            pending(),
         ));
         for _ in 0..3 {
             sender
@@ -654,6 +777,7 @@ mod tests {
             reporter_config(unreachable_client_config()),
             SAMPLE_INTERVAL,
             receiver,
+            pending(),
         ));
         for _ in 0..3 {
             timeout(REPORTER_STOP_WAIT, sender.send(test_process_sample()))
@@ -667,6 +791,21 @@ mod tests {
             .await
             .expect("the reporter stops once the senders are gone")
             .expect("the reporter is expected to not panic");
+    }
+
+    #[tokio::test]
+    async fn reporter_stops_on_shutdown_while_phanes_is_unreachable() {
+        // The sender stays alive, so only the signal can stop the reporter.
+        let (_sender, receiver) = channel(SAMPLE_CHANNEL_CAPACITY);
+        let reporter = run_celestia_reporter(
+            reporter_config(unreachable_client_config()),
+            SAMPLE_INTERVAL,
+            receiver,
+            ready(ShutdownSignal::Interrupt),
+        );
+        timeout(REPORTER_STOP_WAIT, reporter)
+            .await
+            .expect("the reporter stops on the signal");
     }
 
     fn sequences(outbox: &Outbox) -> Vec<u64> {

@@ -1,9 +1,10 @@
 //! Phanes side: accepts a client's Celestia WebSocket, identifies the client by the public key of
 //! its handshake and the process by the handshake's `Hello`, logs every sample and acks each batch.
 
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FormatResult};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use axum::Error as AxumError;
 use axum::Router;
@@ -14,7 +15,10 @@ use axum::response::Response as HttpResponse;
 use axum::routing::get;
 use futures::SinkExt;
 use secrecy::SecretBox;
+use tokio::select;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot::error::TryRecvError;
+use tokio::sync::oneshot::{Receiver as OneshotReceiver, Sender as OneshotSender, channel};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -32,14 +36,18 @@ use layline::process_metrics::THREAD_METRICS_LEGEND;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The client pings every 30 seconds besides sending its samples, so silence means it is gone.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-/// The reason the loss push gives when the client closed the connection or its stream ended.
-const CLOSED_BY_CLIENT_REASON: &str = "客户端关闭了连接";
+/// The reason the close push gives when the client closed the connection without naming one.
+const CLOSED_BY_CLIENT_REASON: &str = "原因未汇报";
 
 pub struct CelestiaState {
     celestia_private_key: SecretBox<StaticKey>,
     clients: Arc<Clients>,
     notification_sender: UnboundedSender<Notification>,
     unauthenticated_notification_sender: ThrottledNotificationSender,
+    /// The open connection of each reporter. A reporter that connects again while Phanes still
+    /// holds its old connection, one whose link died unnoticed, replaces it: dropping the old
+    /// connection's sender ends it.
+    connections: Mutex<HashMap<Reporter, OneshotSender<()>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +68,8 @@ enum ConnectionError {
     },
     #[error("no message within {0:?}")]
     Timeout(Duration),
+    #[error("replaced by a new connection of the same reporter")]
+    Replaced,
     #[error("client closed the connection during the handshake")]
     Closed,
     #[error("unexpected text frame")]
@@ -67,6 +77,7 @@ enum ConnectionError {
 }
 
 /// One reporting process: the client its key belongs to and the process its `Hello` named.
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct Reporter {
     client: ClientName,
     process_name: String,
@@ -96,7 +107,39 @@ impl CelestiaState {
                 notification_sender.clone(),
             ),
             notification_sender,
+            connections: Mutex::default(),
         }
+    }
+
+    /// Registers the connection whose receiver `new_sender` pairs with. Returns the sender of the
+    /// reporter's previous connection, which this one replaces; dropping it tells that connection.
+    fn register(
+        &self,
+        reporter: &Reporter,
+        new_sender: OneshotSender<()>,
+    ) -> Option<OneshotSender<()>> {
+        self.lock_connections().insert(reporter.clone(), new_sender)
+    }
+
+    /// Forgets the connection whose sender `new_receiver` pairs with and returns that sender;
+    /// `None` if a newer connection of the reporter has already replaced it.
+    fn unregister(
+        &self,
+        reporter: &Reporter,
+        new_receiver: &mut OneshotReceiver<()>,
+    ) -> Option<OneshotSender<()>> {
+        let mut connections = self.lock_connections();
+        // Only a replacement drops this connection's sender while it is registered.
+        if matches!(new_receiver.try_recv(), Err(TryRecvError::Closed)) {
+            return None;
+        }
+        connections.remove(reporter)
+    }
+
+    fn lock_connections(&self) -> MutexGuard<'_, HashMap<Reporter, OneshotSender<()>>> {
+        self.connections
+            .lock()
+            .expect("nothing panics while holding the connections")
     }
 }
 
@@ -128,42 +171,67 @@ async fn upgrade(
                         );
                     }
                 };
-            info!("Celestia reporter {reporter} connected");
-            enqueue(
-                &state.notification_sender,
-                Notification::CelestiaConnected {
-                    client: reporter.client.clone(),
-                    process_name: reporter.process_name.clone(),
-                },
-            );
-            let reason = match exchange_batches(socket, &mut session, &reporter).await {
-                Ok(()) => {
-                    info!("Celestia reporter {reporter} disconnected");
-                    CLOSED_BY_CLIENT_REASON.to_owned()
-                }
-                Err(error) => {
-                    report_connection_error(
-                        &state,
-                        Some(&reporter),
-                        ip_client_name,
-                        request_head,
-                        &error,
-                    );
-                    error.to_string()
-                }
+            let (new_sender, mut new_receiver) = channel();
+            if let Some(previous_sender) = state.register(&reporter, new_sender) {
+                // Dropping it tells the previous connection that it was replaced; that connection
+                // pushes the reconnect once it has ended, so the phone never reads a loss after
+                // the reconnect.
+                drop(previous_sender);
+                info!("Celestia reporter {reporter} reconnected, replacing its old connection");
+            } else {
+                info!("Celestia reporter {reporter} connected");
+                enqueue(
+                    &state.notification_sender,
+                    Notification::CelestiaConnected {
+                        client: reporter.client.clone(),
+                        process_name: reporter.process_name.clone(),
+                    },
+                );
+            }
+            let mut last_message_at = Instant::now();
+            let exchange = exchange_batches(socket, &mut session, &reporter, &mut last_message_at);
+            let exchange_result = select! {
+                exchange_result = exchange => exchange_result,
+                _ = &mut new_receiver => Err(ConnectionError::Replaced),
             };
+            match &exchange_result {
+                Ok(reason) => info!("Celestia reporter {reporter} disconnected: {reason}"),
+                Err(error) => report_connection_error(
+                    &state,
+                    Some(&reporter),
+                    ip_client_name,
+                    request_head,
+                    error,
+                ),
+            }
+            // Checked after the exchange ends whatever ended it: a connection that ended on its
+            // own just as its replacement arrived still announces the reconnect.
+            let own_sender_option = state.unregister(&reporter, &mut new_receiver);
             let Reporter {
                 client,
                 process_name,
             } = reporter;
-            enqueue(
-                &state.notification_sender,
-                Notification::CelestiaDisconnected {
+            let notification = match own_sender_option {
+                // A newer connection of the reporter replaced this one.
+                None => Notification::CelestiaReconnected {
                     client,
                     process_name,
-                    reason,
+                    silence: last_message_at.elapsed(),
                 },
-            );
+                Some(_own_sender) => match exchange_result {
+                    Ok(reason) => Notification::CelestiaClosed {
+                        client,
+                        process_name,
+                        reason,
+                    },
+                    Err(error) => Notification::CelestiaDisconnected {
+                        client,
+                        process_name,
+                        reason: error.to_string(),
+                    },
+                },
+            };
+            enqueue(&state.notification_sender, notification);
         })
 }
 
@@ -201,16 +269,20 @@ fn report_connection_error(
     }
 }
 
-/// Runtime errors only end this connection; the client reconnects and resends unacked batches.
+/// Runs until the client closes the connection, returning the reason it gave, such as the signal
+/// that stopped it. Runtime errors only end this connection; the client reconnects and resends
+/// unacked batches. `last_message_at` is when the client last sent anything.
 async fn exchange_batches(
     mut socket: WebSocket,
     session: &mut Session,
     reporter: &Reporter,
-) -> Result<(), ConnectionError> {
+    last_message_at: &mut Instant,
+) -> Result<String, ConnectionError> {
     loop {
         let Some(message) = receive(&mut socket, IDLE_TIMEOUT).await? else {
-            return Ok(());
+            return Ok(CLOSED_BY_CLIENT_REASON.to_owned());
         };
+        *last_message_at = Instant::now();
         match message {
             Message::Binary(ciphertext) => {
                 let batch: Batch = session.decrypt(&ciphertext).map_err(|error| match error {
@@ -241,9 +313,12 @@ async fn exchange_batches(
             // read, write or flush; flush now, a dropped socket would never send the close.
             Message::Ping(_) => socket.flush().await?,
             Message::Pong(_) => {}
-            Message::Close(_) => {
+            Message::Close(close_frame_option) => {
                 socket.flush().await?;
-                return Ok(());
+                return Ok(close_frame_option.map_or_else(
+                    || CLOSED_BY_CLIENT_REASON.to_owned(),
+                    |close_frame| close_frame.reason.to_string(),
+                ));
             }
             Message::Text(_) => return Err(ConnectionError::UnexpectedText),
         }
@@ -325,6 +400,8 @@ mod tests {
     use tokio::spawn;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
     use tokio_tungstenite::tungstenite::Message as ClientMessage;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
     use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
     use super::*;
@@ -402,9 +479,7 @@ mod tests {
             (socket, initiator)
         }
 
-        /// Completes the handshake and checks the push it triggers, so later checks see only
-        /// what happens after the connection.
-        async fn connect(&mut self) -> (ClientSocket, Session) {
+        async fn handshake(&self) -> (ClientSocket, Session) {
             let (mut socket, initiator) = self.start(&self.client_private_key).await;
             let Some(Ok(ClientMessage::Binary(second_message))) = socket.next().await else {
                 panic!("server should answer the handshake");
@@ -412,6 +487,13 @@ mod tests {
             let session = initiator
                 .finish(&second_message)
                 .expect("client finishes handshake");
+            (socket, session)
+        }
+
+        /// Completes the handshake and checks the push it triggers, so later checks see only
+        /// what happens after the connection.
+        async fn connect(&mut self) -> (ClientSocket, Session) {
+            let (socket, session) = self.handshake().await;
             assert_eq!(
                 self.next_notification().await,
                 Some(Notification::CelestiaConnected {
@@ -452,6 +534,15 @@ mod tests {
                 .await
                 .ok()
                 .flatten()
+        }
+    }
+
+    /// The push of a connection the client closed on purpose.
+    fn closed(reason: &str) -> Notification {
+        Notification::CelestiaClosed {
+            client: ClientName::from(CLIENT_NAME),
+            process_name: PROCESS_NAME.to_owned(),
+            reason: reason.to_owned(),
         }
     }
 
@@ -499,7 +590,10 @@ mod tests {
             assert_eq!(ack, Ack { sequence });
         }
         socket.close(None).await.expect("client closes");
-        assert_eq!(harness.loss_reason().await, CLOSED_BY_CLIENT_REASON);
+        assert_eq!(
+            harness.next_notification().await,
+            Some(closed(CLOSED_BY_CLIENT_REASON))
+        );
     }
 
     #[tokio::test]
@@ -528,7 +622,56 @@ mod tests {
             socket.next().await,
             Some(Ok(ClientMessage::Close(None)))
         ));
-        assert_eq!(harness.loss_reason().await, CLOSED_BY_CLIENT_REASON);
+        assert_eq!(
+            harness.next_notification().await,
+            Some(closed(CLOSED_BY_CLIENT_REASON))
+        );
+    }
+
+    #[tokio::test]
+    async fn close_reason_is_pushed() {
+        let mut harness = harness().await;
+        let (mut socket, _) = harness.connect().await;
+        let close_frame = CloseFrame {
+            code: CloseCode::Normal,
+            reason: "SIGINT".into(),
+        };
+        socket
+            .close(Some(close_frame))
+            .await
+            .expect("client closes");
+        assert_eq!(harness.next_notification().await, Some(closed("SIGINT")));
+    }
+
+    /// A link that died without Phanes noticing: the reporter connects again, and the phone reads
+    /// one reconnect instead of a connect followed by the old connection's loss.
+    #[tokio::test]
+    async fn new_connection_replaces_the_old_one_and_pushes_one_reconnect() {
+        let mut harness = harness().await;
+        let (mut old_socket, _) = harness.connect().await;
+        let (mut new_socket, _) = harness.handshake().await;
+        assert_disconnected(&mut old_socket).await;
+        let notification = harness.next_notification().await;
+        let Some(Notification::CelestiaReconnected {
+            client,
+            process_name,
+            silence,
+        }) = notification
+        else {
+            panic!("expected the reconnect to be pushed, got {notification:?}");
+        };
+        assert_eq!(
+            (client, process_name.as_str()),
+            (ClientName::from(CLIENT_NAME), PROCESS_NAME)
+        );
+        assert!(silence < NOTIFICATION_WAIT, "{silence:?}");
+        assert_eq!(harness.next_notification().await, None);
+        // The new connection is the registered one, so its own end is pushed as usual.
+        new_socket.close(None).await.expect("client closes");
+        assert_eq!(
+            harness.next_notification().await,
+            Some(closed(CLOSED_BY_CLIENT_REASON))
+        );
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ Crates hold code only. Everything else lives at the top level:
 | Directory | Contents |
 |---|---|
 | `architecture/` | How the **implemented** system works: `overview.md` (machines, crates, layline, shared conventions), one file per component (`phanes.md`, `market_data_provider.md`, `dummy_strategy.md`). Read the relevant file before changing a component, and update it in the same change. |
-| `plan/` | Features **not yet implemented** and open design questions (`celestia.md`, `database.md`, `market_data_provider.md`, `todo.md`). Items marked 【待定】 need the user's decision first. When something is implemented, move its description to `architecture/` and mark it done here. |
+| `plan/` | Features **not yet implemented** and open design questions (`celestia.md`, `database.md`, `latency.md`, `market_data_provider.md`, `todo.md`). Items marked 【待定】 need the user's decision first. When something is implemented, move its description to `architecture/` and mark it done here. |
 | `deploy/` | One subdirectory per service (`phanes/`, `market_data_provider/`, `dummy_strategy/`, `clickhouse/`) with its deploy script, systemd unit and example config, plus the deployment guide `deploy/README.md`. Scripts run from the repository root. |
 
 Because one package holds every binary, building any one of them (e.g. a deploy's `cargo build --release -p teyvat --bin phanes`) compiles every crate.
