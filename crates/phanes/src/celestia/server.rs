@@ -36,6 +36,11 @@ use layline::process_metrics::THREAD_METRICS_LEGEND;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// The client pings every 30 seconds besides sending its samples, so silence means it is gone.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// A reconnect after a shorter silence is a link blip, such as a Cloudflare Tunnel reconnect, and
+/// is only logged. A silence of `IDLE_TIMEOUT` has already been pushed as a loss, so this stays
+/// below it.
+const RECONNECT_PUSH_MIN_SILENCE: Duration = Duration::from_secs(60);
+const _: () = assert!(RECONNECT_PUSH_MIN_SILENCE.as_secs() < IDLE_TIMEOUT.as_secs());
 /// The reason the close push gives when the client closed the connection without naming one.
 const CLOSED_BY_CLIENT_REASON: &str = "原因未汇报";
 
@@ -207,32 +212,50 @@ async fn upgrade(
             // Checked after the exchange ends whatever ended it: a connection that ended on its
             // own just as its replacement arrived still announces the reconnect.
             let own_sender_option = state.unregister(&reporter, &mut new_receiver);
-            let Reporter {
-                client,
-                process_name,
-            } = reporter;
-            let notification = match own_sender_option {
+            let notification_option = match own_sender_option {
                 // A newer connection of the reporter replaced this one.
-                None => Notification::CelestiaReconnected {
-                    client,
-                    process_name,
-                    silence: last_message_at.elapsed(),
-                },
-                Some(_own_sender) => match exchange_result {
-                    Ok(reason) => Notification::CelestiaClosed {
+                None => reconnect_notification(reporter, last_message_at.elapsed()),
+                Some(_own_sender) => {
+                    let Reporter {
                         client,
                         process_name,
-                        reason,
-                    },
-                    Err(error) => Notification::CelestiaDisconnected {
-                        client,
-                        process_name,
-                        reason: error.to_string(),
-                    },
-                },
+                    } = reporter;
+                    Some(match exchange_result {
+                        Ok(reason) => Notification::CelestiaClosed {
+                            client,
+                            process_name,
+                            reason,
+                        },
+                        Err(error) => Notification::CelestiaDisconnected {
+                            client,
+                            process_name,
+                            reason: error.to_string(),
+                        },
+                    })
+                }
             };
-            enqueue(&state.notification_sender, notification);
+            if let Some(notification) = notification_option {
+                enqueue(&state.notification_sender, notification);
+            }
         })
+}
+
+/// The push for a connection that a newer connection of its reporter replaced: `None`, only a log
+/// line, when the old connection was silent for less than `RECONNECT_PUSH_MIN_SILENCE`.
+fn reconnect_notification(reporter: Reporter, silence: Duration) -> Option<Notification> {
+    if silence < RECONNECT_PUSH_MIN_SILENCE {
+        info!("Celestia reporter {reporter} reconnected after {silence:?} of silence, not pushed");
+        return None;
+    }
+    let Reporter {
+        client,
+        process_name,
+    } = reporter;
+    Some(Notification::CelestiaReconnected {
+        client,
+        process_name,
+        silence,
+    })
 }
 
 /// Security events are logged with the whole request and pushed; the rest only logged.
@@ -644,33 +667,40 @@ mod tests {
     }
 
     /// A link that died without Phanes noticing: the reporter connects again, and the phone reads
-    /// one reconnect instead of a connect followed by the old connection's loss.
+    /// neither a connect nor the old connection's loss; a reconnect this quick is not pushed at all.
     #[tokio::test]
-    async fn new_connection_replaces_the_old_one_and_pushes_one_reconnect() {
+    async fn new_connection_replaces_the_old_one_quietly() {
         let mut harness = harness().await;
         let (mut old_socket, _) = harness.connect().await;
         let (mut new_socket, _) = harness.handshake().await;
         assert_disconnected(&mut old_socket).await;
-        let notification = harness.next_notification().await;
-        let Some(Notification::CelestiaReconnected {
-            client,
-            process_name,
-            silence,
-        }) = notification
-        else {
-            panic!("expected the reconnect to be pushed, got {notification:?}");
-        };
-        assert_eq!(
-            (client, process_name.as_str()),
-            (ClientName::from(CLIENT_NAME), PROCESS_NAME)
-        );
-        assert!(silence < NOTIFICATION_WAIT, "{silence:?}");
         assert_eq!(harness.next_notification().await, None);
         // The new connection is the registered one, so its own end is pushed as usual.
         new_socket.close(None).await.expect("client closes");
         assert_eq!(
             harness.next_notification().await,
             Some(closed(CLOSED_BY_CLIENT_REASON))
+        );
+    }
+
+    #[test]
+    fn reconnect_is_pushed_only_after_a_long_enough_silence() {
+        let reporter = Reporter {
+            client: ClientName::from(CLIENT_NAME),
+            process_name: PROCESS_NAME.to_owned(),
+        };
+        let short_silence = RECONNECT_PUSH_MIN_SILENCE - Duration::from_millis(1);
+        assert_eq!(
+            reconnect_notification(reporter.clone(), short_silence),
+            None
+        );
+        assert_eq!(
+            reconnect_notification(reporter, RECONNECT_PUSH_MIN_SILENCE),
+            Some(Notification::CelestiaReconnected {
+                client: ClientName::from(CLIENT_NAME),
+                process_name: PROCESS_NAME.to_owned(),
+                silence: RECONNECT_PUSH_MIN_SILENCE,
+            })
         );
     }
 
