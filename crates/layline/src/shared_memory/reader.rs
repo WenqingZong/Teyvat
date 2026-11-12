@@ -93,6 +93,9 @@ impl RingReader {
                 MarketDataType::Trade => {
                     MarketData::Trade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
                 }
+                MarketDataType::AggregateTrade => {
+                    MarketData::AggregateTrade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
+                }
             };
             on_data(data, received_at_nanoseconds);
             handled += 1;

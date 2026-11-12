@@ -237,7 +237,7 @@ deploy/dummy_strategy/dummy_strategy.sh install
 - `demo`：`true` 表示在交易所的模拟盘交易（行情也来自模拟盘），`false` 为实盘；必须与行情服务配置的 `demo` 一致，否则每个订阅请求都被拒绝（400）；
 - `process_metrics_interval_seconds`：多少秒采样一次本进程的 CPU、内存、线程和 TCP 流量（打日志并上报 Phanes），必须大于 0（模板为 10）；
 - `[celestia_client]`：上报进程监控用，由安装从行情服务的配置拷来，不用手填；上报的进程名就是 `strategy_name`；
-- `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`["BBO", "TRADE"]`），与行情服务 HTTP API 的写法相同。
+- `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`BBO`、`TRADE`、`AGGREGATE_TRADE`，如 `["BBO", "TRADE"]`），与行情服务 HTTP API 的写法相同。
 
 报告间隔是 dummy_strategy 自己的参数，不在 `strategy.toml` 里，写在 unit 的 `ExecStart`（`--report-interval-seconds 60`）。
 

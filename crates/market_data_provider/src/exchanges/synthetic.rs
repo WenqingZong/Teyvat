@@ -88,6 +88,15 @@ fn synthetic_data(topic: Topic, latency_metric: LatencyMetric, sequence: usize) 
             taker_side: Side::Buy,
             sequence,
         }),
+        MarketDataType::AggregateTrade => MarketData::AggregateTrade(Trade {
+            instrument: topic.instrument,
+            exchange_time_nanoseconds: None,
+            latency_metric,
+            price: ask_price,
+            size,
+            taker_side: Side::Buy,
+            sequence,
+        }),
     }
 }
 

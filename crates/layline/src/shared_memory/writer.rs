@@ -28,7 +28,7 @@ impl SerializedMarketData {
                     provider_write_time_nanoseconds;
                 rkyv::to_bytes::<RkyvError>(&bbo).expect("a Bbo always serializes")
             }
-            MarketData::Trade(mut trade) => {
+            MarketData::Trade(mut trade) | MarketData::AggregateTrade(mut trade) => {
                 trade.latency_metric.provider_write_time_nanoseconds =
                     provider_write_time_nanoseconds;
                 rkyv::to_bytes::<RkyvError>(&trade).expect("a Trade always serializes")
@@ -136,6 +136,7 @@ mod tests {
     struct Collector {
         bbo_sequences: Vec<usize>,
         trade_sequences: Vec<usize>,
+        aggregate_trade_sequences: Vec<usize>,
     }
 
     impl Collector {
@@ -143,6 +144,9 @@ mod tests {
             match data {
                 MarketData::Bbo(bbo) => self.bbo_sequences.push(bbo.sequence),
                 MarketData::Trade(trade) => self.trade_sequences.push(trade.sequence),
+                MarketData::AggregateTrade(trade) => {
+                    self.aggregate_trade_sequences.push(trade.sequence)
+                }
             }
         }
     }
@@ -188,6 +192,10 @@ mod tests {
         MarketData::Trade(test_trade(instrument(), sequence))
     }
 
+    fn aggregate_trade(sequence: usize) -> MarketData {
+        MarketData::AggregateTrade(test_trade(instrument(), sequence))
+    }
+
     fn ether_instrument() -> Instrument {
         test_instrument(
             Exchange::Binance,
@@ -220,19 +228,27 @@ mod tests {
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let bbo_subscription = subscription(&directory, MarketDataType::Bbo);
         let trade_subscription = subscription(&directory, MarketDataType::Trade);
+        let aggregate_trade_subscription = subscription(&directory, MarketDataType::AggregateTrade);
         let bbo_writer = writer(&directory, MarketDataType::Bbo);
         let trade_writer = writer(&directory, MarketDataType::Trade);
-        let market_data_reader = market_data_reader(&[bbo_subscription, trade_subscription]);
+        let aggregate_trade_writer = writer(&directory, MarketDataType::AggregateTrade);
+        let market_data_reader = market_data_reader(&[
+            bbo_subscription,
+            trade_subscription,
+            aggregate_trade_subscription,
+        ]);
         let mut collector = Collector::default();
 
         assert_eq!(0, poll(&market_data_reader, &mut collector));
         publish(&bbo_writer, bbo(7));
         publish(&bbo_writer, bbo(8));
         publish(&trade_writer, trade(9));
+        publish(&aggregate_trade_writer, aggregate_trade(10));
 
-        assert_eq!(3, poll(&market_data_reader, &mut collector));
+        assert_eq!(4, poll(&market_data_reader, &mut collector));
         assert_eq!(vec![7, 8], collector.bbo_sequences);
         assert_eq!(vec![9], collector.trade_sequences);
+        assert_eq!(vec![10], collector.aggregate_trade_sequences);
     }
 
     #[test]

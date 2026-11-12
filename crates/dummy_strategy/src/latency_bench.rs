@@ -184,6 +184,14 @@ impl Strategy for LatencyBench {
         };
         self.record(topic, trade.latency_metric, received_at_nanoseconds);
     }
+
+    fn on_aggregate_trade(&mut self, trade: &Trade, received_at_nanoseconds: NonZeroU64) {
+        let topic = Topic {
+            instrument: trade.instrument,
+            market_data_type: MarketDataType::AggregateTrade,
+        };
+        self.record(topic, trade.latency_metric, received_at_nanoseconds);
+    }
 }
 
 #[cfg(test)]
