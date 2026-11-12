@@ -15,7 +15,9 @@
 //!        +----------+---------------+-----------------+-------------------------------------+
 //!        | MDPRING  | FORMAT_VERSION| MarketDataType  | unused (zero)                       |
 //!        | magic    | u32 LE        | u8 (1 BBO,      |                                     |
-//!        |          |               |     2 Trade)    |                                     |
+//!        |          |               |     2 Trade, 3  |                                     |
+//!        |          |               |     Aggregate-  |                                     |
+//!        |          |               |     Trade)      |                                     |
 //!        +----------+---------------+-----------------+-------------------------------------+
 //!
 //! data: one frame per message, 8-byte aligned; a frame that would cross the end is preceded by a padding frame.
@@ -67,10 +69,14 @@ pub(super) fn read_market_data_type(metadata: &[u8]) -> Result<MarketDataType> {
         "metadata is not format version {FORMAT_VERSION}"
     );
     let code = metadata[METADATA_MARKET_DATA_TYPE_INDEX];
-    [MarketDataType::Bbo, MarketDataType::Trade]
-        .into_iter()
-        .find(|market_data_type| *market_data_type as u8 == code)
-        .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
+    [
+        MarketDataType::Bbo,
+        MarketDataType::Trade,
+        MarketDataType::AggregateTrade,
+    ]
+    .into_iter()
+    .find(|market_data_type| *market_data_type as u8 == code)
+    .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
 }
 
 #[cfg(test)]
@@ -79,7 +85,11 @@ mod tests {
 
     #[test]
     fn metadata_round_trips_each_data_type() {
-        for market_data_type in [MarketDataType::Bbo, MarketDataType::Trade] {
+        for market_data_type in [
+            MarketDataType::Bbo,
+            MarketDataType::Trade,
+            MarketDataType::AggregateTrade,
+        ] {
             let mut metadata = [0; METADATA_BUFFER_SIZE];
             write_metadata(&mut metadata, market_data_type);
             assert_eq!(

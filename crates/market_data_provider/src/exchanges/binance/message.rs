@@ -81,6 +81,7 @@ pub(super) struct EventData<'a> {
     bid_price: Option<Decimal>,
     #[serde(rename = "B")]
     bid_size: Option<Decimal>,
+    /// Also `aggTrade`'s aggregate id, which parses as a number here and is never read.
     #[serde(rename = "a")]
     ask_price: Option<Decimal>,
     #[serde(rename = "A")]
@@ -90,6 +91,9 @@ pub(super) struct EventData<'a> {
     transaction_time_milliseconds: Option<u64>,
     #[serde(rename = "t")]
     trade_id: Option<u64>,
+    /// Id of an `aggTrade`'s last fill.
+    #[serde(rename = "l")]
+    last_trade_id: Option<u64>,
     #[serde(rename = "p")]
     price: Option<Decimal>,
     #[serde(rename = "q")]
@@ -111,6 +115,7 @@ impl<'a> EventData<'a> {
             "A" => self.ask_size = Some(value.parse().ok()?),
             "T" => self.transaction_time_milliseconds = Some(value.parse().ok()?),
             "t" => self.trade_id = Some(value.parse().ok()?),
+            "l" => self.last_trade_id = Some(value.parse().ok()?),
             "p" => self.price = Some(value.parse().ok()?),
             "q" => self.size = Some(value.parse().ok()?),
             "m" => self.buyer_is_maker = Some(value.parse().ok()?),
@@ -272,6 +277,16 @@ pub(super) fn event_to_market_data(
                 sequence: to_sequence(required(data.trade_id, "t")?)?,
             })
         }
+        // Binance aggregates only market trades, so no order type is checked.
+        MarketDataType::AggregateTrade => MarketData::AggregateTrade(Trade {
+            instrument: topic.instrument,
+            exchange_time_nanoseconds: exchange_time_nanoseconds_option,
+            latency_metric,
+            price: required(data.price, "p")?,
+            size: required(data.size, "q")?,
+            taker_side: taker_side(required(data.buyer_is_maker, "m")?),
+            sequence: to_sequence(required(data.last_trade_id, "l")?)?,
+        }),
     };
     Ok(Some(market_data))
 }
@@ -306,6 +321,8 @@ mod tests {
     const SPOT_BOOK_TICKER: &str = r#"{"stream":"btcusdt@bookTicker","data":{"u":6230799530,"s":"BTCUSDT","b":"80586.30000000","B":"3.17369000","a":"80586.31000000","A":"10.52077000"}}"#;
     const FUTURES_BOOK_TICKER: &str = r#"{"stream":"btcusdt@bookTicker","data":{"e":"bookTicker","u":462733955406,"s":"BTCUSDT","ps":"BTCUSDT","b":"80570.70","B":"2.6914","a":"80570.80","A":"187.5753","T":1792881786559,"E":1792881786571,"st":1}}"#;
     const FUTURES_TRADE: &str = r#"{"stream":"btcusdt@trade","data":{"e":"trade","E":1792881786571,"T":1792881786559,"s":"BTCUSDT","t":550507694,"p":"80570.70","q":"0.0015","X":"MARKET","m":true,"st":1}}"#;
+    /// Captured on the live `/market` endpoint.
+    const FUTURES_AGGREGATE_TRADE: &str = r#"{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1794415042275,"a":3516577516,"s":"BTCUSDT","p":"74306.60","q":"0.033","nq":"0.033","f":8256744487,"l":8256744489,"T":1794415042160,"m":true,"st":1}}"#;
 
     fn topic(underlying_type: UnderlyingType, market_data_type: MarketDataType) -> Topic {
         Topic {
@@ -392,6 +409,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn futures_aggregate_trade_is_relayed_as_sent() {
+        let topic = topic(UnderlyingType::Perpetual, MarketDataType::AggregateTrade);
+        let Some(MarketData::AggregateTrade(trade)) =
+            parse_event(FUTURES_AGGREGATE_TRADE, topic).expect("a valid event")
+        else {
+            panic!("an aggregate trade is expected");
+        };
+        assert_eq!(topic.instrument, trade.instrument);
+        assert_eq!(
+            NonZeroU64::new(1_794_415_042_160_000_000),
+            trade.exchange_time_nanoseconds
+        );
+        assert_eq!(dec!(74306.60), trade.price);
+        assert_eq!(dec!(0.033), trade.size);
+        assert_eq!(Side::Sell, trade.taker_side);
+        assert_eq!(8_256_744_489, trade.sequence);
+    }
+
     /// Both paths turn `text` into the same market data, or the fast path declines it.
     fn assert_paths_agree(text: &str, topic: Topic) {
         let fast_option = parse_compact_event(text).map(|(stream, data)| {
@@ -426,10 +462,12 @@ mod tests {
     fn compact_events_take_the_fast_path_and_match_serde() {
         let bbo = topic(UnderlyingType::Perpetual, MarketDataType::Bbo);
         let trade = topic(UnderlyingType::Perpetual, MarketDataType::Trade);
+        let aggregate_trade = topic(UnderlyingType::Perpetual, MarketDataType::AggregateTrade);
         for (text, topic) in [
             (FUTURES_BOOK_TICKER, bbo),
             (SPOT_BOOK_TICKER, bbo),
             (FUTURES_TRADE, trade),
+            (FUTURES_AGGREGATE_TRADE, aggregate_trade),
         ] {
             assert!(parse_compact_event(text).is_some(), "{text}");
             assert_paths_agree(text, topic);

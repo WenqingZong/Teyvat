@@ -4,6 +4,8 @@ use crate::types::{Bbo, MarketDataType, Topic, Trade};
 pub enum MarketData {
     Bbo(Bbo),
     Trade(Trade),
+    /// Shares `Trade`'s layout; the variant tells which ring and topic it belongs to.
+    AggregateTrade(Trade),
 }
 
 impl MarketData {
@@ -16,6 +18,10 @@ impl MarketData {
             MarketData::Trade(trade) => Topic {
                 instrument: trade.instrument,
                 market_data_type: MarketDataType::Trade,
+            },
+            MarketData::AggregateTrade(trade) => Topic {
+                instrument: trade.instrument,
+                market_data_type: MarketDataType::AggregateTrade,
             },
         }
     }

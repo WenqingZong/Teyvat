@@ -3,12 +3,12 @@ mod message;
 mod sbe;
 mod venue_stream;
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::pending;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use futures::future::OptionFuture;
 use secrecy::SecretString;
 use strum::EnumCount;
@@ -19,9 +19,10 @@ use tracing::{debug, error, info, warn};
 
 use super::ExchangeConnector;
 use super::websocket::{
-    EndpointId, EndpointSet, EndpointState, Header, Heartbeat, Keepalive, TungsteniteClient,
-    WebSocketClient,
+    EndpointId, EndpointSet, EndpointState, Header, Heartbeat, Keepalive, TopicsByKey,
+    TungsteniteClient, WebSocketClient,
 };
+use crate::aggregation::VolumeWeightedAveragePrice;
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::gnosis_client::{GnosisClient, GnosisSource, fetch_gnosis_or_panic};
@@ -30,12 +31,14 @@ use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use layline::bark::Notifier;
 use layline::gnosis::binance::BinanceSbeApiKey;
 use layline::types::ConnectedApi;
-use layline::types::{Bbo, Exchange, LatencyMetric, MarketData, Topic, Trade};
+use layline::types::{
+    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Topic, Trade,
+};
 use message::{
     Request, Response, TextFrame, classify_text_frame, event_to_market_data, taker_side,
     to_sequence,
 };
-use sbe::SbeFrame;
+use sbe::{SbeFrame, SbeTrades};
 use venue_stream::{
     SBE_BEST_BID_ASK_CHANNEL, STREAM_NAME_CAPACITY, TRADE_CHANNEL, endpoint_for_topic,
     sbe_stream_name, stream_name,
@@ -118,11 +121,11 @@ where
         info!("subscribing {}", describe_streams(&streams_by_endpoint));
         let mut subscribed = Vec::new();
         for (endpoint, streams) in streams_by_endpoint {
-            match self.subscribe_streams(endpoint, streams).await {
-                Ok(added_keys) => subscribed.push((endpoint, added_keys)),
+            match self.subscribe_streams(endpoint, &streams).await {
+                Ok(()) => subscribed.push((endpoint, streams)),
                 Err(error) => {
-                    for (endpoint, added_keys) in subscribed {
-                        if let Err(error) = self.unsubscribe_streams(endpoint, &added_keys).await {
+                    for (endpoint, streams) in subscribed {
+                        if let Err(error) = self.unsubscribe_streams(endpoint, &streams).await {
                             warn!("failed to roll back {endpoint}: {error:#}");
                         }
                     }
@@ -138,8 +141,7 @@ where
         info!("unsubscribing {}", describe_streams(&streams_by_endpoint));
         let mut first_error_option = None;
         for (endpoint, streams) in streams_by_endpoint {
-            let keys: Vec<String> = streams.into_keys().collect();
-            if let Err(error) = self.unsubscribe_streams(endpoint, &keys).await {
+            if let Err(error) = self.unsubscribe_streams(endpoint, &streams).await {
                 first_error_option.get_or_insert(error.context(endpoint.to_string()));
             }
         }
@@ -159,15 +161,19 @@ where
                 continue;
             }
             let clock = &self.clock;
-            let [spot_sbe, futures_public] = self.endpoint_set.states_mut();
+            let [spot_sbe, futures_public, futures_market] = self.endpoint_set.states_mut();
             let spot_sbe_connected = spot_sbe.connection.is_connected();
             let futures_public_connected = futures_public.connection.is_connected();
+            let futures_market_connected = futures_market.connection.is_connected();
             let (endpoint, message_result, received_time_nanoseconds) = select! {
                 (message_result, received_time_nanoseconds) = read(spot_sbe, clock), if spot_sbe_connected => {
                     (BinanceEndpoint::SpotSbe, message_result, received_time_nanoseconds)
                 }
                 (message_result, received_time_nanoseconds) = read(futures_public, clock), if futures_public_connected => {
                     (BinanceEndpoint::FuturesPublic, message_result, received_time_nanoseconds)
+                }
+                (message_result, received_time_nanoseconds) = read(futures_market, clock), if futures_market_connected => {
+                    (BinanceEndpoint::FuturesMarket, message_result, received_time_nanoseconds)
                 }
                 Some(()) = OptionFuture::from(next_restore_at_option.map(sleep_until)) => continue,
                 else => pending().await,
@@ -232,15 +238,16 @@ where
         self.endpoint_set.state(endpoint)
     }
 
-    /// Returns the names it added. A connection that is new or being restored is sent every stream.
+    /// Sends only streams the venue is not sending yet; a connection that is new or being restored is
+    /// sent every stream. On failure forgets `streams` again.
     async fn subscribe_streams(
         &mut self,
         endpoint: BinanceEndpoint,
-        streams: HashMap<String, Topic>,
-    ) -> Result<Vec<String>> {
+        streams: &TopicsByKey,
+    ) -> Result<()> {
         let (added_keys, resubscribe_all) = self.endpoint_set.record_topics(endpoint, streams);
         if added_keys.is_empty() {
-            return Ok(added_keys);
+            return Ok(());
         }
         let keys = if resubscribe_all {
             self.endpoint_state_mut(endpoint)
@@ -257,23 +264,24 @@ where
         match self.request(endpoint, SUBSCRIBE, &keys).await {
             Ok(()) => {
                 self.endpoint_set.clear_restore(endpoint);
-                Ok(added_keys)
+                Ok(())
             }
             Err(error) => {
-                self.endpoint_set.rollback_topics(endpoint, &added_keys);
+                self.endpoint_set.forget_topics(endpoint, streams);
                 self.fail(endpoint).await;
                 Err(error)
             }
         }
     }
 
-    /// The last stream closes the connection; other streams are unsubscribed if the connection is up.
+    /// A stream is unsubscribed once no topic needs it, if the connection is up; the last stream
+    /// closes the connection.
     async fn unsubscribe_streams(
         &mut self,
         endpoint: BinanceEndpoint,
-        names: &[String],
+        streams: &TopicsByKey,
     ) -> Result<()> {
-        let removed = self.endpoint_set.forget_topics(endpoint, names);
+        let removed = self.endpoint_set.forget_topics(endpoint, streams);
         if removed.is_empty() {
             return Ok(());
         }
@@ -369,7 +377,7 @@ where
                 name: API_KEY_HEADER,
                 value: self.sbe_api_key().await,
             }),
-            BinanceEndpoint::FuturesPublic => None,
+            BinanceEndpoint::FuturesPublic | BinanceEndpoint::FuturesMarket => None,
         };
         let url = endpoint.url(self.demo);
         self.endpoint_state_mut(endpoint)
@@ -469,20 +477,24 @@ where
                     return FrameOutcome::Reconnect;
                 }
                 Ok(TextFrame::Event { stream, data }) => {
-                    let Some(topic) = self
-                        .endpoint_state_mut(endpoint)
+                    let Some(topics) = self
+                        .endpoint_set
+                        .state(endpoint)
                         .topics_by_key
                         .get(stream.as_ref())
-                        .copied()
                     else {
                         debug!("dropping {stream} from {endpoint}: not subscribed");
                         return FrameOutcome::None;
                     };
-                    match event_to_market_data(topic, &data, received_time_nanoseconds) {
-                        Ok(Some(market_data)) => self.pending.push_back(market_data),
-                        Ok(None) => debug!("skipping a fill that is not a market trade: {text}"),
-                        Err(error) => {
-                            warn!("failed to parse {stream} from {endpoint}: {error:#}: {text}")
+                    for topic in topics {
+                        match event_to_market_data(*topic, &data, received_time_nanoseconds) {
+                            Ok(Some(market_data)) => self.pending.push_back(market_data),
+                            Ok(None) => {
+                                debug!("skipping a fill that is not a market trade: {text}")
+                            }
+                            Err(error) => {
+                                warn!("failed to parse {stream} from {endpoint}: {error:#}: {text}")
+                            }
                         }
                     }
                 }
@@ -504,9 +516,13 @@ where
     ) {
         match sbe::decode(frame) {
             Ok(SbeFrame::BestBidAsk(best_bid_ask)) => {
-                let Some(topic) =
-                    self.sbe_topic(endpoint, best_bid_ask.symbol, SBE_BEST_BID_ASK_CHANNEL)
-                else {
+                let Some(topic) = sbe_topics(
+                    &self.endpoint_set,
+                    endpoint,
+                    best_bid_ask.symbol,
+                    SBE_BEST_BID_ASK_CHANNEL,
+                )
+                .first() else {
                     return;
                 };
                 match to_sequence(best_bid_ask.update_id) {
@@ -527,24 +543,40 @@ where
                 }
             }
             Ok(SbeFrame::Trades(trades)) => {
-                let Some(topic) = self.sbe_topic(endpoint, trades.symbol, TRADE_CHANNEL) else {
-                    return;
-                };
                 let exchange_time_nanoseconds_option = Some(trades.transaction_time_nanoseconds);
-                for trade_result in trades.trades() {
-                    match trade_result.and_then(|trade| Ok((to_sequence(trade.id)?, trade))) {
-                        Ok((sequence, trade)) => self.pending.push_back(MarketData::Trade(Trade {
-                            instrument: topic.instrument,
-                            exchange_time_nanoseconds: exchange_time_nanoseconds_option,
-                            latency_metric: LatencyMetric::received(received_time_nanoseconds),
-                            price: trade.price,
-                            size: trade.size,
-                            taker_side: taker_side(trade.buyer_is_maker),
-                            sequence,
-                        })),
-                        Err(error) => {
-                            let symbol = trades.symbol;
-                            warn!("dropping a {symbol} trade from {endpoint}: {error:#}");
+                for topic in sbe_topics(&self.endpoint_set, endpoint, trades.symbol, TRADE_CHANNEL)
+                {
+                    if topic.market_data_type == MarketDataType::AggregateTrade {
+                        match merge_trades(topic.instrument, &trades, received_time_nanoseconds) {
+                            Ok(trade) => self.pending.push_back(MarketData::AggregateTrade(trade)),
+                            Err(error) => {
+                                let symbol = trades.symbol;
+                                warn!(
+                                    "dropping a {symbol} aggregate trade from {endpoint}: {error:#}"
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    for trade_result in trades.trades() {
+                        match trade_result.and_then(|trade| Ok((to_sequence(trade.id)?, trade))) {
+                            Ok((sequence, trade)) => {
+                                self.pending.push_back(MarketData::Trade(Trade {
+                                    instrument: topic.instrument,
+                                    exchange_time_nanoseconds: exchange_time_nanoseconds_option,
+                                    latency_metric: LatencyMetric::received(
+                                        received_time_nanoseconds,
+                                    ),
+                                    price: trade.price,
+                                    size: trade.size,
+                                    taker_side: taker_side(trade.buyer_is_maker),
+                                    sequence,
+                                }))
+                            }
+                            Err(error) => {
+                                let symbol = trades.symbol;
+                                warn!("dropping a {symbol} trade from {endpoint}: {error:#}");
+                            }
                         }
                     }
                 }
@@ -558,26 +590,60 @@ where
             }
         }
     }
+}
 
-    /// The subscribed topic of an SBE event, found without allocating.
-    fn sbe_topic(
-        &mut self,
-        endpoint: BinanceEndpoint,
-        symbol: &str,
-        channel: &str,
-    ) -> Option<Topic> {
-        let mut buffer = [0; STREAM_NAME_CAPACITY];
-        let topic_option = sbe_stream_name(symbol, channel, &mut buffer).and_then(|stream| {
-            self.endpoint_state_mut(endpoint)
-                .topics_by_key
-                .get(stream)
-                .copied()
-        });
-        if topic_option.is_none() {
-            debug!("dropping {symbol}@{channel} from {endpoint}: not subscribed");
+/// The subscribed topics of an SBE event, found without allocating; none if nothing subscribes. A
+/// free function, so the caller can push to `pending` while it holds them.
+fn sbe_topics<'a, WebSocket: WebSocketClient>(
+    endpoint_set: &'a BinanceEndpointSet<WebSocket>,
+    endpoint: BinanceEndpoint,
+    symbol: &str,
+    channel: &str,
+) -> &'a [Topic] {
+    let mut buffer = [0; STREAM_NAME_CAPACITY];
+    let topics_option = sbe_stream_name(symbol, channel, &mut buffer)
+        .and_then(|stream| endpoint_set.state(endpoint).topics_by_key.get(stream));
+    let Some(topics) = topics_option else {
+        debug!("dropping {symbol}@{channel} from {endpoint}: not subscribed");
+        return &[];
+    };
+    topics
+}
+
+/// An SBE trades frame merged into one `Trade` at the fills' volume-weighted average price, with the
+/// last fill's id as its sequence. Binance offers no aggregate SBE stream, and one frame holds the
+/// fills of one taker order: they share its transaction time, and a 2026-11-12 capture of the demo
+/// stream, checked against the JSON `@aggTrade` ids, never split a taker order across frames or put
+/// two in one. Fails if any fill does not decode, or if the fills disagree on the taker's side.
+fn merge_trades(
+    instrument: Instrument,
+    trades: &SbeTrades,
+    received_time_nanoseconds: NonZeroU64,
+) -> Result<Trade> {
+    let mut average = VolumeWeightedAveragePrice::default();
+    let mut taker_side_option = None;
+    let mut last_trade_id_option = None;
+    for trade_result in trades.trades() {
+        let trade = trade_result?;
+        let side = taker_side(trade.buyer_is_maker);
+        if taker_side_option
+            .replace(side)
+            .is_some_and(|first_side| first_side != side)
+        {
+            bail!("fills of both taker sides in one frame");
         }
-        topic_option
+        average.add(trade.price, trade.size)?;
+        last_trade_id_option = Some(trade.id);
     }
+    Ok(Trade {
+        instrument,
+        exchange_time_nanoseconds: Some(trades.transaction_time_nanoseconds),
+        latency_metric: LatencyMetric::received(received_time_nanoseconds),
+        price: average.price().context("no fill of nonzero size")?,
+        size: average.size(),
+        taker_side: taker_side_option.context("no fills")?,
+        sequence: to_sequence(last_trade_id_option.context("no fills")?)?,
+    })
 }
 
 /// The next frame of one endpoint, stamped as soon as it is read.
@@ -602,23 +668,21 @@ fn retry_delay(failures: u32) -> Duration {
     layline::backoff::exponential_backoff(failures, FIRST_RETRY_DELAY, MAX_RETRY_DELAY)
 }
 
-fn group_streams_by_endpoint(
-    topics: &HashSet<Topic>,
-) -> BTreeMap<BinanceEndpoint, HashMap<String, Topic>> {
-    let mut groups: BTreeMap<BinanceEndpoint, HashMap<String, Topic>> = BTreeMap::new();
+fn group_streams_by_endpoint(topics: &HashSet<Topic>) -> BTreeMap<BinanceEndpoint, TopicsByKey> {
+    let mut groups: BTreeMap<BinanceEndpoint, TopicsByKey> = BTreeMap::new();
     for topic in topics {
         groups
             .entry(endpoint_for_topic(topic))
             .or_default()
-            .insert(stream_name(topic), *topic);
+            .entry(stream_name(topic))
+            .or_default()
+            .push(*topic);
     }
     groups
 }
 
 /// `SpotSbe [btcusdt@bestBidAsk], FuturesPublic [btcusdt@bookTicker]`: endpoints tell spot and perpetual apart.
-fn describe_streams(
-    streams_by_endpoint: &BTreeMap<BinanceEndpoint, HashMap<String, Topic>>,
-) -> String {
+fn describe_streams(streams_by_endpoint: &BTreeMap<BinanceEndpoint, TopicsByKey>) -> String {
     streams_by_endpoint
         .iter()
         .map(|(endpoint, streams)| {
@@ -633,9 +697,10 @@ fn describe_streams(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
-    use rust_decimal::dec;
+    use rust_decimal::{Decimal, dec};
     use serde_json::{Value, json};
     use strum::IntoEnumIterator;
     use tokio::time::timeout;
@@ -762,6 +827,10 @@ mod tests {
             self.expect_connection(BinanceEndpoint::FuturesPublic, None)
         }
 
+        fn expect_futures_market(&self) -> MockVenueConnection {
+            self.expect_connection(BinanceEndpoint::FuturesMarket, None)
+        }
+
         fn expect_phanes_asked_for(&self, gnosis_ids: &[GnosisId]) {
             let requested = self.connector.key_source.requested_gnosis_ids.borrow();
             assert_eq!(gnosis_ids, requested.as_slice());
@@ -839,6 +908,14 @@ mod tests {
         topic(Currency::Btc, UnderlyingType::Spot, MarketDataType::Trade)
     }
 
+    fn spot_aggregate_trade() -> Topic {
+        topic(
+            Currency::Btc,
+            UnderlyingType::Spot,
+            MarketDataType::AggregateTrade,
+        )
+    }
+
     fn perpetual_bbo() -> Topic {
         topic(
             Currency::Btc,
@@ -852,6 +929,14 @@ mod tests {
             Currency::Btc,
             UnderlyingType::Perpetual,
             MarketDataType::Trade,
+        )
+    }
+
+    fn perpetual_aggregate_trade() -> Topic {
+        topic(
+            Currency::Btc,
+            UnderlyingType::Perpetual,
+            MarketDataType::AggregateTrade,
         )
     }
 
@@ -884,14 +969,32 @@ mod tests {
     fn expect_bbo(market_data: &MarketData) -> Bbo {
         match market_data {
             MarketData::Bbo(bbo) => *bbo,
-            MarketData::Trade(trade) => panic!("a BBO is expected, got {trade:?}"),
+            other => panic!("a BBO is expected, got {other:?}"),
         }
     }
 
     fn expect_trade(market_data: &MarketData) -> Trade {
         match market_data {
             MarketData::Trade(trade) => *trade,
-            MarketData::Bbo(bbo) => panic!("a trade is expected, got {bbo:?}"),
+            other => panic!("a trade is expected, got {other:?}"),
+        }
+    }
+
+    fn expect_aggregate_trade(market_data: &MarketData) -> Trade {
+        match market_data {
+            MarketData::AggregateTrade(trade) => *trade,
+            other => panic!("an aggregate trade is expected, got {other:?}"),
+        }
+    }
+
+    /// A fill of an SBE trades frame, with Binance's `-8` exponents.
+    fn sbe_fill(id: i64, price: i64, size: i64, buyer_is_maker: bool) -> EncodedTrade {
+        const MANTISSA_PER_UNIT: i64 = 100_000_000;
+        EncodedTrade {
+            id,
+            price_mantissa: price * MANTISSA_PER_UNIT,
+            size_mantissa: size * MANTISSA_PER_UNIT,
+            buyer_is_maker,
         }
     }
 
@@ -1242,6 +1345,140 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn spot_trades_and_aggregate_trades_share_one_sbe_stream() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.subscribe(&[spot_trade()]).await;
+        let mut connection = fixture.expect_spot();
+        expect_request(&mut connection, SUBSCRIBE, &["btcusdt@trade"]);
+        fixture.subscribe(&[spot_aggregate_trade()]).await;
+        connection.expect_nothing_received();
+
+        let transaction_time_microseconds = 1_792_881_786_559_123;
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            transaction_time_microseconds,
+            &[sbe_fill(1, 100, 1, true), sbe_fill(2, 99, 3, true)],
+        )));
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(
+            vec![spot_trade(), spot_trade(), spot_aggregate_trade()],
+            topics_of(&produced)
+        );
+        let fills: Vec<(usize, Decimal, Decimal)> = produced[..2]
+            .iter()
+            .map(expect_trade)
+            .map(|trade| (trade.sequence, trade.price, trade.size))
+            .collect();
+        assert_eq!(vec![(1, dec!(100), dec!(1)), (2, dec!(99), dec!(3))], fills);
+        let aggregate = expect_aggregate_trade(&produced[2]);
+        assert_eq!(spot_aggregate_trade().instrument, aggregate.instrument);
+        assert_eq!(dec!(99.25), aggregate.price);
+        assert_eq!(dec!(4), aggregate.size);
+        assert_eq!(Side::Sell, aggregate.taker_side);
+        assert_eq!(2, aggregate.sequence);
+        assert_eq!(
+            NonZeroU64::new(1_792_881_786_559_123_000),
+            aggregate.exchange_time_nanoseconds
+        );
+        assert_eq!(
+            NOW_NANOSECONDS,
+            aggregate.latency_metric.provider_receive_time_nanoseconds
+        );
+
+        fixture.unsubscribe(&[spot_trade()]).await;
+        connection.expect_nothing_received();
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            transaction_time_microseconds,
+            &[sbe_fill(3, 100, 1, false)],
+        )));
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(vec![spot_aggregate_trade()], topics_of(&produced));
+        assert_eq!(Side::Buy, expect_aggregate_trade(&produced[0]).taker_side);
+
+        fixture.unsubscribe(&[spot_aggregate_trade()]).await;
+        assert_eq!(normal_close(), connection.expect_received());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_that_is_not_one_taker_order_yields_no_aggregate() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.subscribe(&[spot_aggregate_trade()]).await;
+        let connection = fixture.expect_spot();
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            1,
+            &[sbe_fill(1, 100, 1, true), sbe_fill(2, 101, 1, false)],
+        )));
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            1,
+            &[sbe_fill(3, 100, 1, true), sbe_fill(-1, 100, 1, true)],
+        )));
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            1,
+            &[sbe_fill(4, 100, 0, true)],
+        )));
+        connection.send(Message::binary(encode_trades("BTCUSDT", 1, &[])));
+        assert!(fixture.run_for(MILLISECOND).await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn perpetual_aggregate_trades_come_from_the_market_endpoint() {
+        let mut fixture = BinanceFixture::new(true);
+        fixture
+            .subscribe(&[perpetual_trade(), perpetual_aggregate_trade()])
+            .await;
+        let mut futures = fixture.expect_futures();
+        expect_request(&mut futures, SUBSCRIBE, &["btcusdt@trade"]);
+        let mut market = fixture.expect_futures_market();
+        expect_request(&mut market, SUBSCRIBE, &["btcusdt@aggTrade"]);
+        fixture.expect_no_new_connection();
+        fixture.expect_phanes_asked_for(&[]);
+
+        market.send(Message::text(
+            json!({"stream": "btcusdt@aggTrade", "data": {"e": "aggTrade", "E": 1_794_415_042_275_u64,
+                "a": 3_516_577_516_u64, "s": "BTCUSDT", "p": "74306.60", "q": "0.033", "nq": "0.033",
+                "f": 8_256_744_487_u64, "l": 8_256_744_489_u64, "T": 1_794_415_042_160_u64, "m": false,
+                "st": 1}})
+            .to_string(),
+        ));
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(vec![perpetual_aggregate_trade()], topics_of(&produced));
+        let aggregate = expect_aggregate_trade(&produced[0]);
+        assert_eq!(dec!(74306.60), aggregate.price);
+        assert_eq!(dec!(0.033), aggregate.size);
+        assert_eq!(Side::Buy, aggregate.taker_side);
+        assert_eq!(8_256_744_489, aggregate.sequence);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_batch_forgets_a_topic_added_to_a_shared_stream() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.subscribe(&[spot_trade()]).await;
+        let mut connection = fixture.expect_spot();
+        expect_request(&mut connection, SUBSCRIBE, &["btcusdt@trade"]);
+        fixture
+            .venue(BinanceEndpoint::FuturesPublic)
+            .respond_with(refuse_requests());
+
+        fixture
+            .connector
+            .subscribe(&HashSet::from([spot_aggregate_trade(), perpetual_trade()]))
+            .await
+            .expect_err("a rejected request is expected to fail the batch");
+        connection.expect_nothing_received();
+        connection.send(Message::binary(encode_trades(
+            "BTCUSDT",
+            1,
+            &[sbe_fill(1, 100, 1, true)],
+        )));
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(vec![spot_trade()], topics_of(&produced));
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn events_arriving_before_the_answer_are_kept() {
         let mut fixture = BinanceFixture::new(false);
         fixture.subscribe(&[perpetual_bbo()]).await;
@@ -1434,7 +1671,11 @@ mod tests {
                 context.notifier,
                 RealClock,
             );
-            let topics = HashSet::from([perpetual_bbo(), perpetual_trade()]);
+            let topics = HashSet::from([
+                perpetual_bbo(),
+                perpetual_trade(),
+                perpetual_aggregate_trade(),
+            ]);
             connector
                 .subscribe(&topics)
                 .await

@@ -1,3 +1,4 @@
+pub mod aggregation;
 mod alert;
 pub mod config;
 mod exchanges;

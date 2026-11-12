@@ -6,7 +6,7 @@
 
 - `config.rs`：`StrategyConfig::load`，读取 `strategy.toml`（权限 600，经 `layline::secrets::read_secret_toml`）。这是所有策略共用的格式：`strategy_name`、`provider_address`、`demo`（在交易所模拟盘交易，行情也来自模拟盘）、`topics`、`process_metrics_interval_seconds`（进程监控的间隔，必须大于 0）、`[celestia_client]`（上报进程监控用，和行情服务配置里的同一张表、同一把机器密钥，安装脚本每次都从行情服务的配置拷过来；上报的进程名就是 `strategy_name`）；`topics` 按交易所 → 品种 → 行情类型三层嵌套，直接复用 `layline::provider_api::topic_set`，与 HTTP API 的写法相同。`deny_unknown_fields`；拼错交易所、品种或行情类型时由 serde 报错，topics 为空也拒绝启动。等第二个策略出现，把它移进 layline。
 - `client.rs`：策略侧的 HTTP 协议（async，reqwest）。`ProviderSession::subscribe` 一直重试到所有 topic 都被接受（任何一个被拒就失败）；`resubscribe_forever` 是后台 runtime 上的任务，每 10 秒调用一次 `/resubscribe`，保持租约，并在行情服务重启后恢复订阅。连接失败或 5xx 时按 `layline::backoff::exponential_backoff` 重试；4xx（如 `demo` 不一致）重试也没用，`subscribe` 直接失败，resubscribe 时则 panic；错误信息带上 provider 在响应体里给的原因。行情服务每次返回的 ring 路径都应该和第一次相同、每个 topic 都应该有结果，否则说明两边代码对不上，直接 panic。等真正的策略需要它时，把它移进 layline。
-- `strategy.rs`：`Strategy` trait：`on_bbo`、`on_trade`，以及按类型分发的默认方法 `on_market_data`；参数都带上策略自己的接收时间 `received_at_nanoseconds`。
+- `strategy.rs`：`Strategy` trait：`on_bbo`、`on_trade`、`on_aggregate_trade`，以及按类型分发的默认方法 `on_market_data`；参数都带上策略自己的接收时间 `received_at_nanoseconds`。
 - `latency_bench.rs`：`LatencyBench`，实现了 `Strategy`，在内存里记录每条消息的延迟；每个窗口经 channel 交给 `LatencyBench::new` 一并返回的报告任务，由它排序并输出分位数，测量本身不会拖慢被测的消息。
 
 ## 运行

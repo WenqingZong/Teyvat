@@ -6,7 +6,7 @@ mod endpoint_set;
 
 pub(super) use client::{Header, TungsteniteClient, WebSocketClient};
 pub(super) use connection::{Heartbeat, Keepalive};
-pub(super) use endpoint_set::{EndpointId, EndpointSet, EndpointState};
+pub(super) use endpoint_set::{EndpointId, EndpointSet, EndpointState, TopicsByKey};
 
 /// A mock venue: each connection a client opens is a pair of channels the test drives by hand.
 #[cfg(test)]

@@ -126,6 +126,9 @@ fn market_data(topic: Topic, sequence: usize) -> MarketData {
     match topic.market_data_type {
         MarketDataType::Bbo => MarketData::Bbo(bbo(topic.instrument, sequence)),
         MarketDataType::Trade => MarketData::Trade(trade(topic.instrument, sequence)),
+        MarketDataType::AggregateTrade => {
+            MarketData::AggregateTrade(trade(topic.instrument, sequence))
+        }
     }
 }
 
@@ -138,7 +141,9 @@ fn publish(writer: &MarketDataWriter, data: &MarketData) {
 fn write_time(data: &MarketData) -> NonZeroU64 {
     match data {
         MarketData::Bbo(bbo) => bbo.latency_metric.provider_write_time_nanoseconds,
-        MarketData::Trade(trade) => trade.latency_metric.provider_write_time_nanoseconds,
+        MarketData::Trade(trade) | MarketData::AggregateTrade(trade) => {
+            trade.latency_metric.provider_write_time_nanoseconds
+        }
     }
 }
 

@@ -14,6 +14,8 @@ pub(in crate::exchanges) enum BinanceEndpoint {
     SpotSbe,
     /// JSON `/public`: perpetual `@bookTicker` and `@trade`; `/market` carries neither. Futures have no SBE streams.
     FuturesPublic,
+    /// JSON `/market`: perpetual `@aggTrade`, which `/public` accepts but never sends.
+    FuturesMarket,
 }
 
 pub(super) const API_KEY_HEADER: &str = "X-MBX-APIKEY";
@@ -34,6 +36,8 @@ impl BinanceEndpoint {
             (Self::SpotSbe, true) => "wss://demo-stream-sbe.binance.com:9443/stream",
             (Self::FuturesPublic, false) => "wss://fstream.binance.com/public/stream",
             (Self::FuturesPublic, true) => "wss://demo-fstream.binance.com/public/stream",
+            (Self::FuturesMarket, false) => "wss://fstream.binance.com/market/stream",
+            (Self::FuturesMarket, true) => "wss://demo-fstream.binance.com/market/stream",
         }
     }
 }
@@ -57,6 +61,16 @@ pub(super) const CONNECTED_APIS: &[ConnectedApi] = &[
     ConnectedApi {
         description: "USDⓈ-M futures public market data websocket, demo",
         api: "wss://demo-fstream.binance.com/public/stream",
+        doc: FUTURES_DOC,
+    },
+    ConnectedApi {
+        description: "USDⓈ-M futures market data websocket, live",
+        api: "wss://fstream.binance.com/market/stream",
+        doc: FUTURES_DOC,
+    },
+    ConnectedApi {
+        description: "USDⓈ-M futures market data websocket, demo",
+        api: "wss://demo-fstream.binance.com/market/stream",
         doc: FUTURES_DOC,
     },
 ];

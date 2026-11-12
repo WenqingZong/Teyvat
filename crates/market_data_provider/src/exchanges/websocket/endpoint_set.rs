@@ -18,10 +18,14 @@ pub(crate) trait EndpointId: Copy + Eq + Ord + Display {
     fn from_index(index: usize) -> Self;
 }
 
+/// The venue's subscription key (Binance stream name, OKX channel) mapped to the topics it feeds:
+/// usually one, but one venue stream may feed several, as Binance spot `@trade` feeds both trades and
+/// aggregate trades.
+pub(crate) type TopicsByKey = HashMap<String, Vec<Topic>>;
+
 pub(crate) struct EndpointState<Client> {
     pub(crate) connection: WebSocketConnection<Client>,
-    /// The venue's subscription key (Binance stream name, OKX channel) mapped to its topic.
-    pub(crate) topics_by_key: HashMap<String, Topic>,
+    pub(crate) topics_by_key: TopicsByKey,
     /// Set while the venue may lack some of `topics_by_key`: after a lost connection or failed request.
     pub(crate) restore_plan: Option<RestorePlan>,
 }
@@ -96,11 +100,12 @@ impl<const COUNT: usize, Endpoint: EndpointId, Client: WebSocketClient>
             .collect()
     }
 
-    /// Records topics by venue key; returns the keys that were new and whether every key must be resent.
+    /// Records topics by venue key; returns the keys that were new, which the venue must be sent, and
+    /// whether every key must be resent.
     pub(crate) fn record_topics(
         &mut self,
         endpoint: Endpoint,
-        topics_by_key: HashMap<String, Topic>,
+        topics_by_key: &TopicsByKey,
     ) -> (Vec<String>, bool) {
         let state = self.state_mut(endpoint);
         let added_keys: Vec<String> = topics_by_key
@@ -108,29 +113,38 @@ impl<const COUNT: usize, Endpoint: EndpointId, Client: WebSocketClient>
             .filter(|key| !state.topics_by_key.contains_key(*key))
             .cloned()
             .collect();
-        if added_keys.is_empty() {
-            return (added_keys, false);
+        let resubscribe_all = !added_keys.is_empty()
+            && (!state.connection.is_connected() || state.restore_plan.is_some());
+        for (key, topics) in topics_by_key {
+            let recorded = state.topics_by_key.entry(key.clone()).or_default();
+            for topic in topics {
+                if !recorded.contains(topic) {
+                    recorded.push(*topic);
+                }
+            }
         }
-        let resubscribe_all = !state.connection.is_connected() || state.restore_plan.is_some();
-        state.topics_by_key.extend(topics_by_key);
         (added_keys, resubscribe_all)
     }
 
-    /// Forgets topics a failed subscribe added, so the venue state matches ours again.
-    pub(crate) fn rollback_topics(&mut self, endpoint: Endpoint, keys: &[String]) {
+    /// Forgets topics; returns the keys left feeding none, which the venue must stop sending.
+    pub(crate) fn forget_topics(
+        &mut self,
+        endpoint: Endpoint,
+        topics_by_key: &TopicsByKey,
+    ) -> Vec<String> {
         let state = self.state_mut(endpoint);
-        for key in keys {
-            state.topics_by_key.remove(key);
+        let mut emptied_keys = Vec::new();
+        for (key, topics) in topics_by_key {
+            let Some(recorded) = state.topics_by_key.get_mut(key) else {
+                continue;
+            };
+            recorded.retain(|topic| !topics.contains(topic));
+            if recorded.is_empty() {
+                state.topics_by_key.remove(key);
+                emptied_keys.push(key.clone());
+            }
         }
-    }
-
-    /// Forgets topics and returns the keys that were actually present.
-    pub(crate) fn forget_topics(&mut self, endpoint: Endpoint, keys: &[String]) -> Vec<String> {
-        let state = self.state_mut(endpoint);
-        keys.iter()
-            .filter(|key| state.topics_by_key.remove(*key).is_some())
-            .cloned()
-            .collect()
+        emptied_keys
     }
 
     pub(crate) fn clear_restore(&mut self, endpoint: Endpoint) {

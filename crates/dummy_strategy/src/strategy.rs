@@ -7,10 +7,15 @@ pub trait Strategy {
 
     fn on_trade(&mut self, trade: &Trade, received_at_nanoseconds: NonZeroU64);
 
+    fn on_aggregate_trade(&mut self, trade: &Trade, received_at_nanoseconds: NonZeroU64);
+
     fn on_market_data(&mut self, data: &MarketData, received_at_nanoseconds: NonZeroU64) {
         match data {
             MarketData::Bbo(bbo) => self.on_bbo(bbo, received_at_nanoseconds),
             MarketData::Trade(trade) => self.on_trade(trade, received_at_nanoseconds),
+            MarketData::AggregateTrade(trade) => {
+                self.on_aggregate_trade(trade, received_at_nanoseconds)
+            }
         }
     }
 }
@@ -20,6 +25,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use layline::testing::test_trade;
     use layline::time::get_current_timestamp_nanoseconds;
     use layline::types::{Currency, Exchange, Instrument, LatencyMetric, Side, UnderlyingType};
 
@@ -27,6 +33,7 @@ mod tests {
     struct Recorder {
         bbo_sequences: Vec<usize>,
         trade_sequences: Vec<usize>,
+        aggregate_trade_sequences: Vec<usize>,
     }
 
     impl Strategy for Recorder {
@@ -36,6 +43,10 @@ mod tests {
 
         fn on_trade(&mut self, trade: &Trade, _received_at_nanoseconds: NonZeroU64) {
             self.trade_sequences.push(trade.sequence);
+        }
+
+        fn on_aggregate_trade(&mut self, trade: &Trade, _received_at_nanoseconds: NonZeroU64) {
+            self.aggregate_trade_sequences.push(trade.sequence);
         }
     }
 
@@ -74,7 +85,10 @@ mod tests {
         let mut recorder = Recorder::default();
         recorder.on_market_data(&bbo, now_nanoseconds);
         recorder.on_market_data(&trade, now_nanoseconds);
+        let aggregate_trade = MarketData::AggregateTrade(test_trade(instrument(), 3));
+        recorder.on_market_data(&aggregate_trade, now_nanoseconds);
         assert_eq!(vec![1], recorder.bbo_sequences);
         assert_eq!(vec![2], recorder.trade_sequences);
+        assert_eq!(vec![3], recorder.aggregate_trade_sequences);
     }
 }
