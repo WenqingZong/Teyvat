@@ -9,7 +9,6 @@ authors.workspace = true
 aes.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-bcast.workspace = true
 cbc.workspace = true
 chrono.workspace = true
 futures.workspace = true

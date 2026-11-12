@@ -2,38 +2,28 @@ use std::fs::OpenOptions;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
-use bcast::error::Error::Overrun;
-use bcast::{Reader, RingBuffer};
-use memmap2::{Mmap, MmapOptions};
+use anyhow::{Context, Result, ensure};
 use rkyv::rancor::Error as RkyvError;
-use tracing::warn;
 
-use super::MAX_PAYLOAD_LENGTH;
-use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_market_data_type};
+use super::ring_format::{RING_FILE_LENGTH, Ring};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::Subscription;
 use crate::types::{Bbo, MarketData, MarketDataType, Trade};
-
-// rkyv requires the archived bytes to be aligned.
-#[repr(C, align(16))]
-struct PayloadBuffer([u8; MAX_PAYLOAD_LENGTH]);
 
 /// One of the strategy's rings; it carries only topics this strategy subscribed to.
 struct RingReader {
     path: PathBuf,
     market_data_type: MarketDataType,
-    reader: Reader,
-    // Never read, only kept alive: `reader` points into this mapping, and dropping it would unmap the
-    // ring under the reader. Declared after `reader`, so it is dropped after it.
-    _memory_map: Mmap,
+    ring: Ring,
 }
 
 impl RingReader {
     fn open(subscription: &Subscription) -> Result<Self> {
         let path = &subscription.path;
+        // Writable: the reader owns the ring's head index.
         let file = OpenOptions::new()
             .read(true)
+            .write(true)
             .open(path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         let length = file.metadata()?.len();
@@ -43,64 +33,47 @@ impl RingReader {
             "{displayed_path} is {length} bytes, expected {RING_FILE_LENGTH}"
         );
 
-        let memory_map = unsafe { MmapOptions::new().map(&file)? };
-        // Checked before `into_reader`, which spins until a writer marks the ring ready and would
-        // hang forever on a file no writer initialized.
+        let ring = Ring::map(&file)?;
         let expected_market_data_type = subscription.topic.market_data_type;
-        let actual_market_data_type = read_market_data_type(&memory_map[METADATA_RANGE])
+        let actual_market_data_type = ring
+            .market_data_type()
             .with_context(|| format!("{} is not a market data ring", path.display()))?;
         ensure!(
             actual_market_data_type == expected_market_data_type,
             "{displayed_path} holds {actual_market_data_type}, expected {expected_market_data_type}"
         );
-        let reader = RingBuffer::new(memory_map.as_ref()).into_reader();
+        ring.skip_to_tail();
         Ok(Self {
             path: path.clone(),
             market_data_type: expected_market_data_type,
-            reader,
-            _memory_map: memory_map,
+            ring,
         })
     }
 
     fn poll<OnData: FnMut(MarketData, NonZeroU64)>(&self, on_data: &mut OnData) -> Result<usize> {
-        let Some(batch) = self.reader.read_batch() else {
-            return Ok(0);
-        };
-
         let mut handled = 0;
-        let mut buffer = PayloadBuffer([0; MAX_PAYLOAD_LENGTH]);
-        for message_result in batch {
-            let length = match message_result.and_then(|message| message.read(&mut buffer.0)) {
-                Ok(length) => length,
-                Err(Overrun(position)) => {
-                    let path = self.path.display();
-                    warn!("{path} overrun at position {position}");
-                    self.reader.reset();
-                    break;
-                }
-                // Only `InsufficientBufferSize` is left: no Bbo or Trade is that large.
-                Err(error) => {
-                    let path = self.path.display();
-                    bail!("cannot read a message of {path}: {error}");
-                }
-            };
-            let received_at_nanoseconds = get_current_timestamp_nanoseconds();
-            let payload = &buffer.0[..length];
-            let data = match self.market_data_type {
-                MarketDataType::Bbo => {
-                    MarketData::Bbo(rkyv::from_bytes::<Bbo, RkyvError>(payload)?)
-                }
-                MarketDataType::Trade => {
-                    MarketData::Trade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
-                }
-                MarketDataType::AggregateTrade => {
-                    MarketData::AggregateTrade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
-                }
-            };
+        while let Some(received_result) = self.ring.try_pop(|payload| self.decode(payload)) {
+            let (data, received_at_nanoseconds) = received_result
+                .with_context(|| format!("cannot decode a message of {}", self.path.display()))?;
             on_data(data, received_at_nanoseconds);
             handled += 1;
         }
         Ok(handled)
+    }
+
+    /// Deserializes straight from the slot: the writer cannot reuse it before it is popped.
+    fn decode(&self, payload: &[u8]) -> Result<(MarketData, NonZeroU64)> {
+        let received_at_nanoseconds = get_current_timestamp_nanoseconds();
+        let data = match self.market_data_type {
+            MarketDataType::Bbo => MarketData::Bbo(rkyv::from_bytes::<Bbo, RkyvError>(payload)?),
+            MarketDataType::Trade => {
+                MarketData::Trade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
+            }
+            MarketDataType::AggregateTrade => {
+                MarketData::AggregateTrade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
+            }
+        };
+        Ok((data, received_at_nanoseconds))
     }
 }
 

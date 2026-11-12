@@ -255,17 +255,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "bcast"
-version = "0.0.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35f41374c101b6b92585798af4d441fc8b0e40544946584e5f210a3f7d66ffd2"
-dependencies = [
- "crossbeam-utils",
- "memmap2",
- "thiserror",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1566,7 +1555,6 @@ dependencies = [
  "aes 0.9.4",
  "anyhow",
  "base64 0.23.1",
- "bcast",
  "cbc",
  "chrono",
  "futures",

@@ -1,13 +1,13 @@
+use std::cell::Cell;
 use std::fs::{OpenOptions, create_dir_all};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use bcast::{RingBuffer, Writer};
-use memmap2::{MmapMut, MmapOptions};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::util::AlignedVec;
+use tracing::warn;
 
-use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_market_data_type, write_metadata};
+use super::ring_format::{RING_FILE_LENGTH, Ring};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{MarketData, RingKey, StrategyName, Topic};
 
@@ -48,10 +48,9 @@ impl SerializedMarketData {
 /// The single writer of one strategy's ring.
 pub struct MarketDataWriter {
     ring_key: RingKey,
-    writer: Writer,
-    // Never read, only kept alive: `writer` points into this mapping, and dropping it would unmap the
-    // ring under the writer. Declared after `writer`, so it is dropped after it.
-    _memory_map: MmapMut,
+    ring: Ring,
+    /// Whether the last publish found the ring full, so a stalled strategy is logged once, not per message.
+    is_dropping: Cell<bool>,
 }
 
 impl MarketDataWriter {
@@ -78,26 +77,26 @@ impl MarketDataWriter {
             file.set_len(RING_FILE_LENGTH)?;
         }
 
-        let memory_map = unsafe { MmapOptions::new().map_mut(&file)? };
+        let mut ring = Ring::map(&file)?;
         let market_data_type = ring_key.market_data_type;
         // A new, resized or foreign file is reset; only a ring of this format and type is joined.
         let reusable = !resized
-            && read_market_data_type(&memory_map[METADATA_RANGE]).is_ok_and(
-                |existing_market_data_type| existing_market_data_type == market_data_type,
-            );
-        let ring = RingBuffer::new(memory_map.as_ref());
-        let writer = if reusable {
-            ring.join_writer()
-        } else {
-            ring.into_writer_with_metadata(|metadata| write_metadata(metadata, market_data_type))
-        };
+            && ring
+                .market_data_type()
+                .is_ok_and(|existing_market_data_type| {
+                    existing_market_data_type == market_data_type
+                });
+        if !reusable {
+            ring.reset(market_data_type);
+        }
         Ok(Self {
             ring_key,
-            writer,
-            _memory_map: memory_map,
+            ring,
+            is_dropping: Cell::new(false),
         })
     }
 
+    /// Drops the message when the strategy has left no free slot: the writer never waits for a reader.
     pub fn publish(&self, serialized: &SerializedMarketData) {
         debug_assert_eq!(
             serialized.topic.ring_key(),
@@ -106,9 +105,16 @@ impl MarketDataWriter {
             serialized.topic,
             self.ring_key
         );
-        let mut claim = self.writer.claim(serialized.bytes.len(), true);
-        claim.get_buffer_mut().copy_from_slice(&serialized.bytes);
-        claim.commit();
+        let published = self.ring.try_push(&serialized.bytes);
+        if published == self.is_dropping.get() {
+            self.is_dropping.set(!published);
+            let ring_key = self.ring_key;
+            if published {
+                warn!("the {ring_key} ring has free slots again");
+            } else {
+                warn!("the {ring_key} ring is full, dropping messages until its strategy reads");
+            }
+        }
     }
 }
 
@@ -122,11 +128,11 @@ mod tests {
 
     use super::*;
     use crate::shared_memory::MarketDataReader;
-    use crate::shared_memory::ring_format::RING_CAPACITY;
+    use crate::shared_memory::ring_format::SLOT_COUNT;
     use crate::testing::{test_bbo, test_instrument, test_subscription, test_topic, test_trade};
     use crate::types::Subscription;
     use crate::types::{
-        Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, UnderlyingType,
+        Currency, Exchange, Instrument, LatencyMetric, MarketDataType, UnderlyingType,
     };
 
     const STRATEGY_NAME: &str = "test_strategy";
@@ -363,22 +369,27 @@ mod tests {
     }
 
     #[test]
-    fn overrun_reader_recovers_to_latest() {
+    fn full_ring_drops_new_messages_until_the_reader_catches_up() {
         let directory = tempdir().expect("temp dir creation is expected to not fail");
         let subscription = subscription(&directory, MarketDataType::Bbo);
         let writer = writer(&directory, MarketDataType::Bbo);
         let market_data_reader = market_data_reader(slice::from_ref(&subscription));
         let mut collector = Collector::default();
 
-        let lapping_count = RING_CAPACITY / size_of::<Bbo>() * 2;
-        for sequence in 0..lapping_count {
+        // One slot stays empty, so the ring holds one message less than it has slots.
+        let held_count = SLOT_COUNT as usize - 1;
+        for sequence in 0..held_count + 2 {
             publish(&writer, bbo(sequence));
         }
-        assert_eq!(0, poll(&market_data_reader, &mut collector));
+        assert_eq!(held_count, poll(&market_data_reader, &mut collector));
+        assert_eq!(
+            (0..held_count).collect::<Vec<usize>>(),
+            collector.bbo_sequences
+        );
 
-        publish(&writer, bbo(lapping_count));
-        poll(&market_data_reader, &mut collector);
-        assert_eq!(vec![lapping_count], collector.bbo_sequences);
+        publish(&writer, bbo(held_count + 2));
+        assert_eq!(1, poll(&market_data_reader, &mut collector));
+        assert_eq!(Some(&(held_count + 2)), collector.bbo_sequences.last());
     }
 
     #[test]

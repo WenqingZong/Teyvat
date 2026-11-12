@@ -73,7 +73,7 @@ impl WorkerHandle {
     }
 }
 
-/// bcast writers are `!Send`, so each exchange gets its own thread that owns its connector and every strategy's rings.
+/// Each ring has one writer, so each exchange gets its own thread that owns its connector and every strategy's rings.
 /// The connector need not be `Send` either, so `new_connector` builds it on that thread.
 pub(super) fn spawn_worker<Connector: ExchangeConnector>(
     root_directory: &Path,
