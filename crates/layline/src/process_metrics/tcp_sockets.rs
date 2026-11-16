@@ -16,18 +16,12 @@ use netlink_packet_sock_diag::inet::nlas::Nla;
 use netlink_packet_sock_diag::inet::{ExtensionFlags, InetRequest, SocketId, StateFlags};
 use netlink_sys::protocols::NETLINK_SOCK_DIAG;
 use netlink_sys::{Socket, SocketAddr};
-/// Offset of `tcpi_bytes_acked` in `struct tcp_info` (`linux/tcp.h`, Linux 4.2 and later; the
-/// kernel requirement is in `deploy/README.md`).
-const BYTES_ACKED_OFFSET: usize = 120;
-/// Offset of `tcpi_bytes_received`, right after `tcpi_bytes_acked`.
-const BYTES_RECEIVED_OFFSET: usize = 128;
-const COUNTER_LENGTH: usize = size_of::<u64>();
+
 /// Room for a whole multipart chunk of the dump; the kernel sends at most 32 KiB at a time.
 const RECEIVE_BUFFER_LENGTH: usize = 64 * 1024;
 /// Port 0 addresses the kernel.
 const KERNEL_PORT: u32 = 0;
 const NO_MULTICAST_GROUPS: u32 = 0;
-
 /// Cumulative counters of one socket, in bytes and `u64` as the kernel keeps them: a long-lived
 /// connection passes 4 GiB within hours. Only the rates derived from them leave the process.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -106,7 +100,13 @@ fn receive_dump(
                     }
                     for attribute in &response.nlas {
                         if let Nla::TcpInfo(tcp_info) = attribute {
-                            byte_counts.insert(inode, parse_tcp_info(tcp_info)?);
+                            byte_counts.insert(
+                                inode,
+                                TcpByteCount {
+                                    received_bytes: tcp_info.bytes_received,
+                                    sent_bytes: tcp_info.bytes_acked,
+                                },
+                            );
                         }
                     }
                 }
@@ -123,62 +123,15 @@ fn receive_dump(
     }
 }
 
-fn parse_tcp_info(tcp_info: &[u8]) -> Result<TcpByteCount> {
-    match (
-        read_counter(tcp_info, BYTES_RECEIVED_OFFSET),
-        read_counter(tcp_info, BYTES_ACKED_OFFSET),
-    ) {
-        (Some(received_bytes), Some(sent_bytes)) => Ok(TcpByteCount {
-            received_bytes,
-            sent_bytes,
-        }),
-        _ => {
-            let length = tcp_info.len();
-            bail!("tcp_info of {length} bytes has no byte counters; the kernel predates Linux 4.2")
-        }
-    }
-}
-
-/// Netlink attributes are in host byte order.
-fn read_counter(tcp_info: &[u8], offset: usize) -> Option<u64> {
-    let counter_bytes = tcp_info.get(offset..offset + COUNTER_LENGTH)?;
-    Some(u64::from_ne_bytes(counter_bytes.try_into().ok()?))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs::read_link;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
 
     use super::*;
-    use crate::process_metrics::proc_files_parser::parse_socket_inode;
-    use crate::process_metrics::read_open_file_descriptors;
 
     const PAYLOAD_LENGTH: usize = 5000;
-
-    #[test]
-    fn tcp_info_yields_both_counters() {
-        let mut tcp_info = vec![0; BYTES_RECEIVED_OFFSET + COUNTER_LENGTH];
-        tcp_info[BYTES_ACKED_OFFSET..BYTES_ACKED_OFFSET + COUNTER_LENGTH]
-            .copy_from_slice(&700_u64.to_ne_bytes());
-        tcp_info[BYTES_RECEIVED_OFFSET..].copy_from_slice(&900_u64.to_ne_bytes());
-        assert_eq!(
-            TcpByteCount {
-                received_bytes: 900,
-                sent_bytes: 700,
-            },
-            parse_tcp_info(&tcp_info).expect("tcp_info is long enough")
-        );
-    }
-
-    #[test]
-    fn short_tcp_info_is_refused() {
-        let error = parse_tcp_info(&[0; BYTES_RECEIVED_OFFSET])
-            .expect_err("tcp_info without bytes_received is refused");
-        assert!(error.to_string().contains("128 bytes"), "{error}");
-    }
 
     /// Sends bytes over a loopback connection and finds them on both ends' sockets.
     #[test]
@@ -202,24 +155,30 @@ mod tests {
             .read_exact(&mut [0])
             .expect("reading the reply works");
 
-        let socket_inodes = read_open_file_descriptors()
-            .expect("listing own file descriptors works")
-            .socket_inodes;
+        let socket_inodes = HashSet::from([socket_inode(&client), socket_inode(&server)]);
         let byte_counts = read_tcp_byte_counts(&socket_inodes).expect("sock_diag answers");
-        let inode_of = |stream: &TcpStream| {
-            let file_descriptor = stream.as_raw_fd();
-            let link_target = read_link(format!("/proc/self/fd/{file_descriptor}"))
-                .expect("the socket's file descriptor exists");
-            parse_socket_inode(&link_target.to_string_lossy()).expect("the link is a socket")
-        };
-        let client_count = byte_counts[&inode_of(&client)];
-        let server_count = byte_counts[&inode_of(&server)];
+        let client_count = byte_counts[&socket_inode(&client)];
+        let server_count = byte_counts[&socket_inode(&server)];
         assert_eq!(PAYLOAD_LENGTH as u64, server_count.received_bytes);
         let syn_sequence_number = 1;
         assert_eq!(
             PAYLOAD_LENGTH as u64 + syn_sequence_number,
             client_count.sent_bytes
         );
+    }
+
+    /// The socket inode of `stream`, through `procfs`, so the test does not parse `/proc` itself.
+    fn socket_inode(stream: &TcpStream) -> u32 {
+        let process = procfs::process::Process::myself().expect("the process is readable");
+        let file_descriptor = process
+            .fd_from_fd(stream.as_raw_fd())
+            .expect("the socket's file descriptor exists");
+        match file_descriptor.target {
+            procfs::process::FDTarget::Socket(inode) => {
+                u32::try_from(inode).expect("the inode fits u32")
+            }
+            target => panic!("the descriptor is not a socket: {target:?}"),
+        }
     }
 
     #[test]

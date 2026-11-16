@@ -38,7 +38,12 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+layline-testing.workspace = true
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# `/proc` parsing is Linux-only; `procfs` refuses every other target in its build script.
+[target.'cfg(target_os = "linux")'.dependencies]
+procfs.workspace = true

@@ -21,6 +21,7 @@ All other code lives in library crates under `crates/`:
 | `market_data_provider` | Connects to exchanges and publishes market data to strategies over shared memory. |
 | `dummy_strategy` | Development stand-in strategy and latency bench; reads market data through `layline`. |
 | `layline` | LayLine (地脉): the code every other crate shares. |
+| `layline-testing` | Dev-only source checks shared by the tests: module cycles, import grouping and format strings; never a production dependency. |
 
 Crates hold code only. Everything else lives at the top level:
 
@@ -45,7 +46,7 @@ Private strategies will later join as a git submodule outside `crates/` (e.g. `s
 
 ## What goes in layline
 
-Only code that two or more crates use today; code one crate uses stays in that crate until a second one needs it. layline is one crate without feature flags. Its modules are listed in `architecture/overview.md`. `layline::testing` (test fixtures and checks) is public because other crates' tests need it, so nothing but convention keeps production code from calling it.
+Only code that two or more crates use today; code one crate uses stays in that crate until a second one needs it. layline is one crate without feature flags. Its modules are listed in `architecture/overview.md`. `layline::testing` holds the test fixtures every crate's tests share and is public because of that, so only convention keeps production code from calling it. The source checks (module cycles, import grouping, format strings) live in the separate `layline-testing` dev-dependency crate, so they are never compiled into a production binary.
 
 ## Commands
 
@@ -57,6 +58,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --all
 cargo test --workspace                        # unit, integration and example tests of every crate
 cargo test -p <crate> <name> -- --nocapture   # one test
+cargoscope scan . --checks inventory,unused   # unused-dependency report; CI fails if any
 cargo test --workspace --test module_dependencies --test import_groups --test format_strings   # module cycle, import grouping and format string checks
 cargo llvm-cov --workspace --summary-only     # line coverage; CI requires 90%
 cargo bench -p market_data_provider           # criterion latency benches
@@ -71,10 +73,10 @@ CI (`.github/workflows/rust_ci.yml`) runs fmt, clippy, the module cycle, import 
 - **Workspace lints** (`[workspace.lints.clippy]`, inherited by every crate through `[lints] workspace = true`): `unwrap_used`, `print_stdout`, `print_stderr` and `dbg_macro` are denied, in tests too. Use `expect("reason")` where a failure is a bug.
 - **Dependencies:** versions are declared once in `[workspace.dependencies]`; crates use `<name>.workspace = true` and add features locally.
 - **Compiler over convention:** whatever rustc, clippy or cargo can enforce is enforced by them, not by a comment saying "never do X": visibility, `#[cfg]`, types, lints, exhaustive matches. Where no compiler mechanism exists, a test enforces it.
-- **No module cycles:** every crate has `tests/module_dependencies.rs`, which calls `layline::testing::assert_acyclic_modules`; top-level modules must not import each other in a cycle. Shared names such as Phanes' `Service` live in a leaf module, not in the module that composes everything.
+- **No module cycles:** every crate has `tests/module_dependencies.rs`, which calls `layline_testing::assert_acyclic_modules`; top-level modules must not import each other in a cycle. Shared names such as Phanes' `Service` live in a leaf module, not in the module that composes everything.
 - **Logging:** only `tracing`. Import the macros at the top of the file (`use tracing::{info, warn};`) and write `info!`, not `tracing::info!`. Binaries and examples call `layline::logging::init_tracing()` once and keep the returned guard alive until exit, because dropping it flushes buffered lines.
-- **Imports:** no long inline paths such as `std::fs::read_to_string` or `snow::Builder`; `use` them at the top of the file, and rename clashes with clear aliases (`IoError`, `TomlError`). Group `use` items in three blocks separated by one blank line: the standard library (`std`, `core`, `alloc`), then third-party crates, then this repository (`crate`, `self`, `super`, workspace crates such as `layline`, child modules); rustfmt sorts within each block. Every package's `tests/import_groups.rs` (`layline::testing::assert_grouped_imports`) enforces it.
-- **Format strings:** one placeholder style per string: never mix positional (`{}`, `{:?}`, `{0}`) with named (`{name}`). Bind an expression such as `path.display()` to a local first, then inline it (`let path = path.display(); info!("loaded {path}: {config:#?}");`); in a `thiserror` attribute, where no local can be bound, use a named field or a named argument. Every package's `tests/format_strings.rs` (`layline::testing::assert_consistent_format_strings`) enforces it.
+- **Imports:** no long inline paths such as `std::fs::read_to_string` or `snow::Builder`; `use` them at the top of the file, and rename clashes with clear aliases (`IoError`, `TomlError`). Group `use` items in three blocks separated by one blank line: the standard library (`std`, `core`, `alloc`), then third-party crates, then this repository (`crate`, `self`, `super`, workspace crates such as `layline`, child modules); rustfmt sorts within each block. Every package's `tests/import_groups.rs` (`layline_testing::assert_grouped_imports`) enforces it.
+- **Format strings:** one placeholder style per string: never mix positional (`{}`, `{:?}`, `{0}`) with named (`{name}`). Bind an expression such as `path.display()` to a local first, then inline it (`let path = path.display(); info!("loaded {path}: {config:#?}");`); in a `thiserror` attribute, where no local can be bound, use a named field or a named argument. Every package's `tests/format_strings.rs` (`layline_testing::assert_consistent_format_strings`) enforces it.
 - **Naming:** names are spelled out, never abbreviated. A binding (variable, parameter, closure or loop variable, pattern) whose type is `Result` ends in `_result`, and one whose type is `Option` ends in `_option`; unwrapped values take no suffix. A timestamp or time span held as a raw integer names its unit (`exchange_time_nanoseconds`); `Duration` and `Instant` need none.
 - **No magic numbers:** define named constants.
 - **Types:** no generic parameters for show (such as `impl Into<String>`) when they buy nothing; keep parameters of the same kind the same type; prefer semantic types (`Url`, `SecretString`, `StatusCode`), even when that needs a hand-written serde adapter.

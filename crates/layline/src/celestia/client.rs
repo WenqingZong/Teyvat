@@ -2,7 +2,6 @@
 //! Every sample goes into one outbox the moment it arrives, connected or not, and leaves it only
 //! when Phanes acknowledges it; after a reconnect, everything still in it is sent again.
 use std::collections::VecDeque;
-use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::pin::{Pin, pin};
 use std::time::{Duration, Instant};
 
@@ -22,6 +21,7 @@ use url::{ParseError, Url};
 
 use super::{Ack, Batch, CELESTIA_PATH, CelestiaError, Hello, Initiator, Session};
 use crate::backoff::exponential_backoff;
+use crate::config::LogUrl;
 use crate::noise::{StaticKey, deserialize_key};
 use crate::process_metrics::ProcessSample;
 use crate::shutdown::ShutdownSignal;
@@ -70,35 +70,17 @@ pub enum CelestiaUrlError {
 
 /// The `[celestia_client]` table of every reporting process's config. The Noise key authenticates the
 /// machine, so every process on it holds the same `client_celestia_private_key`.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CelestiaClientConfig {
     /// Phanes, as Cloudflare exposes it; the reporter appends `/celestia`.
-    pub url: Url,
+    pub url: LogUrl,
     /// Base64 X25519 private key this machine authenticates to Celestia with.
     #[serde(deserialize_with = "deserialize_key")]
     pub client_celestia_private_key: SecretBox<StaticKey>,
     /// Base64 X25519 public key of Phanes Celestia.
     #[serde(deserialize_with = "deserialize_key")]
     pub phanes_celestia_public_key: SecretBox<StaticKey>,
-}
-
-/// Written by hand so `url` prints as one URL rather than `Url`'s fields; the keys print as
-/// `[REDACTED]`.
-impl Debug for CelestiaClientConfig {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let Self {
-            url,
-            client_celestia_private_key,
-            phanes_celestia_public_key,
-        } = self;
-        formatter
-            .debug_struct("CelestiaClientConfig")
-            .field("url", &format_args!("{url}"))
-            .field("client_celestia_private_key", client_celestia_private_key)
-            .field("phanes_celestia_public_key", phanes_celestia_public_key)
-            .finish()
-    }
 }
 
 /// Written by hand because `SecretBox` of a key is not `Clone`: the copy holds the same keys in
@@ -578,7 +560,7 @@ mod tests {
         phanes_celestia_public_key: SecretBox<StaticKey>,
     ) -> CelestiaClientConfig {
         CelestiaClientConfig {
-            url,
+            url: LogUrl(url),
             client_celestia_private_key,
             phanes_celestia_public_key,
         }

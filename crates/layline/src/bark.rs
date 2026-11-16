@@ -4,8 +4,8 @@
 //! so the Bark relay server only sees ciphertext. The key and IV are used as raw
 //! ASCII bytes, matching the Bark app's "AES-256-CBC" encryption setting.
 
-use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::sync::Arc;
+use std::time::Duration;
 
 use aes::Aes256;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
@@ -19,11 +19,15 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tracing::info;
 use url::Url;
 
+use crate::config::LogUrl;
+
 type Aes256CbcEncryptor = Encryptor<Aes256>;
 
 const KEY_LENGTH: usize = 32;
 const INITIALIZATION_VECTOR_LENGTH: usize = 16;
 const BARK_SERVER: &str = "https://api.day.app";
+/// A stalled Bark request must not hold up every later notification.
+const BARK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarkError {
@@ -43,35 +47,17 @@ pub enum BarkError {
 }
 
 /// The `[bark]` table of the config.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BarkConfig {
     #[serde(default = "default_bark_server")]
-    server: Url,
+    server: LogUrl,
     device_key: SecretString,
     encryption_key: SecretString,
 }
 
-/// Written by hand so `server` prints as one URL rather than `Url`'s fields; the credentials print
-/// as `[REDACTED]`.
-impl Debug for BarkConfig {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let Self {
-            server,
-            device_key,
-            encryption_key,
-        } = self;
-        formatter
-            .debug_struct("BarkConfig")
-            .field("server", &format_args!("{server}"))
-            .field("device_key", device_key)
-            .field("encryption_key", encryption_key)
-            .finish()
-    }
-}
-
-fn default_bark_server() -> Url {
-    Url::parse(BARK_SERVER).expect("BARK_SERVER is a valid URL")
+fn default_bark_server() -> LogUrl {
+    LogUrl(Url::parse(BARK_SERVER).expect("BARK_SERVER is a valid URL"))
 }
 
 /// Fields of the Bark push payload; see the Bark docs for the full list. Empty fields are omitted.
@@ -116,7 +102,7 @@ impl BarkNotifier {
             return Err(BarkError::InvalidKeyLength { length: key_length });
         }
         if config.server.cannot_be_a_base() {
-            return Err(BarkError::InvalidServer(config.server));
+            return Err(BarkError::InvalidServer(config.server.clone().into()));
         }
         Ok(Self {
             client: Client::new(),
@@ -133,7 +119,7 @@ impl BarkNotifier {
             &plaintext,
         );
 
-        let mut url = self.config.server.clone();
+        let mut url = self.config.server.0.clone();
         url.path_segments_mut()
             .expect("server is checked in BarkNotifier::new")
             .pop_if_empty()
@@ -141,6 +127,7 @@ impl BarkNotifier {
         let response: BarkResponse = self
             .client
             .post(url)
+            .timeout(BARK_REQUEST_TIMEOUT)
             .form(&[
                 ("ciphertext", ciphertext.as_str()),
                 ("iv", initialization_vector.as_str()),
@@ -230,7 +217,7 @@ mod tests {
 
     fn test_config(server: &str, encryption_key: &str) -> BarkConfig {
         BarkConfig {
-            server: Url::parse(server).expect("test server is a valid URL"),
+            server: LogUrl(Url::parse(server).expect("test server is a valid URL")),
             device_key: SecretString::from("device"),
             encryption_key: SecretString::from(encryption_key),
         }

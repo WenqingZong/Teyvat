@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use layline::testing::assert_grouped_imports;
+use layline_testing::assert_grouped_imports;
 
 #[test]
 fn imports_are_grouped() {

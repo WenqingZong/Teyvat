@@ -5,6 +5,7 @@ pub mod backoff;
 pub mod bark;
 pub mod build;
 pub mod celestia;
+pub mod config;
 pub mod gnosis;
 pub mod logging;
 pub mod noise;

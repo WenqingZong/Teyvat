@@ -3,6 +3,7 @@ use std::mem::take;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use hdrhistogram::Histogram;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::info;
@@ -13,13 +14,31 @@ use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
 
 const PERCENTILES: [f64; 4] = [0.5, 0.9, 0.99, 0.999];
 const NANOSECONDS_PER_MICROSECOND: f64 = 1_000.0;
+/// Enough significant figures to report microseconds to two decimals.
+const HISTOGRAM_SIGNIFICANT_FIGURES: u8 = 5;
 
 /// One window's samples of one topic, in nanoseconds.
-#[derive(Default)]
 struct LatencySamples {
-    provider_nanoseconds: Vec<u64>,
-    transport_nanoseconds: Vec<u64>,
-    parse_nanoseconds: Vec<u64>,
+    provider_nanoseconds: Histogram<u64>,
+    transport_nanoseconds: Histogram<u64>,
+    parse_nanoseconds: Histogram<u64>,
+    internal_nanoseconds: Histogram<u64>,
+}
+
+impl Default for LatencySamples {
+    fn default() -> Self {
+        Self {
+            provider_nanoseconds: histogram(),
+            transport_nanoseconds: histogram(),
+            parse_nanoseconds: histogram(),
+            internal_nanoseconds: histogram(),
+        }
+    }
+}
+
+fn histogram() -> Histogram<u64> {
+    Histogram::new(HISTOGRAM_SIGNIFICANT_FIGURES)
+        .expect("five significant figures are a valid histogram")
 }
 
 struct Report {
@@ -28,8 +47,8 @@ struct Report {
 }
 
 /// Records latencies per message and hands each window to the reporter, a task off the hot path that
-/// sorts and logs percentiles; the reading thread only appends, so measuring does not delay the
-/// messages measured.
+/// logs percentiles; the reading thread only records, so measuring does not delay the messages
+/// measured.
 pub struct LatencyBench {
     report_interval: Duration,
     window_start_nanoseconds: NonZeroU64,
@@ -61,23 +80,33 @@ impl LatencyBench {
         received_at_nanoseconds: NonZeroU64,
     ) {
         let handled_at_nanoseconds = get_current_timestamp_nanoseconds();
+        let provider_nanoseconds = latency_metric
+            .provider_write_time_nanoseconds
+            .get()
+            .saturating_sub(latency_metric.provider_receive_time_nanoseconds.get());
+        let transport_nanoseconds = received_at_nanoseconds
+            .get()
+            .saturating_sub(latency_metric.provider_write_time_nanoseconds.get());
+        let parse_nanoseconds = handled_at_nanoseconds
+            .get()
+            .saturating_sub(received_at_nanoseconds.get());
         let samples = self.samples.entry(topic).or_default();
-        samples.provider_nanoseconds.push(
-            latency_metric
-                .provider_write_time_nanoseconds
-                .get()
-                .saturating_sub(latency_metric.provider_receive_time_nanoseconds.get()),
-        );
-        samples.transport_nanoseconds.push(
-            received_at_nanoseconds
-                .get()
-                .saturating_sub(latency_metric.provider_write_time_nanoseconds.get()),
-        );
-        samples.parse_nanoseconds.push(
-            handled_at_nanoseconds
-                .get()
-                .saturating_sub(received_at_nanoseconds.get()),
-        );
+        samples
+            .provider_nanoseconds
+            .record(provider_nanoseconds)
+            .expect("a histogram records any u64");
+        samples
+            .transport_nanoseconds
+            .record(transport_nanoseconds)
+            .expect("a histogram records any u64");
+        samples
+            .parse_nanoseconds
+            .record(parse_nanoseconds)
+            .expect("a histogram records any u64");
+        samples
+            .internal_nanoseconds
+            .record(provider_nanoseconds + transport_nanoseconds)
+            .expect("a histogram records any u64");
         let window = Duration::from_nanos(
             handled_at_nanoseconds
                 .get()
@@ -115,52 +144,48 @@ fn report_lines(report: Report) -> Vec<String> {
     )];
     let mut samples_by_topic = report.samples;
     for topic in topics {
-        let mut samples = samples_by_topic
+        let samples = samples_by_topic
             .remove(&topic)
             .expect("every sorted topic comes from the map");
-        lines.push(summary_line(&topic.to_string(), &mut samples));
+        lines.push(summary_line(&topic.to_string(), &samples));
         all.provider_nanoseconds
-            .extend(&samples.provider_nanoseconds);
+            .add(&samples.provider_nanoseconds)
+            .expect("histograms of one configuration add");
         all.transport_nanoseconds
-            .extend(&samples.transport_nanoseconds);
-        all.parse_nanoseconds.extend(&samples.parse_nanoseconds);
+            .add(&samples.transport_nanoseconds)
+            .expect("histograms of one configuration add");
+        all.parse_nanoseconds
+            .add(&samples.parse_nanoseconds)
+            .expect("histograms of one configuration add");
+        all.internal_nanoseconds
+            .add(&samples.internal_nanoseconds)
+            .expect("histograms of one configuration add");
     }
-    lines.push(summary_line("all topics", &mut all));
+    lines.push(summary_line("all topics", &all));
     lines
 }
 
-fn summary_line(name: &str, samples: &mut LatencySamples) -> String {
-    let mut internal_nanoseconds: Vec<u64> = samples
-        .provider_nanoseconds
-        .iter()
-        .zip(&samples.transport_nanoseconds)
-        .map(|(provider, transport)| provider + transport)
-        .collect();
+fn summary_line(name: &str, samples: &LatencySamples) -> String {
     let sample_count = samples.provider_nanoseconds.len();
-    let provider_percentiles = percentiles(&mut samples.provider_nanoseconds);
-    let transport_percentiles = percentiles(&mut samples.transport_nanoseconds);
-    let internal_percentiles = percentiles(&mut internal_nanoseconds);
-    let parse_percentiles = percentiles(&mut samples.parse_nanoseconds);
+    let provider_percentiles = percentiles(&samples.provider_nanoseconds);
+    let transport_percentiles = percentiles(&samples.transport_nanoseconds);
+    let internal_percentiles = percentiles(&samples.internal_nanoseconds);
+    let parse_percentiles = percentiles(&samples.parse_nanoseconds);
     format!(
         "{name} n={sample_count} | provider {provider_percentiles} | transport {transport_percentiles} | internal {internal_percentiles} | parse {parse_percentiles}"
     )
 }
 
-/// `p50/p90/p99/p99.9/max` in microseconds, nearest rank; `-` when empty.
-fn percentiles(samples_nanoseconds: &mut [u64]) -> String {
-    let Some(&max_nanoseconds) = samples_nanoseconds.iter().max() else {
+/// `p50/p90/p99/p99.9/max` in microseconds; `-` when empty.
+fn percentiles(samples_nanoseconds: &Histogram<u64>) -> String {
+    if samples_nanoseconds.is_empty() {
         return "-".to_owned();
-    };
-    samples_nanoseconds.sort_unstable();
-    let count = samples_nanoseconds.len();
+    }
     let mut values: Vec<String> = PERCENTILES
         .iter()
-        .map(|fraction| {
-            let rank = (fraction * count as f64).ceil() as usize;
-            microseconds(samples_nanoseconds[rank.clamp(1, count) - 1])
-        })
+        .map(|fraction| microseconds(samples_nanoseconds.value_at_quantile(*fraction)))
         .collect();
-    values.push(microseconds(max_nanoseconds));
+    values.push(microseconds(samples_nanoseconds.max()));
     values.join("/")
 }
 
@@ -255,15 +280,25 @@ mod tests {
         get_current_timestamp_nanoseconds()
     }
 
+    fn histogram_from(values: impl IntoIterator<Item = u64>) -> Histogram<u64> {
+        let mut histogram = histogram();
+        for value in values {
+            histogram
+                .record(value)
+                .expect("a histogram records any u64");
+        }
+        histogram
+    }
+
     #[test]
-    fn percentiles_use_nearest_rank_in_microseconds() {
-        let mut samples: Vec<u64> = (1..=1000).rev().map(|value| value * 1_000).collect();
+    fn percentiles_are_hdr_quantiles_in_microseconds() {
+        let samples = histogram_from((1..=1000).rev().map(|value| value * 1_000));
+        assert_eq!("500.00/900.00/990.00/999.00/1000.00", percentiles(&samples));
         assert_eq!(
-            "500.00/900.00/990.00/999.00/1000.00",
-            percentiles(&mut samples)
+            "1.50/1.50/1.50/1.50/1.50",
+            percentiles(&histogram_from([1_500]))
         );
-        assert_eq!("1.50/1.50/1.50/1.50/1.50", percentiles(&mut [1_500]));
-        assert_eq!("-", percentiles(&mut []));
+        assert_eq!("-", percentiles(&histogram()));
     }
 
     #[test]

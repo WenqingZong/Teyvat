@@ -4,6 +4,18 @@ on:
   push:
     paths:
       - "crates/**"
+      - "src/**"
+      - "examples/**"
+      - "tests/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust_ci.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "src/**"
+      - "examples/**"
+      - "tests/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/rust_ci.yml"
@@ -28,6 +40,18 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets
+
+      - name: install cargoscope
+        env:
+          RUSTFLAGS: ""
+        run: cargo install cargoscope --version 0.6.0 --locked
+
+      - name: unused dependencies
+        run: |
+          report="${RUNNER_TEMP}/cargoscope.json"
+          cargoscope scan . --checks inventory,unused --format json --output "$report"
+          jq -r '.unused[] | "\(.declared_by): \(.dependency) (\(.manifest))"' "$report"
+          test "$(jq '.unused | length' "$report")" -eq 0
 
       - name: module cycle and import grouping checks
         run: cargo test --workspace --test module_dependencies --test import_groups --test format_strings
