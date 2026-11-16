@@ -4,17 +4,14 @@
 //! locks the other threads hold; they hold up the task's worker for 1 to 3 ms per interval, so the
 //! task belongs on a runtime off the hot path.
 
-mod proc_files_parser;
+mod process_reader;
 mod tcp_sockets;
 
-use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter, Result as FormatResult};
-use std::fs::{read_dir, read_link, read_to_string};
-use std::io::ErrorKind;
 use std::num::NonZeroU32;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::error::TrySendError;
@@ -22,19 +19,11 @@ use tokio::time::{MissedTickBehavior, interval as tick_every};
 use tracing::{info, warn};
 
 use crate::time::{NANOSECONDS_PER_SECOND, get_current_timestamp_nanoseconds};
-pub use proc_files_parser::MemoryUsage;
-use proc_files_parser::{
-    CPU_TICKS_PER_SECOND, ContextSwitches, parse_context_switches, parse_memory_usage,
-    parse_socket_inode, parse_stat,
-};
-use tcp_sockets::{TcpByteCount, read_tcp_byte_counts};
+pub use process_reader::MemoryUsage;
+use process_reader::{ProcessReading, read as read_process};
 
-const PROCESS_STAT_PATH: &str = "/proc/self/stat";
-const PROCESS_STATUS_PATH: &str = "/proc/self/status";
-const THREADS_DIRECTORY: &str = "/proc/self/task";
-const FILE_DESCRIPTORS_DIRECTORY: &str = "/proc/self/fd";
-/// ESRCH: the thread exited after its directory was listed.
-const NO_SUCH_PROCESS_ERROR_CODE: i32 = 3;
+/// USER_HZ: `/proc` reports CPU time in ticks of one hundredth of a second on Linux.
+const CPU_TICKS_PER_SECOND: f32 = 100.0;
 const PERCENT: f32 = 100.0;
 const KIBIBYTES_PER_MEBIBYTE: f32 = 1024.0;
 /// Explains the numbers of each thread in a [`ProcessSample::format_threads`] line.
@@ -163,28 +152,6 @@ impl Display for ThreadSample {
     }
 }
 
-/// Cumulative counters at one moment.
-struct ProcessReading {
-    taken_at: Instant,
-    /// utime + stime of every thread, exited ones included.
-    cpu_ticks: u64,
-    memory: MemoryUsage,
-    open_file_descriptors: u32,
-    threads_by_id: HashMap<u32, ThreadReading>,
-    tcp_byte_counts_by_inode: HashMap<u32, TcpByteCount>,
-}
-
-struct ThreadReading {
-    name: String,
-    cpu_ticks: u64,
-    context_switches: ContextSwitches,
-}
-
-struct OpenFileDescriptors {
-    count: u32,
-    socket_inodes: HashSet<u32>,
-}
-
 /// Turns consecutive readings into samples; the first reading only primes it.
 #[derive(Default)]
 struct ProcessSampler {
@@ -304,115 +271,19 @@ fn increase_since(previous_option: Option<u64>, current: u64) -> u64 {
     }
 }
 
-fn read_process() -> Result<ProcessReading> {
-    let taken_at = Instant::now();
-    let stat = read_file(PROCESS_STAT_PATH)?;
-    let (_name, cpu_ticks) =
-        parse_stat(&stat).with_context(|| format!("cannot parse {PROCESS_STAT_PATH}"))?;
-    let status = read_file(PROCESS_STATUS_PATH)?;
-    let memory = parse_memory_usage(&status)
-        .with_context(|| format!("cannot parse {PROCESS_STATUS_PATH}"))?;
-    let open_file_descriptors = read_open_file_descriptors()?;
-    Ok(ProcessReading {
-        taken_at,
-        cpu_ticks,
-        memory,
-        open_file_descriptors: open_file_descriptors.count,
-        threads_by_id: read_threads()?,
-        tcp_byte_counts_by_inode: read_tcp_byte_counts(&open_file_descriptors.socket_inodes)?,
-    })
-}
-
-fn read_open_file_descriptors() -> Result<OpenFileDescriptors> {
-    let mut count = 0;
-    let mut socket_inodes = HashSet::new();
-    for entry_result in read_dir(FILE_DESCRIPTORS_DIRECTORY)
-        .with_context(|| format!("cannot list {FILE_DESCRIPTORS_DIRECTORY}"))?
-    {
-        let path = entry_result?.path();
-        // Another thread may close the descriptor between the listing and here.
-        let link_target = match read_link(&path) {
-            Ok(link_target) => link_target,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                let path = path.display();
-                return Err(error).with_context(|| format!("cannot read link {path}"));
-            }
-        };
-        count += 1;
-        if let Some(inode) = parse_socket_inode(&link_target.to_string_lossy()) {
-            socket_inodes.insert(inode);
-        }
-    }
-    Ok(OpenFileDescriptors {
-        count,
-        socket_inodes,
-    })
-}
-
-fn read_threads() -> Result<HashMap<u32, ThreadReading>> {
-    let mut threads_by_id = HashMap::new();
-    for entry_result in
-        read_dir(THREADS_DIRECTORY).with_context(|| format!("cannot list {THREADS_DIRECTORY}"))?
-    {
-        let file_name = entry_result?.file_name();
-        let file_name = file_name.to_string_lossy();
-        let thread_id: u32 = file_name
-            .parse()
-            .with_context(|| format!("{THREADS_DIRECTORY}/{file_name} is not a thread id"))?;
-        if let Some(thread) = read_thread(thread_id)? {
-            threads_by_id.insert(thread_id, thread);
-        }
-    }
-    Ok(threads_by_id)
-}
-
-/// `None` when the thread exited after it was listed.
-fn read_thread(thread_id: u32) -> Result<Option<ThreadReading>> {
-    let stat_path = format!("{THREADS_DIRECTORY}/{thread_id}/stat");
-    let status_path = format!("{THREADS_DIRECTORY}/{thread_id}/status");
-    let (Some(stat), Some(status)) = (
-        read_file_of_live_thread(&stat_path)?,
-        read_file_of_live_thread(&status_path)?,
-    ) else {
-        return Ok(None);
-    };
-    let (name, cpu_ticks) =
-        parse_stat(&stat).with_context(|| format!("cannot parse {stat_path}"))?;
-    let context_switches =
-        parse_context_switches(&status).with_context(|| format!("cannot parse {status_path}"))?;
-    Ok(Some(ThreadReading {
-        name,
-        cpu_ticks,
-        context_switches,
-    }))
-}
-
-fn read_file(path: &str) -> Result<String> {
-    read_to_string(path).with_context(|| format!("cannot read {path}"))
-}
-
-/// `None` when the file's thread has exited.
-fn read_file_of_live_thread(path: &str) -> Result<Option<String>> {
-    match read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(error)
-            if error.kind() == ErrorKind::NotFound
-                || error.raw_os_error() == Some(NO_SUCH_PROCESS_ERROR_CODE) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error).with_context(|| format!("cannot read {path}")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::fs::read_link;
+    use std::time::Instant;
+
     use tokio::spawn;
     use tokio::sync::mpsc::channel;
     use tokio::time::{sleep, timeout};
 
     use super::*;
+    use crate::process_metrics::process_reader::{ContextSwitches, ThreadReading};
+    use crate::process_metrics::tcp_sockets::TcpByteCount;
     use crate::time::since_unix_epoch;
 
     const MEBIBYTE_IN_KIBIBYTES: u32 = 1024;
@@ -641,19 +512,5 @@ mod tests {
         let monitor = spawn(run_process_monitor(MONITOR_INTERVAL, None));
         sleep(MONITOR_INTERVAL * 3).await;
         assert!(!monitor.is_finished());
-    }
-
-    #[test]
-    fn missing_file_is_an_error_unless_its_thread_exited() {
-        let missing_path = format!("{THREADS_DIRECTORY}/0/stat");
-        let error = read_file(&missing_path).expect_err("the file does not exist");
-        assert!(error.to_string().contains(&missing_path), "{error}");
-        assert!(
-            read_file_of_live_thread(&missing_path)
-                .expect("a missing file means the thread exited")
-                .is_none()
-        );
-        assert!(read_thread(0).expect("thread 0 never exists").is_none());
-        assert!(read_file_of_live_thread("/proc/self").is_err());
     }
 }

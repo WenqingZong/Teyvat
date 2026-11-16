@@ -116,7 +116,8 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
         info!("shutting down");
         flush_logs_and_exit(SUCCESS_EXIT_CODE);
     });
-    let provider_session = ProviderSession::new(provider_address, strategy_name, demo, topics)?;
+    let provider_session =
+        ProviderSession::new(provider_address, strategy_name, demo, topics.into())?;
     let subscriptions = background.block_on(provider_session.subscribe())?;
     background.spawn(provider_session.resubscribe_forever(subscriptions.clone()));
     let mut strategy = LatencyBench::new(report_interval, background.handle());

@@ -20,6 +20,7 @@ use url::Url;
 use layline::celestia::client::{
     CelestiaClientConfig, ReporterConfig, SAMPLE_CHANNEL_CAPACITY, run_celestia_reporter,
 };
+use layline::config::LogUrl;
 use layline::logging::init_tracing;
 use layline::noise::decode_key;
 use layline::process_metrics::run_process_monitor;
@@ -49,7 +50,7 @@ async fn main() -> Result<()> {
     let _log_guard = init_tracing();
     let arguments = Arguments::parse();
     let celestia_client = CelestiaClientConfig {
-        url: arguments.url,
+        url: LogUrl(arguments.url),
         client_celestia_private_key: decode_key(&read_secret_file(
             &arguments.client_private_key_file,
         )?)?,

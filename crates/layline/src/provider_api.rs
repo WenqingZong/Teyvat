@@ -9,9 +9,12 @@
 //! GET /connected_apis {"Binance": [{"description": "...", "api": "wss://...", "doc": "https://..."}], "OKX": []}
 //! ```
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::{Debug, Formatter, Result as FormatResult};
+use std::ops::Deref;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeserializeError;
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
 use crate::types::{Exchange, Instrument, MarketDataType, StrategyName, Topic};
@@ -45,6 +48,60 @@ pub struct SubscriptionResponse {
 
 /// The ring path to read, or why the topic was refused.
 pub type SubscriptionResult = Result<PathBuf, String>;
+
+/// A strategy's topics, printed sorted one per line by `#[derive(Debug)]`; deserialized from the
+/// same nested tree the HTTP API uses.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SortedTopics(pub HashSet<Topic>);
+
+impl Debug for SortedTopics {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        let mut topics: Vec<Topic> = self.0.iter().copied().collect();
+        topics.sort_by_cached_key(Topic::to_string);
+        formatter
+            .debug_list()
+            .entries(topics.iter().map(DisplayedTopic))
+            .finish()
+    }
+}
+
+struct DisplayedTopic<'a>(&'a Topic);
+
+impl Debug for DisplayedTopic<'_> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl Deref for SortedTopics {
+    type Target = HashSet<Topic>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<HashSet<Topic>> for SortedTopics {
+    fn from(topics: HashSet<Topic>) -> Self {
+        Self(topics)
+    }
+}
+
+impl From<SortedTopics> for HashSet<Topic> {
+    fn from(topics: SortedTopics) -> Self {
+        topics.0
+    }
+}
+
+impl<'de> Deserialize<'de> for SortedTopics {
+    fn deserialize<DeserializerType: Deserializer<'de>>(
+        deserializer: DeserializerType,
+    ) -> Result<Self, DeserializerType::Error> {
+        let tree = TopicTree::<BTreeSet<MarketDataType>>::deserialize(deserializer)?;
+        let topics = unnest(tree).map_err(DeserializeError::custom)?;
+        Ok(Self(topics.into_iter().map(|(topic, ())| topic).collect()))
+    }
+}
 
 /// Refused topics grouped by reason, reasons sorted and topics sorted by name, so a cause shared by
 /// many topics is reported once.

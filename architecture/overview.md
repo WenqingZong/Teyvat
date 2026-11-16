@@ -52,6 +52,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | `phanes` | 总控：Gnosis 发放 API Key，Celestia 接收进程监控数据 | [`phanes.md`](phanes.md) |
 | `market_data_provider` | 连接交易所，标准化行情，经共享内存发布给策略 | [`market_data_provider.md`](market_data_provider.md) |
 | `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | [`dummy_strategy.md`](dummy_strategy.md) |
+| `layline-testing` | 只给测试用的源码检查：模块循环、import 分组、格式串；不是生产依赖 | — |
 | `layline` | 地脉：各 crate 共用的代码 | 本文下一节 |
 
 部署文件（脚本、systemd unit、配置模板）在顶层 [`deploy/`](../deploy/README.md)，crate 里只有代码。
@@ -64,8 +65,8 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 - **Phanes 协议**：`noise`（Noise_IK 加密层：客户端在消息 1 里带上自己的公钥，服务按公钥认出客户端；公钥和私钥一样放在 `SecretBox` 里）、`gnosis`（目录：`mod.rs` 是协议的服务端和客户端两半，两端不会走样，以及 Phanes 能发放的全部 gnosis 的 `GnosisId` 枚举；`client.rs` 是客户端的配置表 `GnosisClientConfig`（`[gnosis_client]`）；每个交易所一个文件放它的 key 类型，如 `gnosis/binance.rs`。每个 id 对应一个 `deny_unknown_fields` 的 key 类型，如 `BinanceApiKey { api_key, secret_key }`、`BinanceSbeApiKey { api_key }`；`Gnosis` trait 由类型给出它的实盘和 demo id，客户端按类型取 gnosis，不会配错 id，收到的 gnosis 直接按该类型解析。新增一种 gnosis 要改这里和 Phanes 的 `[gnoses]`，并重新部署 Phanes 和用到它的服务）。
 - **Celestia**：`celestia`（`mod.rs` 是协议：Noise 握手的 `Initiator` / `Responder`、`Session`、`Batch`、`Ack`；`client.rs` 是上报端：`[celestia_client]` 配置表 `CelestiaClientConfig`、`ReporterConfig`、async 任务 `run_celestia_reporter`），Phanes 用协议的服务端那一半，market_data_provider 和策略用上报端。
 - **进程监控**：`process_metrics`（`run_process_monitor(interval, sample_sender_option)` 是一个 async 任务，由各进程 spawn 到自己的 tokio runtime 上：每个间隔读一次本进程的计数器、打两行 info 日志，有 sender 时再把 `ProcessSample` 交出去，供上报 Phanes Celestia。见下文「进程监控」和「线程模型」）。
-- **服务基础设施**：`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件；`read_secret_toml` 读取并解析 600 的 TOML 配置，解析错误不引用原文）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`、`GIT_COMMIT_HASH`：layline 的 `build.rs` 在编译时执行 `git rev-parse HEAD` 写入，只在 HEAD、`refs/heads` 或 `packed-refs` 变化时重跑；不反映未提交的改动，不在 git 仓库里构建会失败）、`time`（墙钟时间、`NANOSECONDS_PER_SECOND`、`/info` 的时间格式）、`backoff`（指数退避）、`shutdown`（`shutdown_signal` 等待 SIGINT 或 SIGTERM，返回 `ShutdownSignal`；三个服务和 `examples/celestia.rs` 共用）。
-- **`testing`**：所有 crate 的测试共用的 fixture 和检查（`test_keypair`、`test_instrument`、`test_topic`、`test_bbo`、`write_secret_file`、`assert_acyclic_modules`、`assert_grouped_imports` 等）。它是 public 的，因为其他 crate 的测试要用（`#[cfg(test)]` 只对 layline 自己的测试生效），所以生产代码不调用它只靠约定。`MarketDataWriter` 同理：只有行情服务的交易所 worker 会创建它，也是约定。
+- **服务基础设施**：`config`（`LogUrl`：让配置用 `#[derive(Debug)]` 也能把 URL 打成一行）、`bark`（Bark 加密推送和 `Notifier`：release 构建走 Bark，debug 构建打日志）、`secrets`（读取权限必须为 600 的密钥文件；`read_secret_toml` 读取并解析 600 的 TOML 配置，解析错误不引用原文）、`logging`（`init_tracing`）、`build`（`RELEASE_BUILD`、`build_profile`、`GIT_COMMIT_HASH`：layline 的 `build.rs` 在编译时执行 `git rev-parse HEAD` 写入，只在 HEAD、`refs/heads` 或 `packed-refs` 变化时重跑；不反映未提交的改动，不在 git 仓库里构建会失败）、`time`（墙钟时间、`NANOSECONDS_PER_SECOND`、`/info` 的时间格式）、`backoff`（指数退避）、`shutdown`（`shutdown_signal` 等待 SIGINT 或 SIGTERM，返回 `ShutdownSignal`；三个服务和 `examples/celestia.rs` 共用）。
+- **`testing`**：所有 crate 的测试共用的 fixture（`test_keypair`、`test_instrument`、`test_topic`、`test_bbo`、`test_trade`、`write_secret_file`）。它是 public 的，因为其他 crate 的测试要用（`#[cfg(test)]` 只对 layline 自己的测试生效），所以生产代码不调用它只靠约定。三个源码检查（模块循环、import 分组、格式串）在独立的 dev-dependency crate `layline-testing` 里，用 `syn`、`toml` 解析源码，只在测试时编译。`MarketDataWriter` 同理：只有行情服务的交易所 worker 会创建它，也是约定。
 
 ## 公共约定
 
@@ -119,9 +120,10 @@ layline 里的组件（如 `run_process_monitor`）只提供 async 任务，不�
 | 检查 | 方式 |
 |---|---|
 | 无警告 | `cargo clippy --workspace --all-targets`，CI 里 `RUSTFLAGS=-Dwarnings`；workspace 级 lint 禁止 `unwrap`、`print!`、`dbg!` |
-| 无模块循环依赖 | 每个 crate 的 `tests/module_dependencies.rs` 调用 `layline::testing::assert_acyclic_modules` |
-| import 分组 | 每个 package 的 `tests/import_groups.rs` 调用 `layline::testing::assert_grouped_imports`：标准库 → 第三方 → 本仓库，空行分隔，组内由 rustfmt 排序 |
-| 格式串风格统一 | 每个 package 的 `tests/format_strings.rs` 调用 `layline::testing::assert_consistent_format_strings`：同一个字符串字面量里不能混用位置占位符（`{}`、`{:?}`、`{0}`）和具名占位符（`{name}`）；表达式先绑定成局部变量再内联。检查 `build.rs`、`src`、`tests`、`benches`、`examples`，跳过注释 |
+| 无模块循环依赖 | 每个 crate 的 `tests/module_dependencies.rs` 调用 `layline_testing::assert_acyclic_modules` |
+| import 分组 | 每个 package 的 `tests/import_groups.rs` 调用 `layline_testing::assert_grouped_imports`：标准库 → 第三方 → 本仓库，空行分隔，组内由 rustfmt 排序 |
+| 格式串风格统一 | 每个 package 的 `tests/format_strings.rs` 调用 `layline_testing::assert_consistent_format_strings`：同一个字符串字面量里不能混用位置占位符（`{}`、`{:?}`、`{0}`）和具名占位符（`{name}`）；表达式先绑定成局部变量再内联。检查 `build.rs`、`src`、`tests`、`benches`、`examples`，跳过注释 |
 | 测试与覆盖率 | `cargo test --workspace`；`cargo llvm-cov --workspace`，CI 要求行覆盖率 ≥ 90% |
+| 未使用依赖 | `cargoscope scan . --checks inventory,unused`；CI 在报告里 `unused` 非空时失败 |
 
 CI 配置在 `.github/workflows/rust_ci.yml`，dependabot 每天检查依赖更新。

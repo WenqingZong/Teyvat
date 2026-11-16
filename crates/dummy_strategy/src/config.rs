@@ -1,7 +1,5 @@
 //! The strategy's TOML config, read once at startup; see `deploy/dummy_strategy/strategy.example.toml`.
 
-use std::collections::HashSet;
-use std::fmt::{Debug, Formatter, Result as FormatResult, from_fn};
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
 use std::path::Path;
@@ -11,11 +9,11 @@ use serde::Deserialize;
 use tracing::info;
 
 use layline::celestia::client::CelestiaClientConfig;
-use layline::provider_api::topic_set;
+use layline::provider_api::SortedTopics;
 use layline::secrets::read_secret_toml;
-use layline::types::{StrategyName, Topic};
+use layline::types::StrategyName;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyConfig {
     pub strategy_name: StrategyName,
@@ -25,52 +23,11 @@ pub struct StrategyConfig {
     /// provider refuses a strategy whose `demo` differs from its own.
     pub demo: bool,
     /// Exchange, then instrument, then market data types, as in the provider's HTTP API.
-    #[serde(with = "topic_set")]
-    pub topics: HashSet<Topic>,
+    pub topics: SortedTopics,
     /// How often the process logs its own CPU, memory, threads and TCP traffic.
     pub process_metrics_interval_seconds: NonZeroU64,
     /// Where the process metrics go: this machine's Celestia key, the same as the provider's.
     pub celestia_client: CelestiaClientConfig,
-}
-
-/// Written by hand so each topic prints on one line as its `Display`, sorted by it, rather than
-/// as nested structs in `HashSet` order.
-impl Debug for StrategyConfig {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        let Self {
-            strategy_name,
-            provider_address,
-            demo,
-            topics,
-            process_metrics_interval_seconds,
-            celestia_client,
-        } = self;
-        let mut topic_names: Vec<String> = topics.iter().map(Topic::to_string).collect();
-        topic_names.sort();
-        let unquoted_topic_names = topic_names
-            .iter()
-            .map(|topic_name| from_fn(move |formatter| formatter.write_str(topic_name)));
-        formatter
-            .debug_struct("StrategyConfig")
-            .field("strategy_name", strategy_name)
-            .field("provider_address", provider_address)
-            .field("demo", demo)
-            .field(
-                "topics",
-                &from_fn(|formatter| {
-                    formatter
-                        .debug_list()
-                        .entries(unquoted_topic_names.clone())
-                        .finish()
-                }),
-            )
-            .field(
-                "process_metrics_interval_seconds",
-                process_metrics_interval_seconds,
-            )
-            .field("celestia_client", celestia_client)
-            .finish()
-    }
 }
 
 impl StrategyConfig {
@@ -90,6 +47,8 @@ impl StrategyConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -139,7 +98,7 @@ ETH-USDC-PERP = ["TRADE"]
             ),
             MarketDataType::Trade,
         );
-        assert_eq!(HashSet::from([okx_ether_perpetual_trade]), config.topics);
+        assert_eq!(HashSet::from([okx_ether_perpetual_trade]), config.topics.0);
     }
 
     /// Topics print one per line, sorted by name, whatever order the file and the set hold them in.

@@ -23,6 +23,7 @@ cargo build --release --bins --examples
 | `market_data_provider` | 行情服务的实现 |
 | `dummy_strategy` | 占位策略的实现 |
 | `layline` | 地脉，蕴含一切信息：各 crate 共用的代码（行情类型、共享内存、Phanes 协议、Bark 推送、日志、测试 fixture 等）。只有被两个及以上 crate 用到的代码才放进来 |
+| `layline-testing` | 只给测试用的源码检查（模块循环、import 分组、格式串），用 `syn` 和 `toml` 解析源码；不是生产依赖 |
 
 ## 文档
 

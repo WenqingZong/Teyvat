@@ -124,18 +124,17 @@ impl GnosisState {
         if !is_well_formed {
             return Err(DenialReason::MalformedNonce);
         }
+        // Hex is case-insensitive, so normalize before looking it up and recording it.
+        let nonce = nonce.to_ascii_lowercase();
         let mut seen_nonces = self
             .seen_nonces
             .lock()
             .expect("nonce cache mutex is not poisoned");
         seen_nonces.retain(|_, expiry| *expiry >= now);
-        if seen_nonces.contains_key(nonce) {
+        if seen_nonces.contains_key(&nonce) {
             return Err(DenialReason::Replay);
         }
-        seen_nonces.insert(
-            nonce.to_ascii_lowercase(),
-            timestamp + self.max_clock_skew_seconds,
-        );
+        seen_nonces.insert(nonce, timestamp + self.max_clock_skew_seconds);
         Ok(())
     }
 }
@@ -487,6 +486,18 @@ mod tests {
     async fn denies_replayed_nonce() {
         let harness = harness();
         let request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
+        assert!(matches!(
+            harness.gnosis(&request).await,
+            Response::Granted { .. }
+        ));
+        assert_denied(harness.gnosis(&request).await, "replayed");
+    }
+
+    #[tokio::test]
+    async fn denies_replayed_uppercase_nonce() {
+        let harness = harness();
+        let mut request = Request::new(ALLOWED_GNOSIS_ID, get_current_timestamp_nanoseconds());
+        request.nonce = request.nonce.to_ascii_uppercase();
         assert!(matches!(
             harness.gnosis(&request).await,
             Response::Granted { .. }
