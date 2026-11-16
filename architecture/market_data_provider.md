@@ -49,6 +49,6 @@ cargo bench -p market_data_provider -- --save-baseline before           # 之后
 cargo test -p market_data_provider --bench latency                      # 每个 bench 只跑一次，做冒烟测试
 ```
 
-启动 `market_data_provider --config <文件>`（默认 `market_data_provider.toml`）后，它创建 `/dev/shm/market_data_provider/`（`DEFAULT_ROOT_DIRECTORY`），在配置的 `127.0.0.1:<port>` 上提供 HTTP；策略在自己的 `strategy.toml` 里写 `provider_address`。地址被占用或配置无效时拒绝启动。在有策略订阅之前，不会启动任何交易所 worker。`curl localhost:6666/subscribed` 列出行情服务当前发布的 topic。
+启动 `market_data_provider --config <文件>`（默认 `market_data_provider.toml`）后，它创建 `/dev/shm/market_data_provider/`（`DEFAULT_ROOT_DIRECTORY`；非 Linux 的本地开发机没有 tmpfs，这个常量指向仓库内被 git 忽略的 `tmp/market_data_provider/`，生产永远是 Linux），在配置的 `127.0.0.1:<port>` 上提供 HTTP；策略在自己的 `strategy.toml` 里写 `provider_address`。地址被占用或配置无效时拒绝启动。在有策略订阅之前，不会启动任何交易所 worker。`curl localhost:6666/subscribed` 列出行情服务当前发布的 topic。
 
 `crates/market_data_provider/benches/latency.rs`（criterion）自底向上测量数据路径：`codec`（rkyv 序列化，以及 reader 的拷贝加反序列化）、`publish`（`MarketDataWriter::publish` 写入 `/dev/shm` 里的 ring）、`poll_fan_out`（`MarketDataReader::poll` 读 1/8/64 个 topic，分别落在 1/4/4 个 ring 上，空闲和其中一个活跃两种情况）、`cross_thread_latency`（两个线程之间单向写到读的延迟，ping-pong 方式避免排队，按 `LatencyMetric` 的口径测量）。不对交易所 worker 做基准，因为合成行情每 10 ms 才一条。WSL2 上不绑核得到的数字只用于版本之间对比，不代表生产环境的绝对延迟；criterion 报告的是均值，不是尾部分位数。

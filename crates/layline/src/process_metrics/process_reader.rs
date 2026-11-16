@@ -1,7 +1,7 @@
 //! Reads this process's own counters. `/proc` parsing is delegated to `procfs` on Linux; every
 //! other platform has no process metrics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -49,11 +49,7 @@ pub(super) struct ThreadReading {
     pub(super) context_switches: ContextSwitches,
 }
 
-pub(super) struct OpenFileDescriptors {
-    pub(super) count: u32,
-    pub(super) socket_inodes: HashSet<u32>,
-}
-
+#[cfg(target_os = "linux")]
 mod linux {
     use std::collections::{HashMap, HashSet};
     use std::time::Instant;
@@ -62,8 +58,14 @@ mod linux {
     use procfs::ProcError;
     use procfs::process::{FDTarget, Process, Status, Task};
 
-    use super::{ContextSwitches, MemoryUsage, OpenFileDescriptors, ProcessReading, ThreadReading};
-    use crate::process_metrics::tcp_sockets::read_tcp_byte_counts;
+    use super::{ContextSwitches, MemoryUsage, ProcessReading, ThreadReading};
+    use crate::process_metrics::tcp_sockets::linux::read_tcp_byte_counts;
+
+    /// The file descriptors this process holds, and the inodes of the sockets among them.
+    struct OpenFileDescriptors {
+        count: u32,
+        socket_inodes: HashSet<u32>,
+    }
 
     pub(crate) fn read() -> Result<ProcessReading> {
         let taken_at = Instant::now();

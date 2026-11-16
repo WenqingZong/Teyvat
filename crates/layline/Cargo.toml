@@ -15,9 +15,6 @@ chrono.workspace = true
 futures.workspace = true
 hex.workspace = true
 memmap2.workspace = true
-netlink-packet-core.workspace = true
-netlink-packet-sock-diag.workspace = true
-netlink-sys.workspace = true
 postcard.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -44,6 +41,10 @@ tempfile.workspace = true
 [lints]
 workspace = true
 
-# `/proc` parsing is Linux-only; `procfs` refuses every other target in its build script.
+# `/proc` parsing and netlink `sock_diag` are Linux-only: `procfs` refuses every other target in
+# its build script, and the netlink crates need Linux `libc` symbols.
 [target.'cfg(target_os = "linux")'.dependencies]
+netlink-packet-core.workspace = true
+netlink-packet-sock-diag.workspace = true
+netlink-sys.workspace = true
 procfs.workspace = true

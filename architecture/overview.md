@@ -11,8 +11,6 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | **Xian** | 江苏安全云的廉价 NAT 云服务器，位于陕西西安：2 vCPU（Intel Xeon Platinum 8173M @ 2.0 GHz）、2 GB 内存，网速未知，每月流量上限 1000 GB，静态公网IPv4, 无IPv6, Ubuntu 24.04（x86_64） | **基准测试机**，只用于测量系统内部延迟，暂未启用。 |
 | **RedmiBook** | 个人笔记本（i7-8565U、8 GB、Kali Linux），家用 WiFi，无公网 IP，经 Cloudflare Tunnel 对外提供服务 | Phanes（总控），以及以后的 ClickHouse 数据库。 |
 
-代码在另一台笔记本（Intel Core Ultra 5 235U、Windows 11）的 WSL2（Ubuntu 24.04）里开发。
-
 下图是现在的部署：交易进程在 Osaka。
 
 ```text
@@ -83,6 +81,8 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 process metrics: cpu 99.8%, memory anon 6.0 MiB / file 9.0 MiB / shmem 16.0 MiB, 3 threads, 12 fds, context switches 2.1/s voluntary / 0.4/s involuntary, tcp received 912 B/s / sent 300 B/s, sampled in 85 µs
 thread metrics (cpu, voluntary/involuntary context switches per second): dummy_strategy#1234 99.7% 0.0/0.3; latency-report#1235 0.0% 0.1/0.0; ...
 ```
+
+这些读数全部来自 Linux 的 `/proc` 和 netlink，别的平台没有对应接口：非 Linux 上 `run_process_monitor` 启动时打一条 warn 说明本平台不报数，然后空着不再采样；`ProcessSample` 等类型照旧存在，调用方不需要判断平台。生产环境永远是 Ubuntu，那里的行为就是下表。
 
 | 指标 | 来源 | 说明 |
 |---|---|---|

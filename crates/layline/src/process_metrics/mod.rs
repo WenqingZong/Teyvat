@@ -3,11 +3,15 @@
 //! on to be reported to Phanes Celestia. The kernel answers these reads from memory, without taking
 //! locks the other threads hold; they hold up the task's worker for 1 to 3 ms per interval, so the
 //! task belongs on a runtime off the hot path.
+//!
+//! `/proc` and netlink exist only on Linux, so only Linux reports numbers; every other platform
+//! warns once and keeps the task idle.
 
 mod process_reader;
 mod tcp_sockets;
 
 use std::fmt::{Display, Formatter, Result as FormatResult};
+use std::future::pending;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
@@ -37,6 +41,15 @@ pub async fn run_process_monitor(
     interval: Duration,
     sample_sender_option: Option<Sender<ProcessSample>>,
 ) {
+    // `/proc` and netlink exist only on Linux, and no other platform exposes these counters, so
+    // elsewhere the monitor says so once and then stays idle: callers need no platform check, and
+    // the task still never returns.
+    if cfg!(not(target_os = "linux")) {
+        warn!(
+            "process metrics reads /proc and netlink, which only exists in Linux. This platform reports none"
+        );
+        pending::<()>().await;
+    }
     let mut sampler = ProcessSampler::default();
     // The first tick is immediate; its reading only primes the sampler.
     let mut ticker = tick_every(interval);
@@ -274,24 +287,17 @@ fn increase_since(previous_option: Option<u64>, current: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::fs::read_link;
     use std::time::Instant;
 
     use tokio::spawn;
-    use tokio::sync::mpsc::channel;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::sleep;
 
     use super::*;
     use crate::process_metrics::process_reader::{ContextSwitches, ThreadReading};
     use crate::process_metrics::tcp_sockets::TcpByteCount;
-    use crate::time::since_unix_epoch;
 
     const MEBIBYTE_IN_KIBIBYTES: u32 = 1024;
-    const SAMPLE_WAIT: Duration = Duration::from_secs(5);
-    const CURRENT_THREAD_LINK: &str = "/proc/thread-self";
     const TIMESTAMP_SECONDS: NonZeroU32 = NonZeroU32::new(1_800_000_000).expect("not zero");
-    /// Generous bound between taking a timestamp and checking it.
-    const MAX_TIMESTAMP_DRIFT_SECONDS: u64 = 5;
     const MONITOR_INTERVAL: Duration = Duration::from_millis(10);
 
     fn thread_reading(
@@ -455,56 +461,75 @@ mod tests {
         assert_eq!("dummy_strategy#1234 99.7% 0.0/0.3", sample.format_threads());
     }
 
-    #[test]
-    fn own_process_is_sampled_from_the_second_reading_on() {
-        let mut sampler = ProcessSampler::default();
-        assert_eq!(None, sampler.sample().expect("reading own counters works"));
-        let sample = sampler
-            .sample()
-            .expect("reading own counters works")
-            .expect("the second reading yields a sample");
-        assert!(sample.memory.anonymous_kibibytes > 0);
-        assert!(sample.memory.file_kibibytes > 0);
-        assert!(sample.open_file_descriptors > 0);
-        let now_seconds = since_unix_epoch().as_secs();
-        assert!(
-            now_seconds.abs_diff(u64::from(sample.timestamp_seconds.get()))
-                <= MAX_TIMESTAMP_DRIFT_SECONDS
-        );
-        // `/proc/thread-self` links to `<pid>/task/<tid>` of the calling thread.
-        let thread_link_target =
-            read_link(CURRENT_THREAD_LINK).expect("the current thread's link exists");
-        let current_thread_id: u32 = thread_link_target
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .and_then(|file_name| file_name.parse().ok())
-            .expect("the link ends in a thread id");
-        assert!(
-            sample
-                .threads
-                .iter()
-                .any(|thread| thread.thread_id == current_thread_id),
-            "{sample:?}"
-        );
-    }
+    /// The counters of this process itself, which only `/proc` and netlink provide.
+    #[cfg(target_os = "linux")]
+    mod linux_only {
+        use std::fs::read_link;
 
-    /// Samples the receiver has no room for are dropped, and a gone receiver stops nothing.
-    #[tokio::test]
-    async fn monitor_hands_on_samples_without_waiting() {
-        let (sample_sender, mut sample_receiver) = channel(1);
-        let monitor = spawn(run_process_monitor(MONITOR_INTERVAL, Some(sample_sender)));
-        // Several samples arrive meanwhile; the channel holds one and the rest are dropped.
-        sleep(MONITOR_INTERVAL * 5).await;
-        for _ in 0..2 {
-            let sample = timeout(SAMPLE_WAIT, sample_receiver.recv())
-                .await
-                .expect("a sample arrives in time")
-                .expect("the monitor keeps its sender");
-            assert!(!sample.threads.is_empty());
+        use tokio::spawn;
+        use tokio::sync::mpsc::channel;
+        use tokio::time::{sleep, timeout};
+
+        use super::super::*;
+        use super::MONITOR_INTERVAL;
+        use crate::time::since_unix_epoch;
+
+        const SAMPLE_WAIT: Duration = Duration::from_secs(5);
+        const CURRENT_THREAD_LINK: &str = "/proc/thread-self";
+        /// Generous bound between taking a timestamp and checking it.
+        const MAX_TIMESTAMP_DRIFT_SECONDS: u64 = 5;
+
+        #[test]
+        fn own_process_is_sampled_from_the_second_reading_on() {
+            let mut sampler = ProcessSampler::default();
+            assert_eq!(None, sampler.sample().expect("reading own counters works"));
+            let sample = sampler
+                .sample()
+                .expect("reading own counters works")
+                .expect("the second reading yields a sample");
+            assert!(sample.memory.anonymous_kibibytes > 0);
+            assert!(sample.memory.file_kibibytes > 0);
+            assert!(sample.open_file_descriptors > 0);
+            let now_seconds = since_unix_epoch().as_secs();
+            assert!(
+                now_seconds.abs_diff(u64::from(sample.timestamp_seconds.get()))
+                    <= MAX_TIMESTAMP_DRIFT_SECONDS
+            );
+            // `/proc/thread-self` links to `<pid>/task/<tid>` of the calling thread.
+            let thread_link_target =
+                read_link(CURRENT_THREAD_LINK).expect("the current thread's link exists");
+            let current_thread_id: u32 = thread_link_target
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .and_then(|file_name| file_name.parse().ok())
+                .expect("the link ends in a thread id");
+            assert!(
+                sample
+                    .threads
+                    .iter()
+                    .any(|thread| thread.thread_id == current_thread_id),
+                "{sample:?}"
+            );
         }
-        drop(sample_receiver);
-        sleep(MONITOR_INTERVAL * 3).await;
-        assert!(!monitor.is_finished());
+
+        /// Samples the receiver has no room for are dropped, and a gone receiver stops nothing.
+        #[tokio::test]
+        async fn monitor_hands_on_samples_without_waiting() {
+            let (sample_sender, mut sample_receiver) = channel(1);
+            let monitor = spawn(run_process_monitor(MONITOR_INTERVAL, Some(sample_sender)));
+            // Several samples arrive meanwhile; the channel holds one and the rest are dropped.
+            sleep(MONITOR_INTERVAL * 5).await;
+            for _ in 0..2 {
+                let sample = timeout(SAMPLE_WAIT, sample_receiver.recv())
+                    .await
+                    .expect("a sample arrives in time")
+                    .expect("the monitor keeps its sender");
+                assert!(!sample.threads.is_empty());
+            }
+            drop(sample_receiver);
+            sleep(MONITOR_INTERVAL * 3).await;
+            assert!(!monitor.is_finished());
+        }
     }
 
     #[tokio::test]
