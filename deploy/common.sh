@@ -1,6 +1,6 @@
-# Sourced by every deploy script after it sets SERVICE, BINARY, CONFIG_DIRECTORY and CONFIG_FILE:
-# logging, prompts, building and installing the binary, systemd and journal limits, removal, and X25519
-# keys in configs.
+# Sourced by each service deploy script after it sets SERVICE, BINARY, CONFIG_DIRECTORY and CONFIG_FILE:
+# logging, prompts, building and installing the binary, systemd and journal limits, health checks,
+# removal, and X25519 keys in configs.
 
 set -euo pipefail
 
@@ -83,6 +83,25 @@ restart_service() {
     log "restarting $SERVICE"
     sudo systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
     sudo systemctl restart "$SERVICE"
+}
+
+# Polls $1$2 until it answers, up to 10 times one second apart, then logs $3; when $4 (an info path) is
+# given, its body is appended to that message. On failure prints the unit's status and dies.
+check_health() {
+    local base_url=$1 health_path=$2 message=$3 info_path=${4:-}
+    for _ in $(seq 10); do
+        if curl -fsS "$base_url$health_path" >/dev/null 2>&1; then
+            if [[ -n $info_path ]]; then
+                log "$message: $(curl -fsS "$base_url$info_path")"
+            else
+                log "$message"
+            fi
+            return 0
+        fi
+        sleep 1
+    done
+    sudo systemctl status "$SERVICE" --no-pager || true
+    die "$SERVICE did not become healthy; see: journalctl --namespace=$SERVICE -u $SERVICE -e"
 }
 
 # Stops and removes the service: its unit, its binary, the paths given as arguments, and its journal

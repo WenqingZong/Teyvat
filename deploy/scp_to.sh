@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds every release binary from scratch, copies the trading services to each host over scp, then
 # reports which hosts received both and which did not. Tokyo is aarch64 and these binaries are x86_64,
-# so Tokyo is never copied to: it counts as failed, and install_teyvat on Tokyo builds them there.
+# so Tokyo is never copied to: it counts as failed. Build both binaries on Tokyo from the repository,
+# then copy them to /home/ubuntu/Services/MarketDataProvider/ and .../DummyStrategy/ there.
 #
 #   deploy/scp_to.sh <host>...      e.g. deploy/scp_to.sh Osaka Xian (hosts scp knows, such as ones in ~/.ssh/config)
 
@@ -26,8 +27,8 @@ copy_hosts=()
 for host in "${HOSTS[@]}"; do
     if [[ ${host,,} == "${ARM_HOST,,}" ]]; then
         printf 'warning: %s is aarch64, so the x86_64 binaries built here cannot run there; skipping it.\n' "$host" >&2
-        printf '         Run install_teyvat on %s to build it there.\n' "$host" >&2
-        failed_hosts+=("$host (aarch64: run install_teyvat on $host)")
+        printf '         Build both binaries on %s from the repository and copy them to the Services directories.\n' "$host" >&2
+        failed_hosts+=("$host (aarch64: build both binaries on $host from the repository)")
     else
         copy_hosts+=("$host")
     fi

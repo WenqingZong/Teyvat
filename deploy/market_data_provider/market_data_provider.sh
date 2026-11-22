@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy / redeploy / remove the Market Data Provider on the trading host (Osaka).
 #
-#   deploy/market_data_provider/market_data_provider.sh install      build and (re)deploy; keeps the existing key and config
+#   deploy/market_data_provider/market_data_provider.sh install      build and (re)deploy; keeps the existing keys and config
 #   deploy/market_data_provider/market_data_provider.sh uninstall    remove everything the provider put on this machine
 #   deploy/market_data_provider/market_data_provider.sh reinstall    uninstall, then install (new Gnosis and Celestia client keys!)
 #
@@ -28,30 +28,17 @@ install_service() {
     sudo loginctl enable-linger "$USER"
     install_unit
 
-    local missing=()
+    local missing=() port
     grep -q '<Phanes URL' "$CONFIG_FILE" && missing+=("[gnosis_client] url and [celestia_client] url in $CONFIG_FILE")
     grep -q '<base64' "$CONFIG_FILE" && missing+=("[gnosis_client] phanes_gnosis_public_key and [celestia_client] phanes_celestia_public_key (printed by deploy/phanes/phanes.sh install on the Phanes host) in $CONFIG_FILE")
     grep -q '<fill me' "$CONFIG_FILE" && missing+=("[bark] credentials in $CONFIG_FILE")
     grep -q '^demo *=' "$CONFIG_FILE" || missing+=("demo = true|false in $CONFIG_FILE (see deploy/market_data_provider/market_data_provider.example.toml)")
     if report_missing "${missing[@]}"; then
         restart_service
-        check_health
+        port=$(sed -n 's/^port *= *\([0-9]*\).*/\1/p' "$CONFIG_FILE")
+        check_health "http://127.0.0.1:$port" /health "$SERVICE is healthy on 127.0.0.1:$port" /info
     fi
     print_phanes_instructions
-}
-
-check_health() {
-    local port
-    port=$(sed -n 's/^port *= *\([0-9]*\).*/\1/p' "$CONFIG_FILE")
-    for _ in $(seq 10); do
-        if curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
-            log "$SERVICE is healthy on 127.0.0.1:$port: $(curl -fsS "http://127.0.0.1:$port/info")"
-            return 0
-        fi
-        sleep 1
-    done
-    sudo systemctl status "$SERVICE" --no-pager || true
-    die "$SERVICE did not become healthy; see: journalctl --namespace=$SERVICE -u $SERVICE -e"
 }
 
 print_phanes_instructions() {

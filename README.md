@@ -1,61 +1,70 @@
 # Teyvat
 
-个人量化交易系统的唯一代码库。命名取自原神。
+个人量化交易系统的唯一代码库，命名取自原神。交易所行情经共享内存低延迟交给策略；API Key 由总控按需发放；各进程的运行指标回传给总控。
 
-所有二进制（生产服务和测试工具）都在顶层的 `teyvat` package 里定义，一条命令全部构建：
+## 全貌
 
-```bash
-cargo build --release --bins --examples
+```text
+ Binance / OKX
+      │ websocket
+      ▼
+ 交易机器（Osaka / Tokyo）
+   market_data_provider ── 共享内存 ring ──▶ 策略进程
+      │                                        │
+      │ 启动时取 API Key        进程指标上报（两者都经 Noise 加密）
+      └──────────────────┬─────────────────────┘
+                         │ HTTPS + Cloudflare Tunnel，Cloudflare 只见密文
+                         ▼
+  RedmiBook：Phanes（总控）
+    Gnosis   发放 API Key
+    Celestia 接收进程指标（目前只记日志，入库与看板未做）
 ```
 
-| 二进制 | 说明 | 部署位置 |
-|---|---|---|
-| `phanes` | 天理法涅斯，系统总控：Gnosis 发放 API Key，Celestia 接收进程监控数据 | RedmiBook |
-| `market_data_provider` | 连接交易所，经共享内存向策略发布行情 | Osaka（测试环境） |
-| `dummy_strategy` | 开发用的占位策略，兼行情延迟测试 | Osaka（测试环境） |
-| example `fetch` / `bark_push` / `celestia` | 测试工具：模拟 Osaka 取 key、发一条 Bark 推送、模拟进程监控 | 按需拷贝 |
+- **行情**：`market_data_provider` 连交易所，把 BBO、逐笔成交写进每个策略自己的共享内存 ring；策略忙轮询读取，不经过网络栈。
+- **策略**：通过本机 HTTP 向行情服务订阅 topic，订阅带租约；行情服务与策略可以各自独立重启。
+- **总控**：Phanes 持有所有 API Key 与 Bark 凭据，客户端凭 X25519 密钥认领；同时接收各机器、各进程的指标。
 
-其余代码都是 `crates/` 下的库：
+## 机器
 
-| Crate | 说明 |
+| 机器 | 角色 |
 |---|---|
-| `phanes` | 总控的实现 |
-| `market_data_provider` | 行情服务的实现 |
-| `dummy_strategy` | 占位策略的实现 |
-| `layline` | 地脉，蕴含一切信息：各 crate 共用的代码（行情类型、共享内存、Phanes 协议、Bark 推送、日志、测试 fixture 等）。只有被两个及以上 crate 用到的代码才放进来 |
-| `layline-testing` | 只给测试用的源码检查（模块循环、import 分组、格式串），用 `syn` 和 `toml` 解析源码；不是生产依赖 |
+| **Osaka** | Oracle 免费 AMD 实例（1/8 OCPU、1 GB），测试环境：验证正确性，不测延迟 |
+| **Tokyo** | Oracle 免费 ARM 实例（4 核、24 GB），生产环境，也是延迟实测的基准 |
+| **Xian** | 廉价 NAT 云服务器，基准测试机（只测系统内部延迟），暂未启用 |
+| **RedmiBook** | 家用笔记本，无公网 IP，经 Cloudflare Tunnel 运行 Phanes；以后也放 ClickHouse |
+
+细节（网络、内核、磁盘）见 [`architecture/overview.md`](architecture/overview.md)。
+
+## 代码
+
+一个 Cargo workspace。根 package `teyvat` 定义**全部**二进制，`cargo build --release --bins --examples` 一条命令构建完：
+
+| 目标 | 作用 |
+|---|---|
+| `phanes` | 总控：Gnosis 发 key，Celestia 收指标 |
+| `market_data_provider` | 交易所行情 → 共享内存 |
+| `dummy_strategy` | 占位策略兼延迟测试 |
+| `examples/` | 冒烟测试工具：`fetch`（取 key）、`bark_push`、`celestia`（模拟上报） |
+
+库在 `crates/`：
+
+| Crate | 作用 |
+|---|---|
+| `layline` | 地脉：各 crate 共用的行情类型、共享内存、Phanes 协议、日志、密钥 |
+| `phanes` / `market_data_provider` / `dummy_strategy` | 三个服务的实现 |
+| `layline-testing` | 只给测试用的源码检查（模块循环、import 分组、格式串） |
 
 ## 文档
 
-| 目录 | 内容 |
-|---|---|
-| [`architecture/`](architecture/README.md) | 已实现功能的说明：系统总览、Phanes、行情服务、占位策略 |
-| [`plan/`](plan/README.md) | 尚未实现的功能和设计讨论 |
-| [`deploy/`](deploy/README.md) | 部署脚本、systemd unit、配置模板和部署指南 |
-
-## 目录结构
-
-```
-Teyvat/
-├── Cargo.toml        # workspace（统一依赖版本和 clippy lint）+ teyvat package（定义所有二进制）
-├── Cargo.lock
-├── src/bin/          # 生产二进制
-├── examples/         # 测试工具
-├── crates/           # 只放代码
-│   ├── layline/
-│   ├── phanes/
-│   ├── market_data_provider/   # 含 benches/
-│   └── dummy_strategy/
-├── architecture/     # 已实现功能的文档
-├── plan/             # 尚未实现的功能
-└── deploy/           # 部署脚本、unit、配置模板、部署指南
-```
-
-私有策略将来以 git submodule 的形式放在 `crates/` 之外，并列入 workspace 的 `exclude`，使用自己的 `Cargo.lock`。
+| 位置 | 读者 | 内容 |
+|---|---|---|
+| 本文件 | 人 | 系统全貌，只讲“是什么” |
+| [`architecture/`](architecture/README.md) | AI | 已实现组件的细节设计、不变量、代码结构 |
+| [`plan/`](plan/README.md) | AI | 未实现部分的设计、决策、待定问题 |
+| [`deploy/`](deploy/README.md) | 人 | 部署脚本、systemd unit、配置模板与步骤 |
+| [`AGENT.md`](AGENT.md) | AI | 工作规则、命令、编码规范、夜间测试流程 |
 
 ## 开发
-
-在仓库根目录：
 
 ```bash
 cargo build --bins --examples
@@ -64,8 +73,6 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 cargo llvm-cov --workspace --summary-only   # CI 要求行覆盖率 ≥ 90%
 ```
-
-每个 crate 都有 `tests/module_dependencies.rs`（禁止顶层模块之间循环 import）和 `tests/import_groups.rs`（import 按标准库、第三方、本仓库分组）。编码规范见 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 许可证
 

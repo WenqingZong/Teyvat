@@ -43,8 +43,7 @@ Osaka --HTTPS--> Cloudflare --tunnel--> cloudflared --> 127.0.0.1:8888 Phanes (R
 
 ## 代码结构
 
-- 每个服务一个目录。Gnosis 协议要和客户端共用，所以两半（`Request`/`Response`、`Initiator`/`Responder`）以及所有 gnosis 的 id 和 key 类型都在 `layline::gnosis`（`mod.rs` 放协议、`GnosisId` 和 `Gnosis` trait，每个交易所一个文件放它的 key 类型，如 `binance.rs`），这里只有服务端。Celestia 同理：协议和上报端都在 `layline::celestia`（`mod.rs` 是协议，`client.rs` 是各进程用的上报端），这里只有服务端。
-- `layline::noise`：所有服务共用的 Noise 层：参数、密钥编解码、`decode_key`（私钥和公钥同一个解码函数，都得到 `SecretBox<StaticKey>`）、`build_initiator(prologue, ..)` / `build_responder(prologue, ..)`、`read_first_message`（服务端读消息 1，得到载荷和客户端公钥；Noise 只在本地用私钥做 DH，消息里只有加密的公钥）、`encrypt`/`decrypt`（握手和传输阶段通用）。服务的协议代码不自己分配缓冲区、不直接调 `snow`，统一走这里。
+- 每个服务一个目录。协议要和客户端共用，所以两半（Gnosis 的 `Request`/`Response`、`Initiator`/`Responder`，Celestia 的 `Session`/`Batch`/`Ack`）在 `layline::gnosis` 和 `layline::celestia` 里，这里只有服务端；Noise 层统一在 `layline::noise`（见 [`overview.md`](overview.md)「layline」），协议代码不自己分配缓冲区、不直接调 `snow`。
 - `src/clients.rs`：`ClientName`（`String` 的类型别名）、`ClientConfig`（一张 `[clients.<名字>]` 表）和 `Clients`（全部客户端，`Arc` 共享给 IP 白名单和各服务，只有这一份，不派生其他表）。`identify(clients, 服务, 公钥, IP 所属的客户端)` 在其中找出持有该服务公钥的客户端（客户端只有几个，逐个比较），并检查 IP 属于同一个客户端（debug 构建没有 IP，只看公钥）。它是叶子模块。
 - `src/gnosis/config.rs`：`Gnoses`（`[gnoses]` 表，每个 `GnosisId` 一个同名字段，类型为该 id 的 key 类型；穷尽的 `match` 保证新增 id 时必须加字段，测试保证字段名和 id 拼写一致）和 `AnyGnosis`（任意一种 key，序列化成 key 本身）。
 - `src/gnosis/server.rs`：`GnosisState`、`POST /gnosis`。校验顺序：Noise 握手 → 按公钥认出客户端（并核对 IP）→ 时间窗口 → nonce 防重放 → 该客户端的 `allowed_gnosis_ids` 里有这个 id，再从 `Gnoses` 取出（`load` 已保证有表）。gnosis id 是 `layline::gnosis::GnosisId` 枚举：请求里的未知 id 解析失败，按畸形请求拒绝。握手失败或认不出客户端回空 404（推送 10 分钟节流）；认出之后的拒绝回加密的 `Denied{reason}`。加密回复（Gnosis 的消息 2、Celestia 的消息 2 和 ack）对正确的代码不会失败，所以用 `expect`：真失败了就是 bug，panic 经 panic hook 让 Phanes 推送崩溃并退出。

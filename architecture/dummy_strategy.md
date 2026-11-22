@@ -1,6 +1,6 @@
 # 占位策略 dummy_strategy
 
-开发用的占位策略，同时测量行情延迟，部署在 **Osaka**。代码在 `crates/dummy_strategy`（库），二进制是 `src/bin/dummy_strategy.rs`。它**只依赖 `layline`**，不依赖行情服务的 crate：类型、共享内存 reader 和 HTTP 契约都来自 layline。等真正的策略出现后，它会和真正的策略一起迁移到单独的私有仓库。
+开发用的占位策略，同时测量行情延迟，部署在 **Osaka**（测试）和 **Tokyo**（生产、延迟实测）。代码在 `crates/dummy_strategy`（库），二进制是 `src/bin/dummy_strategy.rs`。它**只依赖 `layline`**，不依赖行情服务的 crate：类型、共享内存 reader 和 HTTP 契约都来自 layline。等真正的策略出现后，它会和真正的策略一起迁移到单独的私有仓库。
 
 ## 模块
 

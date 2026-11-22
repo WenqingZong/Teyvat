@@ -1,6 +1,6 @@
 # 行情服务 MarketDataProvider
 
-连接交易所，标准化行情，以尽量低的延迟经共享内存发布给策略进程，部署在 **Osaka**。代码在 `crates/market_data_provider`（库），二进制是 `src/bin/market_data_provider.rs`。部署步骤见 [`deploy/README.md`](../deploy/README.md)，尚未实现的部分见 [`plan/market_data_provider.md`](../plan/market_data_provider.md)。
+连接交易所，标准化行情，以尽量低的延迟经共享内存发布给策略进程。部署在 **Osaka**（测试）和 **Tokyo**（生产、延迟实测）。代码在 `crates/market_data_provider`（库），二进制是 `src/bin/market_data_provider.rs`。部署步骤见 [`deploy/README.md`](../deploy/README.md)，尚未实现的部分见 [`plan/market_data_provider.md`](../plan/market_data_provider.md)。
 
 策略通过行情服务在本机的 HTTP API 订阅 topic。`BinanceConnector` 发布真实的 BBO 和逐笔成交（现货和 U 本位永续）；`OkxConnector` 目前还是 dummy，每 10 ms 发出合成的 BBO 和成交。不发布 K 线，策略自己用成交合成。一个行情服务在整个生命周期内只提供实盘或 demo 其中一种行情，由 TOML 配置里的 `demo` 决定；策略的请求必须指定同一种环境。
 

@@ -7,11 +7,11 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | 名称 | 硬件与网络 | 用途 |
 |---|---|---|
 | **Osaka** | Oracle Cloud 永久免费 AMD 实例，位于大阪：1/8 OCPU（AMD EPYC 7551，2 vCPU @ 2.0 GHz）、1 GB 内存、无 swap、44 GiB 硬盘，网络 0.48 Gbps，静态公网 IPv4, 静态公网IPv6，Ubuntu 26.04（x86_64） | **测试环境**，验证实现的正确性：现在运行行情服务和策略。**磁盘上不存 API Key**，启动时向 Phanes 取。 |
-| **Tokyo** | Oracle Cloud 永久免费 ARM 实例，位于东京：4 核 Neoverse-N1、24 GB 内存、无 swap、192 GiB 硬盘，网络每核 0.48 Gbps，静态公网IPv4, 静态公网IPv6, Ubuntu 26.04（**aarch64**，部署时要按 aarch64 编译） | **生产环境**，暂未启用。 |
+| **Tokyo** | Oracle Cloud 永久免费 ARM 实例，位于东京：4 核 Neoverse-N1、24 GB 内存、无 swap、192 GiB 硬盘，网络每核 0.48 Gbps，静态公网IPv4, 静态公网IPv6, Ubuntu 26.04（**aarch64**，部署时要按 aarch64 编译） | **生产环境**，尚未接管真实资金；也是延迟实测的基准，目前运行行情服务和策略。 |
 | **Xian** | 江苏安全云的廉价 NAT 云服务器，位于陕西西安：2 vCPU（Intel Xeon Platinum 8173M @ 2.0 GHz）、2 GB 内存，网速未知，每月流量上限 1000 GB，静态公网IPv4, 无IPv6, Ubuntu 24.04（x86_64） | **基准测试机**，只用于测量系统内部延迟，暂未启用。 |
 | **RedmiBook** | 个人笔记本（i7-8565U、8 GB、Kali Linux），家用 WiFi，无公网 IP，经 Cloudflare Tunnel 对外提供服务 | Phanes（总控），以及以后的 ClickHouse 数据库。 |
 
-下图是现在的部署：交易进程在 Osaka。
+下图是现在的部署：交易进程在 Osaka（测试）和 Tokyo（生产/实测）。
 
 ```text
 +-- Osaka ---------------------------------------------------+
@@ -20,6 +20,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 | the provider and every strategy report their process       |
 | metrics to Phanes Celestia                                 |
 +----+-------------------------------------------------------+
+     | Tokyo runs the same layout (production and latency bench)
      | HTTPS; Noise_IK end to end, Cloudflare sees only ciphertext
      v
  Cloudflare --tunnel--> cloudflared
@@ -117,13 +118,8 @@ layline 里的组件（如 `run_process_monitor`）只提供 async 任务，不�
 
 ## 质量检查
 
-| 检查 | 方式 |
-|---|---|
-| 无警告 | `cargo clippy --workspace --all-targets`，CI 里 `RUSTFLAGS=-Dwarnings`；workspace 级 lint 禁止 `unwrap`、`print!`、`dbg!` |
-| 无模块循环依赖 | 每个 crate 的 `tests/module_dependencies.rs` 调用 `layline_testing::assert_acyclic_modules` |
-| import 分组 | 每个 package 的 `tests/import_groups.rs` 调用 `layline_testing::assert_grouped_imports`：标准库 → 第三方 → 本仓库，空行分隔，组内由 rustfmt 排序 |
-| 格式串风格统一 | 每个 package 的 `tests/format_strings.rs` 调用 `layline_testing::assert_consistent_format_strings`：同一个字符串字面量里不能混用位置占位符（`{}`、`{:?}`、`{0}`）和具名占位符（`{name}`）；表达式先绑定成局部变量再内联。检查 `build.rs`、`src`、`tests`、`benches`、`examples`，跳过注释 |
-| 测试与覆盖率 | `cargo test --workspace`；`cargo llvm-cov --workspace`，CI 要求行覆盖率 ≥ 90% |
-| 未使用依赖 | `cargoscope scan . --checks inventory,unused`；CI 在报告里 `unused` 非空时失败 |
-
-CI 配置在 `.github/workflows/rust_ci.yml`，dependabot 每天检查依赖更新。
+每条检查的命令、CI 位置和工作区 lint 见 [`AGENT.md`](../AGENT.md)「Commands」「Coding
+standards」。源码检查本身在 `layline-testing`：`assert_acyclic_modules`（顶层模块无循环 import）、
+`assert_grouped_imports`（标准库 → 第三方 → 本仓库，空行分隔）、
+`assert_consistent_format_strings`（一个字符串字面量里不同时用位置和具名占位符，检查
+`build.rs`、`src`、`tests`、`benches`、`examples`，跳过注释）。
