@@ -6,7 +6,7 @@
 
 **目标**：实时监控 Osaka 上**长期运行的业务程序**（不是本仓库的 example）的进程 CPU、内存、网络收发（进程口径），同时传输业务程序内部的可观测数据（每秒十几个数据点）；RedmiBook 负责存储和看板，既能实时看也能长期保留、查询历史，看板经 RedmiBook 上的 cloudflared 发布到公网，手机也能看；Osaka 的**日志不传**。
 
-**约束**：Osaka 很弱（1/8 OCPU、1 GB 内存），监控对它的额外负载要尽量接近零；CPU 和内存比磁盘紧张得多，50 GB 磁盘可以用来缓存。Osaka → RedmiBook 端到端加密：Cloudflare 会终止 TLS，必须在应用层加密。RedmiBook 常开（合盖也不休眠），但家用网络会断，Cloudflare Tunnel 也会重连。两端都用 Rust + tokio，编码规范沿用 `AGENT.md`。
+**约束**：Osaka 很弱（1/8 OCPU、1 GB 内存），监控对它的额外负载要尽量接近零；CPU 和内存比磁盘紧张得多，50 GB 磁盘可以用来缓存。Osaka → RedmiBook 端到端加密：Cloudflare 会终止 TLS，必须在应用层加密。RedmiBook 常开（合盖也不休眠），但家用网络会断，Cloudflare Tunnel 也会重连。两端都用 Rust + tokio，编码规范沿用 `AGENTS.md`。
 
 ## 2. 已定决策
 

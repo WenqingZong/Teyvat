@@ -62,7 +62,7 @@
 | [`architecture/`](architecture/README.md) | AI | 已实现组件的细节设计、不变量、代码结构 |
 | [`plan/`](plan/README.md) | AI | 未实现部分的设计、决策、待定问题 |
 | [`deploy/`](deploy/README.md) | 人 | 部署脚本、systemd unit、配置模板与步骤 |
-| [`AGENT.md`](AGENT.md) | AI | 工作规则、命令、编码规范、夜间测试流程 |
+| [`AGENTS.md`](AGENTS.md) | AI | 工作规则、命令、编码规范、夜间测试流程 |
 
 ## 开发
 

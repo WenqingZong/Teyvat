@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 Instructions for AI agents (DSH) working on Teyvat, the single repository of a personal quant
 trading system (names come from Genshin Impact). Read [`README.md`](README.md) for the human

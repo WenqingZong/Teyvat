@@ -118,7 +118,7 @@ layline 里的组件（如 `run_process_monitor`）只提供 async 任务，不�
 
 ## 质量检查
 
-每条检查的命令、CI 位置和工作区 lint 见 [`AGENT.md`](../AGENT.md)「Commands」「Coding
+每条检查的命令、CI 位置和工作区 lint 见 [`AGENTS.md`](../AGENTS.md)「Commands」「Coding
 standards」。源码检查本身在 `layline-testing`：`assert_acyclic_modules`（顶层模块无循环 import）、
 `assert_grouped_imports`（标准库 → 第三方 → 本仓库，空行分隔）、
 `assert_consistent_format_strings`（一个字符串字面量里不同时用位置和具名占位符，检查
