@@ -142,7 +142,6 @@ mod tests {
     use std::os::fd::AsRawFd;
 
     use super::linux::read_tcp_byte_counts;
-    use super::*;
 
     const PAYLOAD_LENGTH: usize = 5000;
 
