@@ -134,11 +134,18 @@ PRs daily.
   `NonZeroU64`); hot paths use it as a plain integer and never format dates.
 - **Commits:** Conventional Commits.
 
-## Nightly test
+## Nightly test (read-only)
 
-The nightly test is an overnight soak of the current commit on both trading hosts. The user
-starts it before going to sleep and stops it explicitly ("stop the nightly test"); services keep
-running after the test ends unless the user says otherwise.
+The nightly test belongs to the user: they start `market_data_provider` and `dummy_strategy`
+themselves, normally inside a tmux session on each trading host, and they own the processes'
+lifecycle. Our job is to watch the logs and report; nothing else.
+
+**Read-only, without exception.** While a nightly test runs, never stop, start, restart or kill a
+service, never edit a config, never build or copy a binary on a host, and never touch the rings
+under `/dev/shm`. Only read-only SSH commands are allowed on the hosts: `ps`, `pgrep`, `curl`,
+`grep`, `tail`, `free`, `df`. `pkill`, `systemctl`, `setsid`, `scp`, `cargo` and anything like
+`install_teyvat` are off limits there. A missing or stopped process is **reported, never
+restarted**: only the user restarts it, from their own tmux session.
 
 Hosts and paths (SSH aliases `Osaka`, `Tokyo` exist locally):
 
@@ -147,100 +154,33 @@ Hosts and paths (SSH aliases `Osaka`, `Tokyo` exist locally):
 | `Osaka` | `/home/ubuntu/Services/MarketDataProvider/`, `/home/ubuntu/Services/DummyStrategy/` | `*.log` in each directory |
 | `Tokyo` | same paths | same |
 
-Both hosts run `market_data_provider` and `dummy_strategy` from those directories, not from the
-systemd units in `deploy/`. Tokyo is aarch64 and has a Rust toolchain; Osaka is x86_64 and has
-none, so its binaries are cross-copied from the local machine (also x86_64).
+Assumptions about the run, which must not be changed by the watcher: the strategy reports latency
+every 30 minutes (`--report-interval-seconds=1800`, so windows compare across nights), and Osaka
+runs the demo environment (8 topics) while Tokyo runs live (12 topics, including
+`AGGREGATE_TRADE`).
 
-### 1. Local gate (must pass before deploying)
-
-```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets
-cargo test --workspace
-```
-
-If anything fails, fix it or stop and report; never deploy a commit that failed the gate.
-
-### 2. Stop the old processes on both hosts
-
-Do this before copying: replacing a running executable fails with `Text file busy`. The log is
-truncated when the new process starts, so read it first if the last run failed.
+Patrol every two hours, scheduled with DSH's scheduler (`this_session`,
+`FREQ=HOURLY;INTERVAL=2`), not with cron, so the reports arrive in the conversation. Per host:
 
 ```bash
-for host in Osaka Tokyo; do
-  ssh "$host" "cd ~/Services/MarketDataProvider && pkill -f '^\./market_data_provider --config' || true
-               cd ~/Services/DummyStrategy && pkill -f '^\./dummy_strategy --config' || true"
-done
-```
-
-### 3. Deploy
-
-```bash
-# Tokyo (aarch64): build there from the repository checkout.
-ssh Tokyo 'cd ~/Projects/Teyvat && git pull --ff-only && cargo clean && cargo build --bins --release &&
-  cp target/release/market_data_provider ~/Services/MarketDataProvider/ &&
-  cp target/release/dummy_strategy ~/Services/DummyStrategy/'
-
-# Osaka (x86_64): build locally from scratch and scp both binaries.
-deploy/scp_to.sh Osaka
-```
-
-`deploy/scp_to.sh` removes `target/` and rebuilds, so run it after the local gate and expect the
-local build cache to be cold afterwards.
-
-### 4. Start both services
-
-Run from each service directory on the host:
-
-```bash
-cd ~/Services/MarketDataProvider
-setsid ./market_data_provider --config=./market_data_provider.toml > market_data_provider.log 2>&1 </dev/null &
-
-cd ~/Services/DummyStrategy
-setsid ./dummy_strategy --config=./strategy.toml --report-interval-seconds=1800 > dummy_strategy.log 2>&1 </dev/null &
-```
-
-The strategy's 30-minute report interval is what makes the latency numbers comparable between
-nights; do not change it for the nightly test.
-
-### 5. Confirm
-
-- `curl -s http://127.0.0.1:6666/health` returns `ok`, and `/info` shows the commit just deployed.
-- `/subscribed` lists exactly the topics in that host's `strategy.toml` (Osaka runs the demo
-  environment with 8 topics; Tokyo runs live with 12, including `AGGREGATE_TRADE`). Never change
-  `demo` as part of the nightly test.
-- Two processes per host (`pgrep -af '^\./market_data_provider --config'` and
-  `pgrep -af '^\./dummy_strategy --config'`). `pgrep -x`/`pkill -x` do not work here: they match the
-  15-character process name, and `market_data_provider` is longer.
-- After the first report interval, `dummy_strategy.log` contains a `latency over 1800 s` block.
-
-### 6. Patrol every two hours
-
-Schedule the patrol with DSH's scheduler (`this_session`, `FREQ=HOURLY;INTERVAL=2`), not with cron,
-so the checks arrive in the conversation. Each patrol collects, per host:
-
-```bash
-ssh <host> 'pgrep -af "^\\./market_data_provider --config"; pgrep -af "^\\./dummy_strategy --config";
+ssh <host> 'pgrep -af "^\./market_data_provider --config"; pgrep -af "^\./dummy_strategy --config";
   curl -s --max-time 3 http://127.0.0.1:6666/health; echo;
   grep -cE " ERROR|panic|CRITICAL" ~/Services/*/*.log;
   tail -c 4000 ~/Services/MarketDataProvider/market_data_provider.log;
   tail -c 4000 ~/Services/DummyStrategy/dummy_strategy.log'
 ```
 
-Then look for, in this order: a missing process; an `ERROR`, `panic` or non-zero exit; repeated
+Look for, in this order: a missing process; an `ERROR`, `panic` or non-zero exit; repeated
 Celestia disconnects between the hosts; topics missing from `/subscribed`; a missing 30-minute
 latency report; a large p99/max regression against the previous window; memory growth; disk or
 inode pressure. `WARN` alone is not an anomaly (Cloudflare resets the Celestia connection
 occasionally; the client reconnects and resends).
 
-Report findings concisely: what changed since the last patrol, and only the anomalies with the
-log line that proves them. Do not paste whole logs. If a needed service is still down at the next
-patrol, restart it once, note the interruption, and report it; keep the previous log first.
+Report concisely: what changed since the last patrol, and only anomalies with the log line that
+proves them; never paste whole logs. When a process is down, say when it was last seen, quote its
+last log lines, and leave it down.
 
-### 7. Stop
-
-Stop patrolling when the user says so. Leave the services running unless the user asks to stop
-them too.
+Stop patrolling when the user says so. Services are the user's to keep running or stop.
 
 ## Environment
 
