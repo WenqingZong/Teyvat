@@ -7,7 +7,7 @@ use super::format_topics;
 use super::registry::SubscriptionRegistry;
 use crate::exchanges::ExchangeRouter;
 use layline::provider_api::{SubscriptionResult, group_by_reason};
-use layline::types::{Instrument, StrategyName, Topic};
+use layline::types::{StrategyName, Topic};
 
 /// Owns all subscription state; the server serialises calls through one lock.
 pub(crate) struct Coordinator {
@@ -77,15 +77,6 @@ impl Coordinator {
 
     pub(crate) fn subscribed_topics(&self) -> HashSet<Topic> {
         self.registry.subscribed_topics()
-    }
-
-    /// Every instrument some strategy holds, for the periodic rules refresh to revalidate.
-    pub(crate) fn subscribed_instruments(&self) -> HashSet<Instrument> {
-        self.registry
-            .subscribed_topics()
-            .into_iter()
-            .map(|topic| topic.instrument)
-            .collect()
     }
 
     /// Moves the strategy's held set to `target` and renews its lease. Returns the ring path, or why

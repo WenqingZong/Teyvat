@@ -20,16 +20,6 @@ use layline::types::{Exchange, Instrument, InstrumentRules, MarketData, Topic};
 use okx::OkxConnector;
 pub(crate) use router::ExchangeRouter;
 
-// AI TODO: 这个方法应该删掉, 这不是业务逻辑, 只是我们暂时还没有开发okx的connector
-/// Whether an exchange has instrument rules at all. Synthetic venues such as OKX do not; the
-/// refresh task uses this to know which subscribed instruments must have rules.
-pub(crate) const fn provides_instrument_rules(exchange: Exchange) -> bool {
-    match exchange {
-        Exchange::Binance => true,
-        Exchange::Okx => false,
-    }
-}
-
 /// Fetches the rules for `instruments` from their exchange. OKX is still synthetic and has no
 /// rules; its dummy arm keeps this dispatch exchange-agnostic until the real connector lands.
 pub(crate) async fn fetch_instrument_rules(
@@ -101,8 +91,6 @@ pub(crate) mod tests {
             Currency::Usdt,
             UnderlyingType::Spot,
         );
-        assert!(provides_instrument_rules(Exchange::Binance));
-        assert!(!provides_instrument_rules(Exchange::Okx));
         assert!(
             fetch_instrument_rules(Exchange::Okx, false, &HashSet::from([instrument]))
                 .await

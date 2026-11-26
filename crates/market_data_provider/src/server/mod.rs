@@ -66,7 +66,6 @@ pub async fn serve(
     let coordinator = Arc::new(Mutex::new(Coordinator::new(router, lease_duration)));
     tokio::spawn(refresh::run(
         instrument_rules.clone(),
-        coordinator.clone(),
         config.demo,
         notifier,
     ));

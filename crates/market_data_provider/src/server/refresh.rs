@@ -6,14 +6,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::future::BoxFuture;
-use tokio::sync::Mutex;
 use tokio::time::{Instant, interval_at, sleep};
 use tracing::{error, warn};
 
-use super::coordinator::Coordinator;
-use crate::alert::{SendAlert, alert_and_panic};
-use crate::exchanges::{fetch_instrument_rules, provides_instrument_rules};
-use crate::exit_reason::ExitReason;
+use crate::alert::SendAlert;
+use crate::exchanges::fetch_instrument_rules;
 use layline::backoff::exponential_backoff;
 use layline::bark::Notifier;
 use layline::types::{Exchange, Instrument, InstrumentRules};
@@ -23,11 +20,10 @@ const REFRESH_RETRY_INITIAL: Duration = Duration::from_mins(1);
 const REFRESH_RETRY_MAXIMUM: Duration = Duration::from_hours(1);
 const ALERT_TITLE: &str = "instrument rules";
 
-/// Refreshes every 24 hours. A failed fetch keeps the previous map and retries with backoff; only
-/// a successful refresh that no longer lets a subscribed instrument trade stops the provider.
+/// Refreshes every 24 hours. A failed fetch keeps the previous map and retries with backoff; the
+/// fetch itself panics when an instrument the map already knows is missing or no longer tradable.
 pub(super) async fn run(
     instrument_rules: Arc<RwLock<InstrumentRules>>,
-    coordinator: Arc<Mutex<Coordinator>>,
     demo: bool,
     notifier: Notifier,
 ) {
@@ -49,23 +45,6 @@ pub(super) async fn run(
                 fetch_from_exchange,
             )
             .await;
-        }
-        let subscribed_instruments = coordinator.lock().await.subscribed_instruments();
-        let missing: Vec<Instrument> = {
-            let rules = instrument_rules
-                .read()
-                .expect("no code panics while holding the instrument rules");
-            subscribed_instruments
-                .into_iter()
-                .filter(|instrument| {
-                    provides_instrument_rules(instrument.exchange)
-                        && !rules.contains_key(instrument)
-                })
-                .collect()
-        };
-        if let Some(instrument) = missing.into_iter().next() {
-            let body = format!("subscribed instrument {instrument} has no rules after refresh");
-            match alert_and_panic(&notifier, ALERT_TITLE, &body, ExitReason::FatalError).await {}
         }
     }
 }

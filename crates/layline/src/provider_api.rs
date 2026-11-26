@@ -29,12 +29,18 @@
 //!           "minimum_quantity": "0.00001",
 //!           "minimum_notional_size": "5"
 //!         },
-//!         // AI TODO: 这里虽然只是文档, 但也要写全的. 请求里还有okx呢
 //!         "BBO": {
 //!           "Ok": "/dev/shm/market_data_provider/dummy_strategy/Binance/SPOT/BBO.dat"
 //!         },
 //!         "TRADE": {
 //!           "Err": "reason"
+//!         }
+//!       }
+//!     },
+//!     "OKX": {
+//!       "BTC-USDT-PERP": {
+//!         "BBO": {
+//!           "Ok": "/dev/shm/market_data_provider/dummy_strategy/OKX/PERP/BBO.dat"
 //!         }
 //!       }
 //!     }
@@ -45,8 +51,10 @@
 //! {
 //!   "topics": {
 //!     "Binance": {
-//! // AI TODO: 这里也是, 要写全的, 还有TRADE呢
 //!       "BTC-USDT-SPOT": ["BBO"]
+//!     },
+//!     "OKX": {
+//!       "BTC-USDT-PERP": ["BBO"]
 //!     }
 //!   }
 //! }
