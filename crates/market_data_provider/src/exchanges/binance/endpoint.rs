@@ -32,8 +32,6 @@ const SPOT_SBE_DOC: &str =
 const FUTURES_DOC: &str = "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams";
 
 pub(super) const SPOT_EXCHANGE_INFO_LIVE: &str = "https://api.binance.com/api/v3/exchangeInfo";
-/// `testnet.binance.vision` is Binance's spot testnet, not a typo: the demo exchangeInfo is served
-/// from that domain.
 pub(super) const SPOT_EXCHANGE_INFO_DEMO: &str =
     "https://testnet.binance.vision/api/v3/exchangeInfo";
 pub(super) const FUTURES_EXCHANGE_INFO_LIVE: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";

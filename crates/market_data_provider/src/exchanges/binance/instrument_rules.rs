@@ -6,7 +6,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use reqwest::Client;
 use rust_decimal::Decimal;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::info;
 use url::Url;
 
@@ -29,43 +29,69 @@ pub(crate) async fn fetch_instrument_rules(
     demo: bool,
     instruments: &HashSet<Instrument>,
 ) -> Result<InstrumentRules> {
-    info!("fetching the rules of {instruments} from /exchangeInfo");
     let client = Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
         .expect("a reqwest client with a timeout always builds");
     let mut rules = InstrumentRules::new();
-    let spot_instruments: HashSet<Instrument> = instruments
-        .iter()
-        .filter(|instrument| instrument.underlying_type == UnderlyingType::Spot)
-        .copied()
-        .collect();
-    if !spot_instruments.is_empty() {
-        let url = with_symbols(
-            exchange_info_url(demo, UnderlyingType::Spot),
-            &spot_instruments,
-        );
-        rules.extend(build_rules(
-            &spot_instruments,
-            &fetch_exchange_info(&client, &url).await?,
-        ));
-    }
-    let perpetual_instruments: HashSet<Instrument> = instruments
-        .iter()
-        .filter(|instrument| instrument.underlying_type == UnderlyingType::Perpetual)
-        .copied()
-        .collect();
-    if !perpetual_instruments.is_empty() {
-        // Futures exchangeInfo ignores `symbols` and returns every symbol (about 905 KiB); the
-        // provider fetches only instruments missing from its map and refreshes it every 24 hours,
-        // so this is not repeated on every 10-second resubscription.
-        let url = exchange_info_url(demo, UnderlyingType::Perpetual);
-        rules.extend(build_rules(
-            &perpetual_instruments,
-            &fetch_exchange_info(&client, &url).await?,
-        ));
+    for underlying_type in [UnderlyingType::Spot, UnderlyingType::Perpetual] {
+        let same_type: HashSet<Instrument> = instruments
+            .iter()
+            .filter(|instrument| instrument.underlying_type == underlying_type)
+            .copied()
+            .collect();
+        if same_type.is_empty() {
+            continue;
+        }
+        rules.extend(rules_from_exchange_info(&client, demo, underlying_type, &same_type).await?);
     }
     Ok(rules)
+}
+
+/// Sends one `exchangeInfo` request and turns the answer into rules for `instruments`. Spot filters
+/// the request by symbol; futures has no such filter and lists every symbol (about 905 KiB). So
+/// neither answer is logged whole: `build_rules` logs the object of each requested instrument.
+async fn rules_from_exchange_info(
+    client: &Client,
+    demo: bool,
+    underlying_type: UnderlyingType,
+    instruments: &HashSet<Instrument>,
+) -> Result<InstrumentRules> {
+    let endpoint = exchange_info_url(demo, underlying_type);
+    log_request(&endpoint, instruments);
+    let url = match underlying_type {
+        UnderlyingType::Spot => with_symbols(endpoint.clone(), instruments),
+        UnderlyingType::Perpetual => endpoint.clone(),
+    };
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .with_context(|| format!("request to {url} failed"))?;
+    let status = response.status();
+    info!("{endpoint} answered {status}");
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("{url} refused the request"))?;
+    let exchange_info: Value = response
+        .json()
+        .await
+        .with_context(|| format!("{url} returned unexpected JSON"))?;
+    let listed = exchange_info["symbols"].as_array().map_or(0, Vec::len);
+    info!("{endpoint} listed {listed} symbols");
+    Ok(build_rules(instruments, &exchange_info, &endpoint))
+}
+
+/// Logs a request the way `jq` prints it. `symbols` is the spot endpoint's query parameter and,
+/// since the futures endpoint has no such filter, what the provider looks for in the full answer.
+fn log_request(endpoint: &Url, instruments: &HashSet<Instrument>) {
+    let request = json!({
+        "method": "GET",
+        "url": endpoint.as_str(),
+        "symbols": symbols(instruments),
+    });
+    let pretty = to_pretty_json(&request);
+    info!("requesting:\n{pretty}");
 }
 
 fn exchange_info_url(demo: bool, underlying_type: UnderlyingType) -> Url {
@@ -78,39 +104,36 @@ fn exchange_info_url(demo: bool, underlying_type: UnderlyingType) -> Url {
     Url::parse(url).expect("the exchange info URLs are valid")
 }
 
-fn with_symbols(mut url: Url, instruments: &HashSet<Instrument>) -> Url {
-    let symbols: Vec<String> = instruments
+/// The venue symbols of `instruments`, sorted so a log line does not move between runs.
+fn symbols(instruments: &HashSet<Instrument>) -> Vec<String> {
+    let mut symbols: Vec<String> = instruments
         .iter()
         .map(|instrument| venue_symbol(*instrument))
         .collect();
-    let symbols = serde_json::to_string(&symbols).expect("a list of strings is valid JSON");
+    symbols.sort();
+    symbols
+}
+
+fn with_symbols(mut url: Url, instruments: &HashSet<Instrument>) -> Url {
+    let symbols =
+        serde_json::to_string(&symbols(instruments)).expect("a list of strings is valid JSON");
     url.query_pairs_mut().append_pair("symbols", &symbols);
     url
 }
 
-async fn fetch_exchange_info(client: &Client, url: &Url) -> Result<Value> {
-    // Unlike the client constructor and the JSON lookups below, a network request can fail for
-    // reasons the program cannot fix; the HTTP handler turns this error into 503 so the strategy
-    // retries. Replacing it with `expect` would turn a transient network blip into a provider exit.
-    let response = client
-        .get(url.clone())
-        .send()
-        .await
-        .with_context(|| format!("request to {url} failed"))?
-        .error_for_status()
-        .with_context(|| format!("{url} refused the request"))?;
-    response
-        .json()
-        .await
-        .with_context(|| format!("{url} returned unexpected JSON"))
-}
-
-fn build_rules(instruments: &HashSet<Instrument>, exchange_info: &Value) -> InstrumentRules {
+/// Parses one `exchangeInfo` answer into rules, logging the object of every instrument it matches.
+fn build_rules(
+    instruments: &HashSet<Instrument>,
+    exchange_info: &Value,
+    endpoint: &Url,
+) -> InstrumentRules {
     let symbols = exchange_info["symbols"]
         .as_array()
         .expect("exchangeInfo has a symbols array");
+    let mut ordered: Vec<Instrument> = instruments.iter().copied().collect();
+    ordered.sort_by_cached_key(|instrument| venue_symbol(*instrument));
     let mut rules = InstrumentRules::new();
-    for &instrument in instruments {
+    for instrument in ordered {
         let exchange_symbol = venue_symbol(instrument);
         // The strategy explicitly listed this instrument; when the exchange does not return it,
         // the configuration is wrong. Fail fast and name the instrument so the operator can fix it.
@@ -118,6 +141,8 @@ fn build_rules(instruments: &HashSet<Instrument>, exchange_info: &Value) -> Inst
             .iter()
             .find(|symbol| symbol["symbol"].as_str() == Some(exchange_symbol.as_str()))
             .unwrap_or_else(|| panic!("Binance did not return {exchange_symbol} for {instrument}"));
+        let pretty = to_pretty_json(symbol);
+        info!("{instrument} from {endpoint}:\n{pretty}");
         let status = symbol["status"]
             .as_str()
             .expect("an exchange info symbol has a status");
@@ -175,6 +200,11 @@ fn build_rules(instruments: &HashSet<Instrument>, exchange_info: &Value) -> Inst
     rules
 }
 
+/// The JSON a `jq` user reads: pretty-printed over several lines, so a filter is one line each.
+fn to_pretty_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).expect("a JSON value always serializes")
+}
+
 fn decimal(text: &str) -> Decimal {
     Decimal::from_str(text).unwrap_or_else(|error| panic!("{text:?} is not a decimal: {error}"))
 }
@@ -196,6 +226,10 @@ mod tests {
         }
     }
 
+    fn endpoint() -> Url {
+        Url::parse(SPOT_EXCHANGE_INFO_LIVE).expect("The endpoint is a valid URL")
+    }
+
     fn filters(notional_filter: Value) -> Value {
         json!([
             {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
@@ -214,7 +248,7 @@ mod tests {
             }],
         });
         let stock = instrument(Currency::Aapl, UnderlyingType::Spot);
-        let rules = build_rules(&HashSet::from([stock]), &exchange_info);
+        let rules = build_rules(&HashSet::from([stock]), &exchange_info, &endpoint());
         assert_eq!(
             InstrumentRule {
                 exchange_symbol: "AAPLBUSDT".to_owned(),
@@ -237,7 +271,7 @@ mod tests {
             }],
         });
         let stock = instrument(Currency::Googl, UnderlyingType::Perpetual);
-        let rules = build_rules(&HashSet::from([stock]), &exchange_info);
+        let rules = build_rules(&HashSet::from([stock]), &exchange_info, &endpoint());
         assert_eq!(dec!(5), rules[&stock].minimum_notional_size);
     }
 
@@ -248,6 +282,7 @@ mod tests {
         build_rules(
             &HashSet::from([instrument(Currency::Aapl, UnderlyingType::Spot)]),
             &exchange_info,
+            &endpoint(),
         );
     }
 
@@ -264,6 +299,21 @@ mod tests {
         build_rules(
             &HashSet::from([instrument(Currency::Aapl, UnderlyingType::Spot)]),
             &exchange_info,
+            &endpoint(),
+        );
+    }
+
+    /// The log excerpt must read like `jq`: two-space indentation, one field per line.
+    #[test]
+    fn symbol_objects_are_printed_as_jq_does() {
+        let symbol = json!({
+            "symbol": "AAPLBUSDT",
+            "status": "TRADING",
+            "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}],
+        });
+        assert_eq!(
+            "{\n  \"filters\": [\n    {\n      \"filterType\": \"PRICE_FILTER\",\n      \"tickSize\": \"0.01\"\n    }\n  ],\n  \"status\": \"TRADING\",\n  \"symbol\": \"AAPLBUSDT\"\n}",
+            to_pretty_json(&symbol)
         );
     }
 }

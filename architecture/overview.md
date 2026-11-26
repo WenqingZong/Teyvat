@@ -70,7 +70,7 @@ Teyvat 是一个个人量化交易系统的唯一代码库，命名取自原神�
 ## 公共约定
 
 - **配置**：每个服务的全部配置来自一个 TOML 文件（权限 600，经 `layline::secrets::read_secret_toml` 读取），不读环境变量。
-- **日志**：只用 `tracing`；二进制和 example 调用一次 `layline::logging::init_tracing()`，并持有返回的 guard 直到退出（drop 时 flush）。每行是 `时间 级别 文件:行号: 消息`，不打印模块路径（文件和行号已经定位）。每个服务启动时先以 info 打印构建类型和 commit（`debug build of commit <hash>`），配置 `load` 成功后再打印整份配置（多行 `Debug`，`{:#?}`）；公钥、私钥、gnosis 和 Bark 凭据都是 `secrecy` 类型，打印为 `[REDACTED]`。含 `Url` 或 topic 集合的配置类型手写 `Debug`（解构 `Self` 列出全部字段，加字段时编译器会提醒）：URL 打印为一行，topic 按 `Display` 排序、每行一个。各 crate 的 config 测试用完整的期望输出检查这一点。
+- **日志**：只用 `tracing`；二进制和 example 调用一次 `layline::logging::init_tracing()`，并持有返回的 guard 直到退出（drop 时 flush）。每行是 `时间 级别 文件:行号: 消息`，不打印模块路径（文件和行号已经定位）。和交易所之间的每条控制请求及其应答都记日志，负载按 jq 风格（`serde_json::to_string_pretty`）多行打印；行情数据帧不逐条记录（每秒上千条），只在解析失败或意外时记。每个服务启动时先以 info 打印构建类型和 commit（`debug build of commit <hash>`），配置 `load` 成功后再打印整份配置（多行 `Debug`，`{:#?}`）；公钥、私钥、gnosis 和 Bark 凭据都是 `secrecy` 类型，打印为 `[REDACTED]`。含 `Url` 或 topic 集合的配置类型手写 `Debug`（解构 `Self` 列出全部字段，加字段时编译器会提醒）：URL 打印为一行，topic 按 `Display` 排序、每行一个。各 crate 的 config 测试用完整的期望输出检查这一点。
 - **推送**：release 构建通过 Bark 推送到手机，缺少 `[bark]` 配置就拒绝启动；debug 构建不需要 Bark，推送改为 `info!` 日志。
 - **时间**：墙钟时间统一来自 `layline::time::get_current_timestamp_nanoseconds()`（`SystemTime`，`NonZeroU64` 纳秒）；热路径只用整数，不格式化日期。
 

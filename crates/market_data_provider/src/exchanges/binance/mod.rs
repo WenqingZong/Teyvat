@@ -422,19 +422,26 @@ where
     ) -> Result<()> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        let text = serde_json::to_string(&Request {
+        let request = Request {
             method,
             params: names,
             id,
-        })?;
-        debug!("sending {text} to {endpoint}");
+        };
+        let text = serde_json::to_string(&request)?;
+        let pretty = serde_json::to_string_pretty(&request)?;
+        info!("sending to {endpoint}:\n{pretty}");
         self.endpoint_state_mut(endpoint)
             .connection
             .send_text(text)
             .await?;
-        timeout(RESPONSE_TIMEOUT, self.await_response(endpoint, id))
+        let answer = timeout(RESPONSE_TIMEOUT, self.await_response(endpoint, id))
             .await
-            .map_err(|_| anyhow!("no answer to {method} within {RESPONSE_TIMEOUT:?}"))?
+            .map_err(|_| anyhow!("no answer to {method} within {RESPONSE_TIMEOUT:?}"))?;
+        match &answer {
+            Ok(()) => info!("{endpoint} accepted {method} {id}"),
+            Err(error) => warn!("{endpoint} refused {method} {id}: {error:#}"),
+        }
+        answer
     }
 
     async fn await_response(&mut self, endpoint: BinanceEndpoint, id: u64) -> Result<()> {
