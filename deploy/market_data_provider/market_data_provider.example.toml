@@ -4,7 +4,7 @@
 port = 6666                                          # strategies name 127.0.0.1:6666 as provider_address
 # false serves live data; true serves the venues' demo data. Strategies must ask for the same.
 # The provider fetches a strategy's instrument rules from Binance exchangeInfo on demand, and
-# refreshes them every 24 hours; a strategy naming an instrument it cannot get rules for stops the
+# refreshes them on the first request after 24 hours; a strategy naming an instrument it cannot get rules for stops the
 # provider with that instrument in the log.
 demo = true
 process_metrics_interval_seconds = 10                # how often to log the process's CPU, memory, threads and TCP traffic

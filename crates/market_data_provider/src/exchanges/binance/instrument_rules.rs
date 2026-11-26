@@ -7,25 +7,29 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::Value;
+use tracing::info;
 use url::Url;
 
 use super::endpoint::{
     FUTURES_EXCHANGE_INFO_DEMO, FUTURES_EXCHANGE_INFO_LIVE, SPOT_EXCHANGE_INFO_DEMO,
     SPOT_EXCHANGE_INFO_LIVE,
 };
+use super::venue_stream::venue_symbol;
 use layline::http::REQUEST_TIMEOUT;
-use layline::types::{Currency, Instrument, InstrumentRule, InstrumentRules, UnderlyingType};
+use layline::types::{Instrument, InstrumentRule, InstrumentRules, UnderlyingType};
 
 const TRADING_STATUS: &str = "TRADING";
 /// A halt is temporary: subscribing now means the first event arrives when trading resumes.
 const TRADING_HALT_STATUS: &str = "TRADING_HALT";
 /// Fetches the rules of `instruments`, which must all be Binance instruments. A requested
 /// instrument the response does not list, or lists as not trading, is a configuration error and
-/// panics; a failed HTTP request is returned to the caller, which lets the strategy retry.
+/// panics; a failed HTTP request is returned to the caller, which decides whether the request
+/// fails or a refresh backs off.
 pub(crate) async fn fetch_instrument_rules(
     demo: bool,
     instruments: &HashSet<Instrument>,
 ) -> Result<InstrumentRules> {
+    info!("fetching the rules of {instruments} from /exchangeInfo");
     let client = Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -77,7 +81,7 @@ fn exchange_info_url(demo: bool, underlying_type: UnderlyingType) -> Url {
 fn with_symbols(mut url: Url, instruments: &HashSet<Instrument>) -> Url {
     let symbols: Vec<String> = instruments
         .iter()
-        .map(|instrument| request_symbol(*instrument))
+        .map(|instrument| venue_symbol(*instrument))
         .collect();
     let symbols = serde_json::to_string(&symbols).expect("a list of strings is valid JSON");
     url.query_pairs_mut().append_pair("symbols", &symbols);
@@ -107,7 +111,7 @@ fn build_rules(instruments: &HashSet<Instrument>, exchange_info: &Value) -> Inst
         .expect("exchangeInfo has a symbols array");
     let mut rules = InstrumentRules::new();
     for &instrument in instruments {
-        let exchange_symbol = request_symbol(instrument);
+        let exchange_symbol = venue_symbol(instrument);
         // The strategy explicitly listed this instrument; when the exchange does not return it,
         // the configuration is wrong. Fail fast and name the instrument so the operator can fix it.
         let symbol = symbols
@@ -171,31 +175,6 @@ fn build_rules(instruments: &HashSet<Instrument>, exchange_info: &Value) -> Inst
     rules
 }
 
-/// The symbol to ask `exchangeInfo` for. Spot stock tokens add a `B` to the ticker, so `AAPL` is
-/// `AAPLB` there and `AAPL` on perpetuals. Once the response arrives, only its `exchange_symbol`
-/// is used.
-fn request_symbol(instrument: Instrument) -> String {
-    let base = match instrument.underlying_type {
-        UnderlyingType::Spot => spot_base_asset(instrument.base),
-        UnderlyingType::Perpetual => instrument.base.to_string(),
-    };
-    let quote = instrument.quote;
-    format!("{base}{quote}")
-}
-
-fn spot_base_asset(currency: Currency) -> String {
-    match currency {
-        Currency::Aapl => "AAPLB".to_owned(),
-        Currency::Msft => "MSFTB".to_owned(),
-        Currency::Googl => "GOOGLB".to_owned(),
-        Currency::Amzn => "AMZNB".to_owned(),
-        Currency::Nvda => "NVDAB".to_owned(),
-        Currency::Meta => "METAB".to_owned(),
-        Currency::Tsla => "TSLAB".to_owned(),
-        _ => currency.to_string(),
-    }
-}
-
 fn decimal(text: &str) -> Decimal {
     Decimal::from_str(text).unwrap_or_else(|error| panic!("{text:?} is not a decimal: {error}"))
 }
@@ -206,10 +185,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use layline::types::{Currency, Exchange};
 
     fn instrument(base: Currency, underlying_type: UnderlyingType) -> Instrument {
         Instrument {
-            exchange: layline::types::Exchange::Binance,
+            exchange: Exchange::Binance,
             base,
             quote: Currency::Usdt,
             underlying_type,
@@ -222,22 +202,6 @@ mod tests {
             {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
             notional_filter,
         ])
-    }
-
-    #[test]
-    fn stock_tokens_are_spelled_with_a_b_only_on_spot() {
-        assert_eq!(
-            "AAPLBUSDT",
-            request_symbol(instrument(Currency::Aapl, UnderlyingType::Spot))
-        );
-        assert_eq!(
-            "AAPLUSDT",
-            request_symbol(instrument(Currency::Aapl, UnderlyingType::Perpetual))
-        );
-        assert_eq!(
-            "BTCUSDT",
-            request_symbol(instrument(Currency::Btc, UnderlyingType::Spot))
-        );
     }
 
     #[test]

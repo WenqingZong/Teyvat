@@ -6,10 +6,9 @@ mod synthetic;
 mod websocket;
 mod worker;
 
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use strum::IntoEnumIterator;
 
 use crate::gnosis_client::GnosisClient;
@@ -20,19 +19,30 @@ use layline::types::{Exchange, Instrument, InstrumentRules, MarketData, Topic};
 use okx::OkxConnector;
 pub(crate) use router::ExchangeRouter;
 
-/// Fetches the rules for `instruments` from their exchange. OKX is still synthetic and has no
+/// Fetches the rules for `instruments` from their exchanges. OKX is still synthetic and has no
 /// rules; its dummy arm keeps this dispatch exchange-agnostic until the real connector lands.
 pub(crate) async fn fetch_instrument_rules(
-    exchange: Exchange,
     demo: bool,
     instruments: &HashSet<Instrument>,
 ) -> Result<InstrumentRules> {
-    match exchange {
-        Exchange::Binance => {
-            binance::instrument_rules::fetch_instrument_rules(demo, instruments).await
-        }
-        Exchange::Okx => Ok(InstrumentRules::new()),
+    let mut instruments_by_exchange: HashMap<Exchange, HashSet<Instrument>> = HashMap::new();
+    for instrument in instruments {
+        instruments_by_exchange
+            .entry(instrument.exchange)
+            .or_default()
+            .insert(*instrument);
     }
+    let mut rules = InstrumentRules::new();
+    for (exchange, instruments) in instruments_by_exchange {
+        let fetched = match exchange {
+            Exchange::Binance => {
+                binance::instrument_rules::fetch_instrument_rules(demo, &instruments).await
+            }
+            Exchange::Okx => Ok(InstrumentRules::new()),
+        };
+        rules.extend(fetched.with_context(|| format!("failed to fetch the {exchange} rules"))?);
+    }
+    Ok(rules)
 }
 
 /// What every connector may need besides its venue; each worker gets its own clone.
@@ -40,7 +50,6 @@ pub(crate) async fn fetch_instrument_rules(
 pub(crate) struct ConnectorContext {
     pub(crate) gnosis_client: GnosisClient,
     pub(crate) notifier: Notifier,
-    pub(crate) instrument_rules: Arc<RwLock<InstrumentRules>>,
 }
 
 /// One venue connection, driven by its exchange's dedicated single-threaded runtime, so it need not be `Send`.
@@ -92,7 +101,7 @@ pub(crate) mod tests {
             UnderlyingType::Spot,
         );
         assert!(
-            fetch_instrument_rules(Exchange::Okx, false, &HashSet::from([instrument]))
+            fetch_instrument_rules(false, &HashSet::from([instrument]))
                 .await
                 .expect("the OKX dummy never fails")
                 .is_empty()
@@ -104,7 +113,6 @@ pub(crate) mod tests {
         ConnectorContext {
             gnosis_client: unreachable_gnosis_client(),
             notifier: Notifier::Log,
-            instrument_rules: Arc::new(RwLock::new(InstrumentRules::new())),
         }
     }
 }

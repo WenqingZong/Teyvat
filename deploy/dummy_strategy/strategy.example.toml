@@ -16,7 +16,7 @@ phanes_celestia_public_key = "<copied from /etc/market_data_provider/market_data
 
 # Exchange, then instrument (BASE-QUOTE-SPOT or BASE-QUOTE-PERP), then market data types, as in the
 # provider's HTTP API. The provider fetches each instrument's rules from the exchange on demand and
-# refreshes them every 24 hours; a topic whose rules are unavailable stops the provider and names the instrument.
+# refreshes them on the first request after 24 hours; a topic whose rules are unavailable stops the provider and names the instrument.
 # A stock's spot pair is its bStock: AAPL-USDT-SPOT is AAPLB/USDT on the exchange, while
 # AAPL-USDT-PERP is AAPLUSDT. Demo testnet lists all seven bStocks but not AAPL/MSFT perpetuals, so
 # those two perpetuals can only be added when demo = false.

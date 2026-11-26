@@ -79,7 +79,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
-use crate::types::{Instrument, InstrumentRule, MarketDataType, StrategyName, Topic};
+use crate::types::{Exchange, Instrument, InstrumentRule, MarketDataType, StrategyName, Topic};
 
 pub const HEALTH_PATH: &str = "/health";
 pub const INFO_PATH: &str = "/info";
@@ -206,48 +206,69 @@ pub struct ProviderInfo {
     pub lease_duration_seconds: u64,
 }
 
+/// The tree every message nests its instruments in: exchange, then instrument key.
+type InstrumentTree<Leaf> = BTreeMap<Exchange, BTreeMap<String, Leaf>>;
+
+/// Folds `(instrument, leaf)` pairs into the wire tree.
+fn nest<'instrument, Leaf>(
+    entries: impl Iterator<Item = (&'instrument Instrument, Leaf)>,
+) -> InstrumentTree<Leaf> {
+    let mut tree = InstrumentTree::new();
+    for (instrument, leaf) in entries {
+        tree.entry(instrument.exchange)
+            .or_default()
+            .insert(instrument.key(), leaf);
+    }
+    tree
+}
+
+/// Parses every instrument key of the wire tree.
+fn unnest<Leaf>(tree: InstrumentTree<Leaf>) -> Result<Vec<(Instrument, Leaf)>, String> {
+    let mut entries = Vec::new();
+    for (exchange, instruments) in tree {
+        for (key, leaf) in instruments {
+            entries.push((Instrument::from_key(exchange, &key)?, leaf));
+        }
+    }
+    Ok(entries)
+}
+
 /// `HashSet<Topic>` as `{exchange: {instrument: [market_data_type, ...]}}`, for
 /// `#[serde(with = "topic_set")]`; strategy configs list their topics the same way.
 pub mod topic_set {
-    use std::collections::{BTreeMap, BTreeSet, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
 
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use crate::types::{Exchange, Instrument, MarketDataType, Topic};
-
-    type Tree = BTreeMap<Exchange, BTreeMap<String, BTreeSet<MarketDataType>>>;
+    use super::{InstrumentTree, nest, unnest};
+    use crate::types::{Instrument, MarketDataType, Topic};
 
     pub fn serialize<SerializerType: Serializer>(
         topics: &HashSet<Topic>,
         serializer: SerializerType,
     ) -> Result<SerializerType::Ok, SerializerType::Error> {
-        let mut tree: Tree = BTreeMap::new();
+        let mut leaves: HashMap<Instrument, BTreeSet<MarketDataType>> = HashMap::new();
         for topic in topics {
-            tree.entry(topic.instrument.exchange)
-                .or_default()
-                .entry(topic.instrument.key())
+            leaves
+                .entry(topic.instrument)
                 .or_default()
                 .insert(topic.market_data_type);
         }
-        tree.serialize(serializer)
+        nest(leaves.iter()).serialize(serializer)
     }
 
     pub fn deserialize<'de, DeserializerType: Deserializer<'de>>(
         deserializer: DeserializerType,
     ) -> Result<HashSet<Topic>, DeserializerType::Error> {
-        let tree = Tree::deserialize(deserializer)?;
+        let tree = InstrumentTree::<BTreeSet<MarketDataType>>::deserialize(deserializer)?;
         let mut topics = HashSet::new();
-        for (exchange, instruments) in tree {
-            for (key, market_data_types) in instruments {
-                let instrument =
-                    Instrument::from_key(exchange, &key).map_err(DeserializeError::custom)?;
-                for market_data_type in market_data_types {
-                    topics.insert(Topic {
-                        instrument,
-                        market_data_type,
-                    });
-                }
+        for (instrument, market_data_types) in unnest(tree).map_err(DeserializeError::custom)? {
+            for market_data_type in market_data_types {
+                topics.insert(Topic {
+                    instrument,
+                    market_data_type,
+                });
             }
         }
         Ok(topics)
@@ -257,42 +278,29 @@ pub mod topic_set {
 /// `HashMap<Instrument, InstrumentSubscription>` as
 /// `{exchange: {instrument: {instrument_rule: ..., market_data_type: result}}}`.
 mod instrument_subscriptions {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::HashMap;
 
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::InstrumentSubscription;
-    use crate::types::{Exchange, Instrument};
+    use super::{InstrumentSubscription, InstrumentTree, nest, unnest};
+    use crate::types::Instrument;
 
     pub fn serialize<SerializerType: Serializer>(
         subscriptions: &HashMap<Instrument, InstrumentSubscription>,
         serializer: SerializerType,
     ) -> Result<SerializerType::Ok, SerializerType::Error> {
-        let mut tree: BTreeMap<Exchange, BTreeMap<String, &InstrumentSubscription>> =
-            BTreeMap::new();
-        for (instrument, subscription) in subscriptions {
-            tree.entry(instrument.exchange)
-                .or_default()
-                .insert(instrument.key(), subscription);
-        }
-        tree.serialize(serializer)
+        nest(subscriptions.iter()).serialize(serializer)
     }
 
     pub fn deserialize<'de, DeserializerType: Deserializer<'de>>(
         deserializer: DeserializerType,
     ) -> Result<HashMap<Instrument, InstrumentSubscription>, DeserializerType::Error> {
-        let tree = BTreeMap::<Exchange, BTreeMap<String, InstrumentSubscription>>::deserialize(
-            deserializer,
-        )?;
-        let mut subscriptions = HashMap::new();
-        for (exchange, instruments) in tree {
-            for (key, subscription) in instruments {
-                let instrument =
-                    Instrument::from_key(exchange, &key).map_err(DeserializeError::custom)?;
-                subscriptions.insert(instrument, subscription);
-            }
-        }
+        let tree = InstrumentTree::<InstrumentSubscription>::deserialize(deserializer)?;
+        let subscriptions = unnest(tree)
+            .map_err(DeserializeError::custom)?
+            .into_iter()
+            .collect();
         Ok(subscriptions)
     }
 }

@@ -1,6 +1,6 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumIter, EnumString};
+use strum::{Display, EnumString};
 
 #[derive(
     Archive,
@@ -9,7 +9,6 @@ use strum::{Display, EnumIter, EnumString};
     Debug,
     Deserialize,
     Display,
-    EnumIter,
     EnumString,
     Eq,
     Hash,
@@ -34,24 +33,9 @@ pub enum Currency {
     Usdt,
 }
 
-impl Currency {
-    /// Every exchange we support quotes in a stablecoin; we support spot and U-margined
-    /// perpetuals only, so USDT and USDC are the quote currencies.
-    pub const fn is_quote_currency(self) -> bool {
-        matches!(self, Self::Usdt | Self::Usdc)
-    }
-
-    /// An asset that can be a base; stablecoins quote, they never trade as the base.
-    pub const fn is_base_currency(self) -> bool {
-        !self.is_quote_currency()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-
-    use strum::IntoEnumIterator;
 
     use super::*;
 
@@ -72,17 +56,6 @@ mod tests {
         ] {
             assert_eq!(text, currency.to_string());
             assert_eq!(Ok(currency), Currency::from_str(text));
-        }
-    }
-
-    #[test]
-    fn stablecoins_are_the_only_quote_currencies() {
-        for currency in Currency::iter() {
-            assert_eq!(
-                matches!(currency, Currency::Usdt | Currency::Usdc),
-                currency.is_quote_currency()
-            );
-            assert_eq!(!currency.is_quote_currency(), currency.is_base_currency());
         }
     }
 }
