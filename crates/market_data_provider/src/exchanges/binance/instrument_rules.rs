@@ -15,6 +15,7 @@ use super::endpoint::{
     SPOT_EXCHANGE_INFO_LIVE,
 };
 use super::venue_stream::venue_symbol;
+use crate::utils::to_pretty_json;
 use layline::http::REQUEST_TIMEOUT;
 use layline::types::{Instrument, InstrumentRule, InstrumentRules, UnderlyingType};
 
@@ -200,11 +201,6 @@ fn build_rules(
     rules
 }
 
-/// The JSON a `jq` user reads: pretty-printed over several lines, so a filter is one line each.
-fn to_pretty_json(value: &Value) -> String {
-    serde_json::to_string_pretty(value).expect("a JSON value always serializes")
-}
-
 fn decimal(text: &str) -> Decimal {
     Decimal::from_str(text).unwrap_or_else(|error| panic!("{text:?} is not a decimal: {error}"))
 }
@@ -303,16 +299,16 @@ mod tests {
         );
     }
 
-    /// The log excerpt must read like `jq`: two-space indentation, one field per line.
+    /// One field per line, indented by four spaces so a filter stays one line.
     #[test]
-    fn symbol_objects_are_printed_as_jq_does() {
+    fn symbol_objects_are_printed_with_four_space_indentation() {
         let symbol = json!({
             "symbol": "AAPLBUSDT",
             "status": "TRADING",
             "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}],
         });
         assert_eq!(
-            "{\n  \"filters\": [\n    {\n      \"filterType\": \"PRICE_FILTER\",\n      \"tickSize\": \"0.01\"\n    }\n  ],\n  \"status\": \"TRADING\",\n  \"symbol\": \"AAPLBUSDT\"\n}",
+            "{\n    \"filters\": [\n        {\n            \"filterType\": \"PRICE_FILTER\",\n            \"tickSize\": \"0.01\"\n        }\n    ],\n    \"status\": \"TRADING\",\n    \"symbol\": \"AAPLBUSDT\"\n}",
             to_pretty_json(&symbol)
         );
     }

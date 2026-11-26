@@ -1,6 +1,20 @@
 use std::num::NonZeroU64;
 
+use serde::Serialize;
+use serde_json::ser::{PrettyFormatter, Serializer};
+
 use layline::time::get_current_timestamp_nanoseconds;
+
+/// Pretty JSON with four-space indentation, the style every logged JSON body uses.
+pub(crate) fn to_pretty_json<T: Serialize>(value: &T) -> String {
+    let formatter = PrettyFormatter::with_indent(b"    ");
+    let mut bytes = Vec::new();
+    let mut serializer = Serializer::with_formatter(&mut bytes, formatter);
+    value
+        .serialize(&mut serializer)
+        .expect("a JSON value always serializes");
+    String::from_utf8(bytes).expect("serde_json writes UTF-8")
+}
 
 /// Wall-clock source, so tests can pin timestamps. Timers use tokio time, which tests pause instead.
 pub(crate) trait Clock {

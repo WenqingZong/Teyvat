@@ -27,7 +27,7 @@ use crate::aggregation::VolumeWeightedAveragePrice;
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::gnosis_client::{GnosisClient, GnosisSource, fetch_gnosis_or_panic};
-use crate::utils::{Clock, RealClock};
+use crate::utils::{Clock, RealClock, to_pretty_json};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use layline::bark::Notifier;
 use layline::gnosis::binance::BinanceSbeApiKey;
@@ -428,7 +428,7 @@ where
             id,
         };
         let text = serde_json::to_string(&request)?;
-        let pretty = serde_json::to_string_pretty(&request)?;
+        let pretty = to_pretty_json(&request);
         info!("sending to {endpoint}:\n{pretty}");
         self.endpoint_state_mut(endpoint)
             .connection
