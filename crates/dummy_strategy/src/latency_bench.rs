@@ -48,8 +48,13 @@ struct Report {
 
 /// Records latencies per message and hands each window to the reporter, a task off the hot path that
 /// logs percentiles; the reading thread only records, so measuring does not delay the messages
-/// measured.
+/// measured. Without a report interval it records nothing.
 pub struct LatencyBench {
+    statistics_option: Option<LatencyStatistics>,
+}
+
+/// The state behind a [`LatencyBench`] that was given a report interval.
+struct LatencyStatistics {
     report_interval: Duration,
     window_start_nanoseconds: NonZeroU64,
     samples: HashMap<Topic, LatencySamples>,
@@ -57,13 +62,30 @@ pub struct LatencyBench {
 }
 
 impl LatencyBench {
-    /// Starts the reporter on `runtime`, off the hot path; it stops once the bench is dropped.
-    pub fn new(report_interval: Duration, runtime: &Handle) -> Self {
-        let (reports, receiver) = unbounded_channel();
-        runtime.spawn(log_reports(receiver));
-        Self::reporting_to(report_interval, reports)
+    /// Starts the reporter on `runtime` when `report_interval_option` is `Some`, off the hot path; it
+    /// stops once the bench is dropped.
+    pub fn new(report_interval_option: Option<Duration>, runtime: &Handle) -> Self {
+        let statistics_option = report_interval_option.map(|report_interval| {
+            let (reports, receiver) = unbounded_channel();
+            runtime.spawn(log_reports(receiver));
+            LatencyStatistics::reporting_to(report_interval, reports)
+        });
+        Self { statistics_option }
     }
 
+    fn record(
+        &mut self,
+        topic: Topic,
+        latency_metric: LatencyMetric,
+        received_at_nanoseconds: NonZeroU64,
+    ) {
+        if let Some(statistics) = &mut self.statistics_option {
+            statistics.record(topic, latency_metric, received_at_nanoseconds);
+        }
+    }
+}
+
+impl LatencyStatistics {
     fn reporting_to(report_interval: Duration, reports: UnboundedSender<Report>) -> Self {
         Self {
             report_interval,
@@ -304,18 +326,34 @@ mod tests {
     #[test]
     fn each_window_is_reported_per_topic_and_overall() {
         let (reports, mut receiver) = unbounded_channel();
-        let mut bench = LatencyBench::reporting_to(Duration::from_secs(3600), reports);
+        let mut bench = LatencyBench {
+            statistics_option: Some(LatencyStatistics::reporting_to(
+                Duration::from_secs(3600),
+                reports,
+            )),
+        };
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 2_000, 5_000)), now);
         bench.on_market_data(&trade(latency_metric(now.get(), 1_000, 3_000)), now);
         assert!(receiver.try_recv().is_err(), "the window is still open");
 
-        bench.report_interval = Duration::ZERO;
+        bench
+            .statistics_option
+            .as_mut()
+            .expect("the bench measures")
+            .report_interval = Duration::ZERO;
         bench.on_market_data(&trade(latency_metric(now.get(), 1_000, 3_000)), now);
         let report = receiver
             .try_recv()
             .expect("the window is expected to close");
-        assert!(bench.samples.is_empty());
+        assert!(
+            bench
+                .statistics_option
+                .as_ref()
+                .expect("the bench measures")
+                .samples
+                .is_empty()
+        );
         let lines = report_lines(report);
         assert_eq!(4, lines.len(), "{lines:#?}");
         assert!(
@@ -341,14 +379,25 @@ mod tests {
     fn a_stopped_reporter_panics() {
         let (reports, receiver) = unbounded_channel();
         drop(receiver);
-        let mut bench = LatencyBench::reporting_to(Duration::ZERO, reports);
+        let mut bench = LatencyBench {
+            statistics_option: Some(LatencyStatistics::reporting_to(Duration::ZERO, reports)),
+        };
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 1, 1)), now);
     }
 
     #[tokio::test]
+    async fn without_a_report_interval_nothing_is_measured() {
+        let mut bench = LatencyBench::new(None, &Handle::current());
+        let now = now_nanoseconds();
+        bench.on_market_data(&bbo(latency_metric(now.get(), 1, 1)), now);
+        bench.on_market_data(&trade(latency_metric(now.get(), 1, 1)), now);
+        assert!(bench.statistics_option.is_none());
+    }
+
+    #[tokio::test]
     async fn reporter_runs_until_the_bench_is_dropped() {
-        let bench = LatencyBench::new(Duration::from_secs(60), &Handle::current());
+        let bench = LatencyBench::new(Some(Duration::from_secs(60)), &Handle::current());
         drop(bench);
     }
 }

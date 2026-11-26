@@ -155,10 +155,10 @@ Hosts and paths (SSH aliases `Osaka`, `Tokyo` exist locally):
 | `Tokyo` | same paths | same |
 
 Assumptions about the run, which must not be changed by the watcher: the strategy reports latency
-every 30 minutes (`--report-interval-seconds=1800`, so windows compare across nights), and Osaka
-runs the demo environment while Tokyo runs live; read each host's `strategy.toml` for the
-exact topic set (Tokyo includes `AGGREGATE_TRADE`; demo testnet does not list AAPL/MSFT
-perpetuals).
+every 30 minutes when started with `--report-interval-seconds=1800` (so windows compare across
+nights; without the flag it measures nothing), and Osaka runs the demo environment while Tokyo runs
+live; read each host's `strategy.toml` for the exact topic set (Tokyo includes `AGGREGATE_TRADE`;
+demo testnet does not list AAPL/MSFT perpetuals).
 
 Patrol every two hours, scheduled with DSH's scheduler (`this_session`,
 `FREQ=HOURLY;INTERVAL=2`), not with cron, so the reports arrive in the conversation. Per host:

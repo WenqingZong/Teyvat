@@ -165,7 +165,7 @@ deploy/dummy_strategy/dummy_strategy.sh install
 - `[celestia_client]`：安装时从行情服务配置拷来，不用手填；上报的进程名就是 `strategy_name`；
 - `[topics.<交易所>]`：每行一个品种（`BTC-USDT-SPOT`、`BTC-USDT-PERP`），值为行情类型列表（`["BBO", "TRADE"]`），写法与行情服务 HTTP API 相同。
 
-`--report-interval-seconds 60`（延迟报告间隔）是 dummy_strategy 自己的参数，写在 unit 的 `ExecStart` 里，不在 `strategy.toml`。
+`--report-interval-seconds 60`（延迟报告间隔）是 dummy_strategy 自己的参数，写在 unit 的 `ExecStart` 里，不在 `strategy.toml`；不传就完全不统计延迟，内存小的机器（如 Osaka）可以省掉。
 
 | 场景 | 命令 |
 |---|---|

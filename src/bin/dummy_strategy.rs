@@ -33,15 +33,15 @@ static LOG_GUARD: Mutex<Option<WorkerGuard>> = Mutex::new(None);
 
 #[derive(Parser)]
 #[command(
-    about = "Development stand-in strategy: reads the topics of its config and logs latency percentiles"
+    about = "Development stand-in strategy: reads the topics of its config and optionally logs latency percentiles"
 )]
 struct Arguments {
     /// TOML config, chmod 600: strategy name, provider address, demo and topics.
     #[arg(long, default_value = "strategy.toml")]
     config: PathBuf,
-    /// How often to log latency percentiles over the samples since the last report.
-    #[arg(long, default_value_t = 60)]
-    report_interval_seconds: u64,
+    /// Log latency percentiles every this many seconds; omit to measure nothing.
+    #[arg(long)]
+    report_interval_seconds: Option<u64>,
 }
 
 fn main() {
@@ -52,8 +52,8 @@ fn main() {
     exit_on_panic();
     let build_profile = build_profile();
     info!("{build_profile} build of commit {GIT_COMMIT_HASH}");
-    let report_interval = Duration::from_secs(arguments.report_interval_seconds);
-    if let Err(error) = run(&arguments.config, report_interval) {
+    let report_interval_option = arguments.report_interval_seconds.map(Duration::from_secs);
+    if let Err(error) = run(&arguments.config, report_interval_option) {
         // `{:?}` keeps the whole context chain.
         exit_with_error(&format!("fatal: {error:?}"));
     }
@@ -79,7 +79,7 @@ fn flush_logs_and_exit(code: i32) -> ! {
     exit(code);
 }
 
-fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
+fn run(config_path: &Path, report_interval_option: Option<Duration>) -> Result<()> {
     let StrategyConfig {
         strategy_name,
         provider_address,
@@ -123,7 +123,7 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
     let initial_instrument_count = instrument_rules.borrow().len();
     info!("received instrument rules for {initial_instrument_count} instruments");
     background.spawn(provider_session.resubscribe_forever(subscriptions.clone()));
-    let mut strategy = LatencyBench::new(report_interval, background.handle());
+    let mut strategy = LatencyBench::new(report_interval_option, background.handle());
     MarketDataReader::open(&subscriptions)?.run(|data, received_at_nanoseconds| {
         strategy.on_market_data(&data, received_at_nanoseconds)
     })
