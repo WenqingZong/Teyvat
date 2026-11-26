@@ -1,4 +1,5 @@
 mod endpoint;
+pub(crate) mod instrument_rules;
 mod message;
 mod sbe;
 mod venue_stream;
@@ -6,6 +7,7 @@ mod venue_stream;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::pending;
 use std::num::NonZeroU64;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
@@ -32,7 +34,8 @@ use layline::bark::Notifier;
 use layline::gnosis::binance::BinanceSbeApiKey;
 use layline::types::ConnectedApi;
 use layline::types::{
-    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Topic, Trade,
+    Bbo, Exchange, Instrument, InstrumentRules, LatencyMetric, MarketData, MarketDataType, Topic,
+    Trade,
 };
 use message::{
     Request, Response, TextFrame, classify_text_frame, event_to_market_data, taker_side,
@@ -83,6 +86,7 @@ pub(crate) struct BinanceConnector<
     endpoint_set: BinanceEndpointSet<WebSocket>,
     /// The SBE API key, fetched on first need.
     sbe_api_key: Option<SecretString>,
+    instrument_rules: Arc<RwLock<InstrumentRules>>,
     /// Parsed but not yet handed out; one SBE frame can carry several trades.
     pending: VecDeque<MarketData>,
     next_request_id: u64,
@@ -117,7 +121,7 @@ where
     /// Fails the whole batch if any endpoint fails, unsubscribing what the batch already subscribed.
     /// An endpoint that cannot be connected to stops the provider instead: see `connect_or_panic`.
     async fn subscribe(&mut self, topics: &HashSet<Topic>) -> Result<()> {
-        let streams_by_endpoint = group_streams_by_endpoint(topics);
+        let streams_by_endpoint = group_streams_by_endpoint(topics, &self.instrument_rules);
         info!("subscribing {}", describe_streams(&streams_by_endpoint));
         let mut subscribed = Vec::new();
         for (endpoint, streams) in streams_by_endpoint {
@@ -137,7 +141,7 @@ where
     }
 
     async fn unsubscribe(&mut self, topics: &HashSet<Topic>) -> Result<()> {
-        let streams_by_endpoint = group_streams_by_endpoint(topics);
+        let streams_by_endpoint = group_streams_by_endpoint(topics, &self.instrument_rules);
         info!("unsubscribing {}", describe_streams(&streams_by_endpoint));
         let mut first_error_option = None;
         for (endpoint, streams) in streams_by_endpoint {
@@ -214,6 +218,7 @@ where
         key_source: KeySource,
         alert: Alerter,
         clock: TimeSource,
+        instrument_rules: Arc<RwLock<InstrumentRules>>,
     ) -> Self {
         info!("BinanceConnector::new is called, demo: {demo}");
         let endpoints = EndpointSet::new(create_websocket, HEARTBEAT);
@@ -224,6 +229,7 @@ where
             clock,
             endpoint_set: endpoints,
             sbe_api_key: None,
+            instrument_rules,
             pending: VecDeque::new(),
             next_request_id: 1,
         }
@@ -668,13 +674,22 @@ fn retry_delay(failures: u32) -> Duration {
     layline::backoff::exponential_backoff(failures, FIRST_RETRY_DELAY, MAX_RETRY_DELAY)
 }
 
-fn group_streams_by_endpoint(topics: &HashSet<Topic>) -> BTreeMap<BinanceEndpoint, TopicsByKey> {
+fn group_streams_by_endpoint(
+    topics: &HashSet<Topic>,
+    instrument_rules: &RwLock<InstrumentRules>,
+) -> BTreeMap<BinanceEndpoint, TopicsByKey> {
+    let instrument_rules = instrument_rules
+        .read()
+        .expect("no code panics while holding the instrument rules");
     let mut groups: BTreeMap<BinanceEndpoint, TopicsByKey> = BTreeMap::new();
     for topic in topics {
+        let rule = instrument_rules
+            .get(&topic.instrument)
+            .expect("instrument rules are fetched before a Binance topic is subscribed");
         groups
             .entry(endpoint_for_topic(topic))
             .or_default()
-            .entry(stream_name(topic))
+            .entry(stream_name(topic, &rule.exchange_symbol))
             .or_default()
             .push(*topic);
     }
@@ -698,7 +713,7 @@ fn describe_streams(streams_by_endpoint: &BTreeMap<BinanceEndpoint, TopicsByKey>
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use rust_decimal::{Decimal, dec};
     use serde_json::{Value, json};
@@ -719,7 +734,10 @@ mod tests {
     use crate::utils::tests::MockClock;
     use layline::gnosis::{Gnosis, GnosisId};
     use layline::testing::{test_instrument, test_topic};
-    use layline::types::{Bbo, Currency, MarketDataType, Side, UnderlyingType};
+    use layline::types::{
+        Bbo, Currency, Exchange, InstrumentRule, InstrumentRules, MarketDataType, Side,
+        UnderlyingType,
+    };
     use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
 
     const SBE_API_KEY: &str = "dummy-sbe-api-key";
@@ -732,6 +750,29 @@ mod tests {
 
     type TestConnector =
         BinanceConnector<MockWebSocketClient, MockGnosisSource, RecordingAlert, MockClock>;
+
+    /// Rules for the BTC/ETH pairs the mock venue serves; production rules come from `exchangeInfo`.
+    fn instrument_rules() -> Arc<RwLock<InstrumentRules>> {
+        let mut rules = InstrumentRules::new();
+        for base in [Currency::Btc, Currency::Eth] {
+            for underlying_type in [UnderlyingType::Spot, UnderlyingType::Perpetual] {
+                let instrument =
+                    test_instrument(Exchange::Binance, base, Currency::Usdt, underlying_type);
+                let quote = Currency::Usdt;
+                rules.insert(
+                    instrument,
+                    InstrumentRule {
+                        exchange_symbol: format!("{base}{quote}"),
+                        price_step: dec!(0.01),
+                        quantity_step: dec!(0.001),
+                        minimum_quantity: dec!(0.001),
+                        minimum_notional_size: dec!(5),
+                    },
+                );
+            }
+        }
+        Arc::new(RwLock::new(rules))
+    }
 
     /// The connector wired to a mock venue per endpoint that acknowledges every request, a mock Phanes
     /// granting the SBE key, a recording phone and a mock clock. Tests run on paused tokio time.
@@ -761,6 +802,7 @@ mod tests {
                 key_source,
                 alert.clone(),
                 MockClock::new(NOW_NANOSECONDS),
+                instrument_rules(),
             );
             Self {
                 demo,
@@ -1653,7 +1695,7 @@ mod tests {
         let topics = HashSet::from([spot_bbo(), spot_trade(), perpetual_bbo()]);
         assert_eq!(
             "SpotSbe [btcusdt@bestBidAsk, btcusdt@trade], FuturesPublic [btcusdt@bookTicker]",
-            describe_streams(&group_streams_by_endpoint(&topics))
+            describe_streams(&group_streams_by_endpoint(&topics, &instrument_rules()))
         );
     }
 
@@ -1670,6 +1712,7 @@ mod tests {
                 context.gnosis_client,
                 context.notifier,
                 RealClock,
+                instrument_rules(),
             );
             let topics = HashSet::from([
                 perpetual_bbo(),

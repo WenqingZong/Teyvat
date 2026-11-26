@@ -1,6 +1,6 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString};
+use strum::{Display, EnumIter, EnumString};
 
 #[derive(
     Archive,
@@ -9,6 +9,7 @@ use strum::{Display, EnumString};
     Debug,
     Deserialize,
     Display,
+    EnumIter,
     EnumString,
     Eq,
     Hash,

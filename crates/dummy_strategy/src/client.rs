@@ -7,20 +7,21 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use reqwest::{Client, StatusCode};
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tracing::{debug, error, warn};
 use url::Url;
 
 use layline::backoff::exponential_backoff;
+use layline::http::REQUEST_TIMEOUT;
 use layline::provider_api::{
-    RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest, SubscriptionResponse,
-    SubscriptionResult, group_by_reason,
+    InstrumentSubscription, RESUBSCRIBE_PATH, SUBSCRIBE_PATH, Subscription, SubscriptionRequest,
+    SubscriptionResponse, group_by_reason,
 };
-use layline::types::{StrategyName, Topic};
+use layline::types::{Instrument, InstrumentRules, StrategyName, Topic};
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Far below the provider's lease; a restarted provider gets the topics back within this interval.
 const RESUBSCRIBE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -32,6 +33,8 @@ pub struct ProviderSession {
     base_url: Url,
     request: SubscriptionRequest,
     resubscribe_interval: Duration,
+    /// The latest rules the provider sent; subscribers read them from the strategy's main loop.
+    instrument_rules_sender: watch::Sender<InstrumentRules>,
 }
 
 impl ProviderSession {
@@ -57,6 +60,7 @@ impl ProviderSession {
         topics: HashSet<Topic>,
         resubscribe_interval: Duration,
     ) -> Result<Self> {
+        let (instrument_rules_sender, _) = watch::channel(HashMap::new());
         Ok(Self {
             client: Client::builder().timeout(REQUEST_TIMEOUT).build()?,
             base_url: Url::parse(&format!("http://{provider_address}"))?,
@@ -66,13 +70,22 @@ impl ProviderSession {
                 topics,
             },
             resubscribe_interval,
+            instrument_rules_sender,
         })
+    }
+
+    /// The rules of the strategy's instruments. The provider refreshes them, and every
+    /// resubscription replaces them, so a long-running strategy never trades on a stale snapshot.
+    pub fn instrument_rules(&self) -> watch::Receiver<InstrumentRules> {
+        self.instrument_rules_sender.subscribe()
     }
 
     /// Retries until the provider accepts every topic; fails at once if it rejects a topic or
     /// refuses the request itself.
     pub async fn subscribe(&self) -> Result<Vec<Subscription>> {
-        extract_successful_subscriptions(self.post_with_retry(SUBSCRIBE_PATH).await?)
+        let response = self.post_with_retry(SUBSCRIBE_PATH).await?;
+        self.update_instrument_rules(instrument_rules_from_response(&response));
+        extract_successful_subscriptions(response.results)
     }
 
     /// Keeps the lease, and restores the subscription after the provider restarts. Never returns;
@@ -81,7 +94,10 @@ impl ProviderSession {
         loop {
             sleep(self.resubscribe_interval).await;
             match self.post(RESUBSCRIBE_PATH).await {
-                Ok(results) => report_changes(&subscriptions, &results),
+                Ok(response) => {
+                    self.update_instrument_rules(instrument_rules_from_response(&response));
+                    report_changes(&subscriptions, &response.results);
+                }
                 Err(error) if error.is::<Refusal>() => {
                     panic!("provider refused to resubscribe: {error:#}")
                 }
@@ -97,7 +113,7 @@ impl ProviderSession {
             .expect("an absolute API path joins to any http URL")
     }
 
-    async fn post(&self, path: &str) -> Result<HashMap<Topic, SubscriptionResult>> {
+    async fn post(&self, path: &str) -> Result<SubscriptionResponse> {
         let response = self
             .client
             .post(self.url_of(path))
@@ -113,16 +129,15 @@ impl ProviderSession {
             }
             bail!("provider answered {status}: {reason}");
         }
-        let response: SubscriptionResponse = response.json().await?;
-        Ok(response.results)
+        Ok(response.json().await?)
     }
 
     /// Retries until the provider answers, unless it refuses the request itself.
-    async fn post_with_retry(&self, path: &str) -> Result<HashMap<Topic, SubscriptionResult>> {
+    async fn post_with_retry(&self, path: &str) -> Result<SubscriptionResponse> {
         let mut failures = 0;
         loop {
             match self.post(path).await {
-                Ok(results) => return Ok(results),
+                Ok(response) => return Ok(response),
                 Err(error) if error.is::<Refusal>() => return Err(error),
                 Err(error) => {
                     failures += 1;
@@ -133,6 +148,10 @@ impl ProviderSession {
                 }
             }
         }
+    }
+
+    fn update_instrument_rules(&self, instrument_rules: InstrumentRules) {
+        self.instrument_rules_sender.send_replace(instrument_rules);
     }
 }
 
@@ -145,15 +164,21 @@ struct Refusal {
 }
 
 fn extract_successful_subscriptions(
-    results: HashMap<Topic, SubscriptionResult>,
+    results: HashMap<Instrument, InstrumentSubscription>,
 ) -> Result<Vec<Subscription>> {
-    let mut subscriptions = Vec::with_capacity(results.len());
+    let mut subscriptions = Vec::new();
     let mut rejections = HashMap::new();
-    for (topic, subscription_result) in results {
-        match subscription_result {
-            Ok(path) => subscriptions.push(Subscription { topic, path }),
-            Err(reason) => {
-                rejections.insert(topic, reason);
+    for (instrument, subscription) in results {
+        for (market_data_type, subscription_result) in subscription.results {
+            let topic = Topic {
+                instrument,
+                market_data_type,
+            };
+            match subscription_result {
+                Ok(path) => subscriptions.push(Subscription { topic, path }),
+                Err(reason) => {
+                    rejections.insert(topic, reason);
+                }
             }
         }
     }
@@ -161,6 +186,19 @@ fn extract_successful_subscriptions(
         bail!(describe_rejections(&rejections));
     }
     Ok(subscriptions)
+}
+
+fn instrument_rules_from_response(response: &SubscriptionResponse) -> InstrumentRules {
+    response
+        .results
+        .iter()
+        .filter_map(|(instrument, subscription)| {
+            subscription
+                .instrument_rule_option
+                .clone()
+                .map(|rule| (*instrument, rule))
+        })
+        .collect()
 }
 
 /// One line per reason, then its topics one per line, indented under it:
@@ -180,26 +218,25 @@ fn describe_rejections(rejections: &HashMap<Topic, String>) -> String {
     lines.join("\n")
 }
 
-fn report_changes(subscriptions: &[Subscription], results: &HashMap<Topic, SubscriptionResult>) {
+fn report_changes(
+    subscriptions: &[Subscription],
+    results: &HashMap<Instrument, InstrumentSubscription>,
+) {
     for subscription in subscriptions {
-        match results.get(&subscription.topic) {
+        let topic = subscription.topic;
+        let result = results
+            .get(&topic.instrument)
+            .and_then(|subscription| subscription.results.get(&topic.market_data_type));
+        match result {
             // The provider derives ring paths from the strategy and the topic, so they never move.
-            Some(Ok(path)) => assert_eq!(
-                subscription.path, *path,
-                "provider moved {}",
-                subscription.topic
-            ),
+            Some(Ok(path)) => assert_eq!(subscription.path, *path, "provider moved {topic}"),
             Some(Err(reason)) => {
-                let topic = subscription.topic;
                 error!("provider rejected {topic} on resubscription: {reason}");
             }
-            None => panic!(
-                "provider answers every topic, but not {} on resubscription",
-                subscription.topic
-            ),
+            None => panic!("provider answers every topic, but not {topic} on resubscription"),
         }
     }
-    debug!("resubscribed to {} topics", results.len());
+    debug!("resubscribed to {} instruments", results.len());
 }
 
 #[cfg(test)]
@@ -210,11 +247,15 @@ mod tests {
     use std::sync::mpsc::{Sender, channel};
     use std::thread::spawn as spawn_thread;
 
+    use rust_decimal::dec;
     use tokio::spawn;
     use tokio::task::spawn_blocking;
 
     use super::*;
-    use layline::types::{Currency, Exchange, Instrument, MarketDataType, UnderlyingType};
+    use layline::types::{
+        Currency, Exchange, Instrument, InstrumentRule, InstrumentRules, MarketDataType,
+        UnderlyingType,
+    };
 
     const STRATEGY_NAME: &str = "test_strategy";
     const TEST_RESUBSCRIBE_INTERVAL: Duration = Duration::from_millis(50);
@@ -236,14 +277,22 @@ mod tests {
         listener: &TcpListener,
         subscription_result: &Result<PathBuf, String>,
         requests: &Sender<(String, SubscriptionRequest)>,
+        instrument_rules: &InstrumentRules,
     ) {
         let (stream, _) = listener.accept().expect("accept is expected to not fail");
         let (path, request) = read_request(&stream);
-        let results = request
-            .topics
-            .iter()
-            .map(|topic| (*topic, subscription_result.clone()))
-            .collect();
+        let mut results: HashMap<Instrument, InstrumentSubscription> = HashMap::new();
+        for topic in &request.topics {
+            let entry = results
+                .entry(topic.instrument)
+                .or_insert_with(|| InstrumentSubscription {
+                    instrument_rule_option: instrument_rules.get(&topic.instrument).cloned(),
+                    results: HashMap::new(),
+                });
+            entry
+                .results
+                .insert(topic.market_data_type, subscription_result.clone());
+        }
         let body = serde_json::to_string(&SubscriptionResponse { results })
             .expect("serialization is expected to not fail");
         let content_length = body.len();
@@ -294,6 +343,65 @@ mod tests {
         (path, request)
     }
 
+    fn rules() -> InstrumentRule {
+        InstrumentRule {
+            exchange_symbol: "ETHUSDT".to_owned(),
+            price_step: dec!(0.01),
+            quantity_step: dec!(0.001),
+            minimum_quantity: dec!(0.001),
+            minimum_notional_size: dec!(5),
+        }
+    }
+
+    #[test]
+    fn instrument_rules_reach_the_main_loop_through_the_watch_channel() {
+        let session = ProviderSession::new(
+            "127.0.0.1:1"
+                .parse()
+                .expect("the test address is a socket address"),
+            STRATEGY_NAME.to_owned(),
+            true,
+            HashSet::from([topic()]),
+        )
+        .expect("the session is expected to build");
+        let instrument_rules = session.instrument_rules();
+        let updated = HashMap::from([(topic().instrument, rules())]);
+        session.update_instrument_rules(updated.clone());
+        assert_eq!(updated, *instrument_rules.borrow());
+    }
+
+    #[tokio::test]
+    async fn subscribe_installs_the_providers_instrument_rules() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind is expected to not fail");
+        let address = listener
+            .local_addr()
+            .expect("local address is expected to be known");
+        let subscription_result = Ok(PathBuf::from("/dev/shm/TRADE.dat"));
+        let expected_rules = HashMap::from([(topic().instrument, rules())]);
+        let (requests, _received) = channel();
+        let provider = spawn_thread({
+            let expected_rules = expected_rules.clone();
+            move || answer(&listener, &subscription_result, &requests, &expected_rules)
+        });
+
+        let session = ProviderSession::new(
+            address,
+            STRATEGY_NAME.to_owned(),
+            true,
+            HashSet::from([topic()]),
+        )
+        .expect("the session is expected to build");
+        let instrument_rules = session.instrument_rules();
+        session
+            .subscribe()
+            .await
+            .expect("subscribe is expected to not fail");
+        assert_eq!(expected_rules, *instrument_rules.borrow());
+        provider
+            .join()
+            .expect("provider thread is expected to not panic");
+    }
+
     #[tokio::test]
     async fn client_subscribes_then_keeps_resubscribing() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind is expected to not fail");
@@ -304,7 +412,7 @@ mod tests {
         let (requests, received) = channel();
         let provider = spawn_thread(move || {
             for _ in 0..2 {
-                answer(&listener, &subscription_result, &requests);
+                answer(&listener, &subscription_result, &requests, &HashMap::new());
             }
         });
 
@@ -360,7 +468,12 @@ mod tests {
             .expect("local address is expected to be known");
         let (requests, _received) = channel();
         let provider = spawn_thread(move || {
-            answer(&listener, &Err("unmapped instrument".to_owned()), &requests);
+            answer(
+                &listener,
+                &Err("unmapped instrument".to_owned()),
+                &requests,
+                &HashMap::new(),
+            );
         });
 
         let error = ProviderSession::new(
@@ -421,7 +534,16 @@ mod tests {
         ] {
             report_changes(
                 &subscriptions,
-                &HashMap::from([(topic(), subscription_result)]),
+                &HashMap::from([(
+                    topic().instrument,
+                    InstrumentSubscription {
+                        instrument_rule_option: None,
+                        results: HashMap::from([(
+                            topic().market_data_type,
+                            subscription_result.clone(),
+                        )]),
+                    },
+                )]),
             );
         }
     }
@@ -433,7 +555,16 @@ mod tests {
             topic: topic(),
             path: PathBuf::from("/dev/shm/old.dat"),
         }];
-        let results = HashMap::from([(topic(), Ok(PathBuf::from("/dev/shm/new.dat")))]);
+        let results = HashMap::from([(
+            topic().instrument,
+            InstrumentSubscription {
+                instrument_rule_option: None,
+                results: HashMap::from([(
+                    topic().market_data_type,
+                    Ok(PathBuf::from("/dev/shm/new.dat")),
+                )]),
+            },
+        )]);
         report_changes(&subscriptions, &results);
     }
 
@@ -506,7 +637,7 @@ mod tests {
         let (requests, _received) = channel();
         let provider = spawn_thread(move || {
             answer_with_status(&listener, "500 Internal Server Error", "busy");
-            answer(&listener, &subscription_result, &requests);
+            answer(&listener, &subscription_result, &requests, &HashMap::new());
         });
 
         let subscriptions = ProviderSession::new(

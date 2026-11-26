@@ -1,23 +1,77 @@
-//! The market data provider's HTTP contract with strategies: JSON over HTTP. Topics nest as exchange, then instrument, then market data type, spelled as in ring paths:
+//! The market data provider's HTTP contract with strategies: JSON over HTTP. Topics nest as
+//! exchange, then instrument, then market data type, spelled as in ring paths. The documents below
+//! are pretty-printed so the field hierarchy is visible at a glance.
 //!
 //! ```text
-//! POST /subscribe   {"strategy_name": "dummy_strategy", "demo": false,
-//!                    "topics": {"Binance": {"BTC-USDT-SPOT": ["BBO", "TRADE"]}, "OKX": {"BTC-USDT-PERP": ["BBO"]}}}
-//! 200 OK            {"results": {"Binance": {"BTC-USDT-SPOT": {"BBO": {"Ok": "/dev/shm/market_data_provider/dummy_strategy/Binance/SPOT/BBO.dat"},
-//!                                                          "TRADE": {"Err": "reason"}}}}}
-//! GET /subscribed   {"topics": {"Binance": {"BTC-USDT-SPOT": ["BBO"]}}}
-//! GET /connected_apis {"Binance": [{"description": "...", "api": "wss://...", "doc": "https://..."}], "OKX": []}
+//! POST /subscribe
+//! {
+//!   "strategy_name": "dummy_strategy",
+//!   "demo": false,
+//!   "topics": {
+//!     "Binance": {
+//!       "BTC-USDT-SPOT": ["BBO", "TRADE"]
+//!     },
+//!     "OKX": {
+//!       "BTC-USDT-PERP": ["BBO"]
+//!     }
+//!   }
+//! }
+//!
+//! 200 OK
+//! {
+//!   "results": {
+//!     "Binance": {
+//!       "BTC-USDT-SPOT": {
+//!         "instrument_rule": {
+//!           "exchange_symbol": "BTCUSDT",
+//!           "price_step": "0.01",
+//!           "quantity_step": "0.00001",
+//!           "minimum_quantity": "0.00001",
+//!           "minimum_notional_size": "5"
+//!         },
+//!         // AI TODO: 这里虽然只是文档, 但也要写全的. 请求里还有okx呢
+//!         "BBO": {
+//!           "Ok": "/dev/shm/market_data_provider/dummy_strategy/Binance/SPOT/BBO.dat"
+//!         },
+//!         "TRADE": {
+//!           "Err": "reason"
+//!         }
+//!       }
+//!     }
+//!   }
+//! }
+//!
+//! GET /subscribed
+//! {
+//!   "topics": {
+//!     "Binance": {
+//! // AI TODO: 这里也是, 要写全的, 还有TRADE呢
+//!       "BTC-USDT-SPOT": ["BBO"]
+//!     }
+//!   }
+//! }
+//!
+//! GET /connected_apis
+//! {
+//!   "Binance": [
+//!     {
+//!       "description": "...",
+//!       "api": "wss://...",
+//!       "doc": "https://..."
+//!     }
+//!   ],
+//!   "OKX": []
+//! }
 //! ```
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Formatter, Result as FormatResult};
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use serde::de::Error as DeserializeError;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::types::{ConnectedApi, ConnectedApis, Subscription};
-use crate::types::{Exchange, Instrument, MarketDataType, StrategyName, Topic};
+use crate::types::{Instrument, InstrumentRule, MarketDataType, StrategyName, Topic};
 
 pub const HEALTH_PATH: &str = "/health";
 pub const INFO_PATH: &str = "/info";
@@ -39,11 +93,22 @@ pub struct SubscriptionRequest {
     pub topics: HashSet<Topic>,
 }
 
-/// Body returned by `/subscribe` and `/resubscribe`: one result per requested topic.
+/// One instrument's outcome and, when it has one, its rule.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct InstrumentSubscription {
+    /// `None` when no rule applies: the venue has no rule for the instrument (a synthetic feed or
+    /// an unsupported instrument), or every requested topic for it was refused.
+    #[serde(rename = "instrument_rule", skip_serializing_if = "Option::is_none")]
+    pub instrument_rule_option: Option<InstrumentRule>,
+    #[serde(flatten)]
+    pub results: HashMap<MarketDataType, SubscriptionResult>,
+}
+
+/// Body returned by `/subscribe` and `/resubscribe`: one entry per requested instrument.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SubscriptionResponse {
-    #[serde(with = "topic_map")]
-    pub results: HashMap<Topic, SubscriptionResult>,
+    #[serde(with = "instrument_subscriptions")]
+    pub results: HashMap<Instrument, InstrumentSubscription>,
 }
 
 /// The ring path to read, or why the topic was refused.
@@ -97,9 +162,7 @@ impl<'de> Deserialize<'de> for SortedTopics {
     fn deserialize<DeserializerType: Deserializer<'de>>(
         deserializer: DeserializerType,
     ) -> Result<Self, DeserializerType::Error> {
-        let tree = TopicTree::<BTreeSet<MarketDataType>>::deserialize(deserializer)?;
-        let topics = unnest(tree).map_err(DeserializeError::custom)?;
-        Ok(Self(topics.into_iter().map(|(topic, ())| topic).collect()))
+        Ok(Self(topic_set::deserialize(deserializer)?))
     }
 }
 
@@ -135,137 +198,105 @@ pub struct ProviderInfo {
     pub lease_duration_seconds: u64,
 }
 
-/// The wire tree: exchange, then instrument key, then one leaf per market data type.
-type TopicTree<Leaf> = BTreeMap<Exchange, BTreeMap<String, Leaf>>;
-
-/// Lets the set adapter reuse the map adapter's tree walk with a different leaf shape.
-trait TopicLeaves<Value>: Default {
-    fn insert(&mut self, market_data_type: MarketDataType, value: Value);
-    fn into_entries(self) -> Vec<(MarketDataType, Value)>;
-}
-
-impl TopicLeaves<()> for BTreeSet<MarketDataType> {
-    fn insert(&mut self, market_data_type: MarketDataType, _value: ()) {
-        self.insert(market_data_type);
-    }
-
-    fn into_entries(self) -> Vec<(MarketDataType, ())> {
-        self.into_iter()
-            .map(|market_data_type| (market_data_type, ()))
-            .collect()
-    }
-}
-
-impl<Value> TopicLeaves<Value> for BTreeMap<MarketDataType, Value> {
-    fn insert(&mut self, market_data_type: MarketDataType, value: Value) {
-        self.insert(market_data_type, value);
-    }
-
-    fn into_entries(self) -> Vec<(MarketDataType, Value)> {
-        self.into_iter().collect()
-    }
-}
-
-fn nest<Leaf, Value>(entries: impl Iterator<Item = (Topic, Value)>) -> TopicTree<Leaf>
-where
-    Leaf: Default + TopicLeaves<Value>,
-{
-    let mut tree: TopicTree<Leaf> = BTreeMap::new();
-    for (topic, value) in entries {
-        tree.entry(topic.instrument.exchange)
-            .or_default()
-            .entry(topic.instrument.key())
-            .or_default()
-            .insert(topic.market_data_type, value);
-    }
-    tree
-}
-
-fn unnest<Leaf, Value>(tree: TopicTree<Leaf>) -> Result<HashMap<Topic, Value>, String>
-where
-    Leaf: TopicLeaves<Value>,
-{
-    let mut values = HashMap::new();
-    for (exchange, instruments) in tree {
-        for (key, leaves) in instruments {
-            let instrument = Instrument::from_key(exchange, &key)?;
-            for (market_data_type, value) in leaves.into_entries() {
-                values.insert(
-                    Topic {
-                        instrument,
-                        market_data_type,
-                    },
-                    value,
-                );
-            }
-        }
-    }
-    Ok(values)
-}
-
 /// `HashSet<Topic>` as `{exchange: {instrument: [market_data_type, ...]}}`, for
 /// `#[serde(with = "topic_set")]`; strategy configs list their topics the same way.
 pub mod topic_set {
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
 
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{TopicTree, nest, unnest};
-    use crate::types::{MarketDataType, Topic};
+    use crate::types::{Exchange, Instrument, MarketDataType, Topic};
 
-    pub fn serialize<S: Serializer>(
+    type Tree = BTreeMap<Exchange, BTreeMap<String, BTreeSet<MarketDataType>>>;
+
+    pub fn serialize<SerializerType: Serializer>(
         topics: &HashSet<Topic>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let tree: TopicTree<BTreeSet<MarketDataType>> =
-            nest(topics.iter().map(|topic| (*topic, ())));
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error> {
+        let mut tree: Tree = BTreeMap::new();
+        for topic in topics {
+            tree.entry(topic.instrument.exchange)
+                .or_default()
+                .entry(topic.instrument.key())
+                .or_default()
+                .insert(topic.market_data_type);
+        }
         tree.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashSet<Topic>, D::Error> {
-        let tree = TopicTree::<BTreeSet<MarketDataType>>::deserialize(deserializer)?;
-        let topics = unnest(tree).map_err(DeserializeError::custom)?;
-        Ok(topics.into_iter().map(|(topic, ())| topic).collect())
+    pub fn deserialize<'de, DeserializerType: Deserializer<'de>>(
+        deserializer: DeserializerType,
+    ) -> Result<HashSet<Topic>, DeserializerType::Error> {
+        let tree = Tree::deserialize(deserializer)?;
+        let mut topics = HashSet::new();
+        for (exchange, instruments) in tree {
+            for (key, market_data_types) in instruments {
+                let instrument =
+                    Instrument::from_key(exchange, &key).map_err(DeserializeError::custom)?;
+                for market_data_type in market_data_types {
+                    topics.insert(Topic {
+                        instrument,
+                        market_data_type,
+                    });
+                }
+            }
+        }
+        Ok(topics)
     }
 }
 
-/// `HashMap<Topic, Value>` as `{exchange: {instrument: {market_data_type: value}}}`.
-mod topic_map {
+/// `HashMap<Instrument, InstrumentSubscription>` as
+/// `{exchange: {instrument: {instrument_rule: ..., market_data_type: result}}}`.
+mod instrument_subscriptions {
     use std::collections::{BTreeMap, HashMap};
 
     use serde::de::Error as DeserializeError;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    use super::{TopicTree, nest, unnest};
-    use crate::types::{MarketDataType, Topic};
+    use super::InstrumentSubscription;
+    use crate::types::{Exchange, Instrument};
 
-    pub(super) fn serialize<Value: Serialize, S: Serializer>(
-        values: &HashMap<Topic, Value>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        let tree: TopicTree<BTreeMap<MarketDataType, &Value>> =
-            nest(values.iter().map(|(topic, value)| (*topic, value)));
+    pub fn serialize<SerializerType: Serializer>(
+        subscriptions: &HashMap<Instrument, InstrumentSubscription>,
+        serializer: SerializerType,
+    ) -> Result<SerializerType::Ok, SerializerType::Error> {
+        let mut tree: BTreeMap<Exchange, BTreeMap<String, &InstrumentSubscription>> =
+            BTreeMap::new();
+        for (instrument, subscription) in subscriptions {
+            tree.entry(instrument.exchange)
+                .or_default()
+                .insert(instrument.key(), subscription);
+        }
         tree.serialize(serializer)
     }
 
-    pub(super) fn deserialize<'de, Value: Deserialize<'de>, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<HashMap<Topic, Value>, D::Error> {
-        let tree = TopicTree::<BTreeMap<MarketDataType, Value>>::deserialize(deserializer)?;
-        unnest(tree).map_err(DeserializeError::custom)
+    pub fn deserialize<'de, DeserializerType: Deserializer<'de>>(
+        deserializer: DeserializerType,
+    ) -> Result<HashMap<Instrument, InstrumentSubscription>, DeserializerType::Error> {
+        let tree = BTreeMap::<Exchange, BTreeMap<String, InstrumentSubscription>>::deserialize(
+            deserializer,
+        )?;
+        let mut subscriptions = HashMap::new();
+        for (exchange, instruments) in tree {
+            for (key, subscription) in instruments {
+                let instrument =
+                    Instrument::from_key(exchange, &key).map_err(DeserializeError::custom)?;
+                subscriptions.insert(instrument, subscription);
+            }
+        }
+        Ok(subscriptions)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::dec;
     use serde_json::{Value, json};
 
     use super::*;
     use crate::testing::{test_instrument, test_topic};
-    use crate::types::{Currency, MarketDataType, UnderlyingType};
+    use crate::types::{Currency, Exchange, InstrumentRule, MarketDataType, UnderlyingType};
 
     fn topic(
         exchange: Exchange,
@@ -344,27 +375,69 @@ mod tests {
     }
 
     #[test]
-    fn response_nests_outcomes_and_round_trips() {
+    fn response_nests_instrument_rules_and_outcomes_and_round_trips() {
+        let instrument =
+            topic(Exchange::Binance, UnderlyingType::Spot, MarketDataType::Bbo).instrument;
         let response = SubscriptionResponse {
-            results: HashMap::from([
-                (
-                    topic(Exchange::Binance, UnderlyingType::Spot, MarketDataType::Bbo),
-                    Ok(PathBuf::from("/dev/shm/a.dat")),
-                ),
-                (
-                    topic(
-                        Exchange::Binance,
-                        UnderlyingType::Spot,
-                        MarketDataType::Trade,
-                    ),
-                    Err("rejected".to_owned()),
-                ),
-            ]),
+            results: HashMap::from([(
+                instrument,
+                InstrumentSubscription {
+                    instrument_rule_option: Some(InstrumentRule {
+                        exchange_symbol: "BTCUSDT".to_owned(),
+                        price_step: dec!(0.01),
+                        quantity_step: dec!(0.00001),
+                        minimum_quantity: dec!(0.00001),
+                        minimum_notional_size: dec!(5),
+                    }),
+                    results: HashMap::from([
+                        (MarketDataType::Bbo, Ok(PathBuf::from("/dev/shm/a.dat"))),
+                        (MarketDataType::Trade, Err("rejected".to_owned())),
+                    ]),
+                },
+            )]),
         };
         let expected = json!({
             "results": {"Binance": {"BTC-USDT-SPOT": {
+                "instrument_rule": {
+                    "exchange_symbol": "BTCUSDT",
+                    "price_step": "0.01",
+                    "quantity_step": "0.00001",
+                    "minimum_quantity": "0.00001",
+                    "minimum_notional_size": "5",
+                },
                 "BBO": {"Ok": "/dev/shm/a.dat"},
                 "TRADE": {"Err": "rejected"},
+            }}},
+        });
+        assert_eq!(expected, to_json(&response));
+        let decoded: SubscriptionResponse =
+            serde_json::from_value(expected).expect("deserialization is expected to not fail");
+        assert_eq!(response, decoded);
+    }
+
+    #[test]
+    fn synthetic_instruments_have_no_instrument_rule() {
+        let instrument = topic(
+            Exchange::Okx,
+            UnderlyingType::Perpetual,
+            MarketDataType::Bbo,
+        )
+        .instrument;
+        let response = SubscriptionResponse {
+            results: HashMap::from([(
+                instrument,
+                InstrumentSubscription {
+                    instrument_rule_option: None,
+                    results: HashMap::from([(
+                        MarketDataType::Bbo,
+                        Ok(PathBuf::from("/dev/shm/okx.dat")),
+                    )]),
+                },
+            )]),
+        };
+        let expected = json!({
+            "results": {"OKX": {"BTC-USDT-PERP": {
+                "BBO": {"Ok": "/dev/shm/okx.dat"},
             }}},
         });
         assert_eq!(expected, to_json(&response));

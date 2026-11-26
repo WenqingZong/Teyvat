@@ -1,11 +1,12 @@
 mod coordinator;
 mod http;
+mod refresh;
 mod registry;
 
 use std::fs::create_dir_all;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -21,7 +22,7 @@ use crate::gnosis_client::GnosisClient;
 use coordinator::Coordinator;
 use layline::bark::Notifier;
 use layline::build::RELEASE_BUILD;
-use layline::types::Topic;
+use layline::types::{InstrumentRules, Topic};
 
 const LEASE_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a strategy keeps its topics without resubscribing, so restarting strategies do not churn the exchange.
@@ -52,16 +53,30 @@ pub async fn serve(
     root_directory: PathBuf,
     lease_duration: Duration,
 ) -> Result<()> {
+    let notifier = Notifier::new(RELEASE_BUILD, config.bark)?;
+    let instrument_rules = Arc::new(RwLock::new(InstrumentRules::new()));
     let context = ConnectorContext {
         gnosis_client: GnosisClient::new(config.gnosis_client)?,
-        notifier: Notifier::new(RELEASE_BUILD, config.bark)?,
+        notifier: notifier.clone(),
+        instrument_rules: instrument_rules.clone(),
     };
     create_dir_all(&root_directory)
         .with_context(|| format!("failed to create {}", root_directory.display()))?;
     let router = ExchangeRouter::new(&root_directory, config.demo, context);
     let coordinator = Arc::new(Mutex::new(Coordinator::new(router, lease_duration)));
+    tokio::spawn(refresh::run(
+        instrument_rules.clone(),
+        coordinator.clone(),
+        config.demo,
+        notifier,
+    ));
     select! {
-        serve_result = http::serve(listener, coordinator.clone(), config.demo) => serve_result,
+        serve_result = http::serve(
+            listener,
+            coordinator.clone(),
+            config.demo,
+            instrument_rules,
+        ) => serve_result,
         () = expire_leases_periodically(coordinator) => Ok(()),
     }
 }

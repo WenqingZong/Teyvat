@@ -2,7 +2,6 @@
 //! round trip.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 use reqwest::{Client, StatusCode};
@@ -15,9 +14,8 @@ use crate::exit_reason::ExitReason;
 use crate::utils::{Clock, RealClock};
 use layline::gnosis::client::GnosisClientConfig;
 use layline::gnosis::{GNOSIS_PATH, Gnosis, Initiator, Request, Response};
+use layline::http::REQUEST_TIMEOUT;
 use layline::noise::StaticKey;
-
-const GNOSIS_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where gnoses come from; the connector asks only when a topic needs one.
 pub(crate) trait GnosisSource {
@@ -80,7 +78,7 @@ pub(crate) struct GnosisClient<Http = ReqwestGnosisHttp, TimeSource = RealClock>
 impl GnosisClient {
     /// Both keys were checked when the config was parsed.
     pub(crate) fn new(config: GnosisClientConfig) -> Result<Self> {
-        let client = Client::builder().timeout(GNOSIS_REQUEST_TIMEOUT).build()?;
+        let client = Client::builder().timeout(REQUEST_TIMEOUT).build()?;
         Ok(Self {
             url: config.url,
             client_gnosis_private_key: Arc::new(config.client_gnosis_private_key),
@@ -118,6 +116,7 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use std::fmt::Debug;
     use std::num::NonZeroU64;
+    use std::time::Duration;
 
     use secrecy::ExposeSecret;
     use serde_json::{Value, from_str};

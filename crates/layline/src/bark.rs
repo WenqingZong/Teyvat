@@ -5,7 +5,6 @@
 //! ASCII bytes, matching the Bark app's "AES-256-CBC" encryption setting.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use aes::Aes256;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
@@ -20,14 +19,13 @@ use tracing::info;
 use url::Url;
 
 use crate::config::LogUrl;
+use crate::http::REQUEST_TIMEOUT;
 
 type Aes256CbcEncryptor = Encryptor<Aes256>;
 
 const KEY_LENGTH: usize = 32;
 const INITIALIZATION_VECTOR_LENGTH: usize = 16;
 const BARK_SERVER: &str = "https://api.day.app";
-/// A stalled Bark request must not hold up every later notification.
-const BARK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum BarkError {
@@ -127,7 +125,7 @@ impl BarkNotifier {
         let response: BarkResponse = self
             .client
             .post(url)
-            .timeout(BARK_REQUEST_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
             .form(&[
                 ("ciphertext", ciphertext.as_str()),
                 ("iv", initialization_vector.as_str()),

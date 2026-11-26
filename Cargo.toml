@@ -96,7 +96,7 @@ procfs = { version = "0.18.0", default-features = false }
 rand = "0.10.3"
 reqwest = { version = "0.13.5", features = ["form", "json"] }
 rkyv = "0.8.12"
-rust_decimal = { version = "1.43.0", features = ["macros"] }
+rust_decimal = { version = "1.43.0", features = ["macros", "serde-with-str"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

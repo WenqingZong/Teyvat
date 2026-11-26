@@ -7,7 +7,7 @@
 | [`celestia.md`](celestia.md) | 进程监控的完整设计：磁盘 spool、ClickHouse 入库、Grafana 看板、限速补发 |
 | [`database.md`](database.md) | 数据库：ClickHouse 表设计、回测数据读取、研究行情采集 |
 | [`latency.md`](latency.md) | 延迟：本地、Osaka、Tokyo 三处实测对比，ring 预映射、绑核等提速方向 |
-| [`market_data_provider.md`](market_data_provider.md) | 行情服务：InstrumentManager、Coindesk 检查、订阅持久化、OKX、替换 bcast（长远） |
+| [`market_data_provider.md`](market_data_provider.md) | 行情服务：Coindesk 检查、订阅持久化、OKX、替换 bcast（长远） |
 
 ## 部署后的手工步骤
 

@@ -97,6 +97,7 @@ fn spawn_exchange_worker(
                     context.gnosis_client,
                     context.notifier,
                     RealClock,
+                    context.instrument_rules,
                 )
             })
         }

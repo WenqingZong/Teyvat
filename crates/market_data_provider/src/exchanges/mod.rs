@@ -7,6 +7,7 @@ mod websocket;
 mod worker;
 
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use strum::IntoEnumIterator;
@@ -15,15 +16,41 @@ use crate::gnosis_client::GnosisClient;
 use binance::BinanceConnector;
 use layline::bark::Notifier;
 use layline::types::{ConnectedApi, ConnectedApis};
-use layline::types::{Exchange, MarketData, Topic};
+use layline::types::{Exchange, Instrument, InstrumentRules, MarketData, Topic};
 use okx::OkxConnector;
 pub(crate) use router::ExchangeRouter;
+
+// AI TODO: 这个方法应该删掉, 这不是业务逻辑, 只是我们暂时还没有开发okx的connector
+/// Whether an exchange has instrument rules at all. Synthetic venues such as OKX do not; the
+/// refresh task uses this to know which subscribed instruments must have rules.
+pub(crate) const fn provides_instrument_rules(exchange: Exchange) -> bool {
+    match exchange {
+        Exchange::Binance => true,
+        Exchange::Okx => false,
+    }
+}
+
+/// Fetches the rules for `instruments` from their exchange. OKX is still synthetic and has no
+/// rules; its dummy arm keeps this dispatch exchange-agnostic until the real connector lands.
+pub(crate) async fn fetch_instrument_rules(
+    exchange: Exchange,
+    demo: bool,
+    instruments: &HashSet<Instrument>,
+) -> Result<InstrumentRules> {
+    match exchange {
+        Exchange::Binance => {
+            binance::instrument_rules::fetch_instrument_rules(demo, instruments).await
+        }
+        Exchange::Okx => Ok(InstrumentRules::new()),
+    }
+}
 
 /// What every connector may need besides its venue; each worker gets its own clone.
 #[derive(Clone)]
 pub(crate) struct ConnectorContext {
     pub(crate) gnosis_client: GnosisClient,
     pub(crate) notifier: Notifier,
+    pub(crate) instrument_rules: Arc<RwLock<InstrumentRules>>,
 }
 
 /// One venue connection, driven by its exchange's dedicated single-threaded runtime, so it need not be `Send`.
@@ -63,12 +90,33 @@ pub(crate) fn connected_apis() -> ConnectedApis {
 pub(crate) mod tests {
     use super::*;
     use crate::gnosis_client::tests::unreachable_gnosis_client;
+    use layline::testing::test_instrument;
+    use layline::types::{Currency, UnderlyingType};
+
+    #[tokio::test]
+    async fn okx_has_no_instrument_rules() {
+        let instrument = test_instrument(
+            Exchange::Okx,
+            Currency::Btc,
+            Currency::Usdt,
+            UnderlyingType::Spot,
+        );
+        assert!(provides_instrument_rules(Exchange::Binance));
+        assert!(!provides_instrument_rules(Exchange::Okx));
+        assert!(
+            fetch_instrument_rules(Exchange::Okx, false, &HashSet::from([instrument]))
+                .await
+                .expect("the OKX dummy never fails")
+                .is_empty()
+        );
+    }
 
     /// For connectors that never fetch a key or alert, such as OKX's.
     pub(crate) fn test_connector_context() -> ConnectorContext {
         ConnectorContext {
             gnosis_client: unreachable_gnosis_client(),
             notifier: Notifier::Log,
+            instrument_rules: Arc::new(RwLock::new(InstrumentRules::new())),
         }
     }
 }

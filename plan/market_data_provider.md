@@ -4,7 +4,6 @@
 
 ## 功能
 
-- **InstrumentManager**：统一管理各交易所的 symbol 拼写和交易规则。届时把 `exchanges/binance/venue_stream.rs` 里的 `venue_symbol` 和 `stream_name` 移过去（见该文件的 TODO）。
 - **Coindesk mapped / unmapped 检查**：具体内容待讨论。
 - **跨重启保留订阅集合**：目前行情服务重启后靠策略每 10 秒一次的 `/resubscribe` 恢复订阅；以后由行情服务自己持久化。
 - **OKX connector**：`OkxConnector` 目前是 dummy，每 10 ms 发合成数据；换成真实实现后删除 `exchanges/synthetic.rs`。
