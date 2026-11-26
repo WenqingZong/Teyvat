@@ -20,9 +20,25 @@ pub(in crate::exchanges) enum BinanceEndpoint {
 
 pub(super) const API_KEY_HEADER: &str = "X-MBX-APIKEY";
 
+const SPOT_SBE_LIVE: &str = "wss://stream-sbe.binance.com:9443/stream";
+const SPOT_SBE_DEMO: &str = "wss://demo-stream-sbe.binance.com:9443/stream";
+const FUTURES_PUBLIC_LIVE: &str = "wss://fstream.binance.com/public/stream";
+const FUTURES_PUBLIC_DEMO: &str = "wss://demo-fstream.binance.com/public/stream";
+const FUTURES_MARKET_LIVE: &str = "wss://fstream.binance.com/market/stream";
+const FUTURES_MARKET_DEMO: &str = "wss://demo-fstream.binance.com/market/stream";
+
 const SPOT_SBE_DOC: &str =
     "https://developers.binance.com/docs/binance-spot-api-docs/sbe-market-data-streams";
 const FUTURES_DOC: &str = "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams";
+
+pub(super) const SPOT_EXCHANGE_INFO_LIVE: &str = "https://api.binance.com/api/v3/exchangeInfo";
+pub(super) const SPOT_EXCHANGE_INFO_DEMO: &str =
+    "https://testnet.binance.vision/api/v3/exchangeInfo";
+pub(super) const FUTURES_EXCHANGE_INFO_LIVE: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
+pub(super) const FUTURES_EXCHANGE_INFO_DEMO: &str =
+    "https://testnet.binancefuture.com/fapi/v1/exchangeInfo";
+pub(super) const SPOT_EXCHANGE_INFO_DOC: &str = "https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/general#exchange-info";
+pub(super) const FUTURES_EXCHANGE_INFO_DOC: &str = "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information";
 
 impl BinanceEndpoint {
     /// Position in declaration order, which indexes per-endpoint arrays.
@@ -32,12 +48,12 @@ impl BinanceEndpoint {
 
     pub(super) fn url(self, demo: bool) -> &'static str {
         match (self, demo) {
-            (Self::SpotSbe, false) => "wss://stream-sbe.binance.com:9443/stream",
-            (Self::SpotSbe, true) => "wss://demo-stream-sbe.binance.com:9443/stream",
-            (Self::FuturesPublic, false) => "wss://fstream.binance.com/public/stream",
-            (Self::FuturesPublic, true) => "wss://demo-fstream.binance.com/public/stream",
-            (Self::FuturesMarket, false) => "wss://fstream.binance.com/market/stream",
-            (Self::FuturesMarket, true) => "wss://demo-fstream.binance.com/market/stream",
+            (Self::SpotSbe, false) => SPOT_SBE_LIVE,
+            (Self::SpotSbe, true) => SPOT_SBE_DEMO,
+            (Self::FuturesPublic, false) => FUTURES_PUBLIC_LIVE,
+            (Self::FuturesPublic, true) => FUTURES_PUBLIC_DEMO,
+            (Self::FuturesMarket, false) => FUTURES_MARKET_LIVE,
+            (Self::FuturesMarket, true) => FUTURES_MARKET_DEMO,
         }
     }
 }
@@ -45,33 +61,53 @@ impl BinanceEndpoint {
 pub(super) const CONNECTED_APIS: &[ConnectedApi] = &[
     ConnectedApi {
         description: "Spot SBE market data websocket, live, API key required",
-        api: "wss://stream-sbe.binance.com:9443/stream",
+        api: SPOT_SBE_LIVE,
         doc: SPOT_SBE_DOC,
     },
     ConnectedApi {
         description: "Spot SBE market data websocket, demo, API key required",
-        api: "wss://demo-stream-sbe.binance.com:9443/stream",
+        api: SPOT_SBE_DEMO,
         doc: SPOT_SBE_DOC,
     },
     ConnectedApi {
         description: "USDⓈ-M futures public market data websocket, live",
-        api: "wss://fstream.binance.com/public/stream",
+        api: FUTURES_PUBLIC_LIVE,
         doc: FUTURES_DOC,
     },
     ConnectedApi {
         description: "USDⓈ-M futures public market data websocket, demo",
-        api: "wss://demo-fstream.binance.com/public/stream",
+        api: FUTURES_PUBLIC_DEMO,
         doc: FUTURES_DOC,
     },
     ConnectedApi {
         description: "USDⓈ-M futures market data websocket, live",
-        api: "wss://fstream.binance.com/market/stream",
+        api: FUTURES_MARKET_LIVE,
         doc: FUTURES_DOC,
     },
     ConnectedApi {
         description: "USDⓈ-M futures market data websocket, demo",
-        api: "wss://demo-fstream.binance.com/market/stream",
+        api: FUTURES_MARKET_DEMO,
         doc: FUTURES_DOC,
+    },
+    ConnectedApi {
+        description: "Spot exchange information, live",
+        api: SPOT_EXCHANGE_INFO_LIVE,
+        doc: SPOT_EXCHANGE_INFO_DOC,
+    },
+    ConnectedApi {
+        description: "Spot exchange information, demo",
+        api: SPOT_EXCHANGE_INFO_DEMO,
+        doc: SPOT_EXCHANGE_INFO_DOC,
+    },
+    ConnectedApi {
+        description: "USDⓈ-M futures exchange information, live",
+        api: FUTURES_EXCHANGE_INFO_LIVE,
+        doc: FUTURES_EXCHANGE_INFO_DOC,
+    },
+    ConnectedApi {
+        description: "USDⓈ-M futures exchange information, demo",
+        api: FUTURES_EXCHANGE_INFO_DEMO,
+        doc: FUTURES_EXCHANGE_INFO_DOC,
     },
 ];
 
@@ -88,6 +124,18 @@ mod tests {
             assert_eq!(Some(endpoint), BinanceEndpoint::from_repr(position));
         }
         assert_eq!(BinanceEndpoint::COUNT, BinanceEndpoint::iter().count());
+    }
+
+    #[test]
+    fn exchange_info_urls_are_listed_in_connected_apis() {
+        for url in [
+            SPOT_EXCHANGE_INFO_LIVE,
+            SPOT_EXCHANGE_INFO_DEMO,
+            FUTURES_EXCHANGE_INFO_LIVE,
+            FUTURES_EXCHANGE_INFO_DEMO,
+        ] {
+            assert!(CONNECTED_APIS.iter().any(|api| api.api == url), "{url}");
+        }
     }
 
     #[test]

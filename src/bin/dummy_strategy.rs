@@ -118,7 +118,10 @@ fn run(config_path: &Path, report_interval: Duration) -> Result<()> {
     });
     let provider_session =
         ProviderSession::new(provider_address, strategy_name, demo, topics.into())?;
+    let instrument_rules = provider_session.instrument_rules();
     let subscriptions = background.block_on(provider_session.subscribe())?;
+    let initial_instrument_count = instrument_rules.borrow().len();
+    info!("received instrument rules for {initial_instrument_count} instruments");
     background.spawn(provider_session.resubscribe_forever(subscriptions.clone()));
     let mut strategy = LatencyBench::new(report_interval, background.handle());
     MarketDataReader::open(&subscriptions)?.run(|data, received_at_nanoseconds| {

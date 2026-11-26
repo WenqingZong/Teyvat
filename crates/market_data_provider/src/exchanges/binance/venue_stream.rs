@@ -1,12 +1,13 @@
 //! How topics map onto Binance endpoints and stream names.
 
-// TODO: an InstrumentManager (not implemented yet) should own how each venue spells an instrument,
-// learnt through an InstrumentManager; `venue_symbol` and `stream_name` then move there.
+// The symbol spelling is Binance connector knowledge, like the channel and endpoint spelling.
+// `exchangeInfo` returns the same symbol, which `instrument_rules::build_rules` checks before
+// anything is subscribed.
 
 use std::str::from_utf8;
 
 use super::endpoint::BinanceEndpoint;
-use layline::types::{Instrument, MarketDataType, Topic, UnderlyingType};
+use layline::types::{Currency, Instrument, MarketDataType, Topic, UnderlyingType};
 
 /// Room for the longest symbol plus channel, so per-frame names need no allocation.
 pub(super) const STREAM_NAME_CAPACITY: usize = 64;
@@ -31,9 +32,29 @@ pub(super) fn endpoint_for_topic(topic: &Topic) -> BinanceEndpoint {
     }
 }
 
-/// Spot and USDⓈ-M perpetuals share the symbol; the endpoint tells them apart.
+/// How the venue spells the instrument. A stock's spot pair is its bStock: `AAPL-USDT-SPOT` is
+/// `AAPLBUSDT`, while `AAPL-USDT-PERP` is `AAPLUSDT`.
 pub(super) fn venue_symbol(instrument: Instrument) -> String {
-    format!("{}{}", instrument.base, instrument.quote)
+    let Instrument {
+        base,
+        quote,
+        underlying_type,
+        ..
+    } = instrument;
+    let base = match (underlying_type, base) {
+        (
+            UnderlyingType::Spot,
+            Currency::Aapl
+            | Currency::Amzn
+            | Currency::Googl
+            | Currency::Meta
+            | Currency::Msft
+            | Currency::Nvda
+            | Currency::Tsla,
+        ) => format!("{base}B"),
+        _ => base.to_string(),
+    };
+    format!("{base}{quote}")
 }
 
 /// As Binance names it in SUBSCRIBE and in each event. Spot SBE has no aggregate stream, so a spot
@@ -70,13 +91,25 @@ pub(super) fn sbe_stream_name<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use layline::types::{Currency, Exchange};
+    use layline::types::{Exchange, Instrument};
 
     fn topic(underlying_type: UnderlyingType, market_data_type: MarketDataType) -> Topic {
         Topic {
             instrument: Instrument {
                 exchange: Exchange::Binance,
                 base: Currency::Btc,
+                quote: Currency::Usdt,
+                underlying_type,
+            },
+            market_data_type,
+        }
+    }
+
+    fn stock_topic(underlying_type: UnderlyingType, market_data_type: MarketDataType) -> Topic {
+        Topic {
+            instrument: Instrument {
+                exchange: Exchange::Binance,
+                base: Currency::Aapl,
                 quote: Currency::Usdt,
                 underlying_type,
             },
@@ -127,11 +160,17 @@ mod tests {
     }
 
     #[test]
+    fn stock_tokens_are_spelled_with_a_b_only_on_spot() {
+        let spot = stock_topic(UnderlyingType::Spot, MarketDataType::Bbo);
+        assert_eq!("AAPLBUSDT", venue_symbol(spot.instrument));
+        let perpetual = stock_topic(UnderlyingType::Perpetual, MarketDataType::Bbo);
+        assert_eq!("AAPLUSDT", venue_symbol(perpetual.instrument));
+        let bitcoin = topic(UnderlyingType::Spot, MarketDataType::Bbo);
+        assert_eq!("BTCUSDT", venue_symbol(bitcoin.instrument));
+    }
+
+    #[test]
     fn stream_names_follow_binance_spelling() {
-        assert_eq!(
-            "BTCUSDT",
-            venue_symbol(topic(UnderlyingType::Perpetual, MarketDataType::Bbo).instrument)
-        );
         let spot_bbo = stream_name(&topic(UnderlyingType::Spot, MarketDataType::Bbo));
         assert_eq!("btcusdt@bestBidAsk", spot_bbo);
         let spot_trade = stream_name(&topic(UnderlyingType::Spot, MarketDataType::Trade));
@@ -171,6 +210,14 @@ mod tests {
                 UnderlyingType::Perpetual,
                 MarketDataType::AggregateTrade
             ))
+        );
+        assert_eq!(
+            "aaplbusdt@bestBidAsk",
+            stream_name(&stock_topic(UnderlyingType::Spot, MarketDataType::Bbo))
+        );
+        assert_eq!(
+            "aaplusdt@bookTicker",
+            stream_name(&stock_topic(UnderlyingType::Perpetual, MarketDataType::Bbo))
         );
     }
 }

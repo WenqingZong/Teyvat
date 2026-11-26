@@ -149,9 +149,20 @@ fn accepted_paths(mut response: Response<Body>) -> HashMap<Topic, PathBuf> {
     response
         .results
         .into_iter()
-        .map(|(topic, subscription_result)| {
-            let path = subscription_result.expect("subscription is expected to succeed");
-            (topic, path)
+        .flat_map(|(instrument, subscription)| {
+            subscription
+                .results
+                .into_iter()
+                .map(move |(market_data_type, result)| {
+                    let path = result.expect("subscription is expected to succeed");
+                    (
+                        Topic {
+                            instrument,
+                            market_data_type,
+                        },
+                        path,
+                    )
+                })
         })
         .collect()
 }

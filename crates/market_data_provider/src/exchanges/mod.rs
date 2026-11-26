@@ -6,18 +6,44 @@ mod synthetic;
 mod websocket;
 mod worker;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use strum::IntoEnumIterator;
 
 use crate::gnosis_client::GnosisClient;
 use binance::BinanceConnector;
 use layline::bark::Notifier;
 use layline::types::{ConnectedApi, ConnectedApis};
-use layline::types::{Exchange, MarketData, Topic};
+use layline::types::{Exchange, Instrument, InstrumentRules, MarketData, Topic};
 use okx::OkxConnector;
 pub(crate) use router::ExchangeRouter;
+
+/// Fetches the rules for `instruments` from their exchanges. OKX is still synthetic and has no
+/// rules; its dummy arm keeps this dispatch exchange-agnostic until the real connector lands.
+pub(crate) async fn fetch_instrument_rules(
+    demo: bool,
+    instruments: &HashSet<Instrument>,
+) -> Result<InstrumentRules> {
+    let mut instruments_by_exchange: HashMap<Exchange, HashSet<Instrument>> = HashMap::new();
+    for instrument in instruments {
+        instruments_by_exchange
+            .entry(instrument.exchange)
+            .or_default()
+            .insert(*instrument);
+    }
+    let mut rules = InstrumentRules::new();
+    for (exchange, instruments) in instruments_by_exchange {
+        let fetched = match exchange {
+            Exchange::Binance => {
+                binance::instrument_rules::fetch_instrument_rules(demo, &instruments).await
+            }
+            Exchange::Okx => Ok(InstrumentRules::new()),
+        };
+        rules.extend(fetched.with_context(|| format!("failed to fetch the {exchange} rules"))?);
+    }
+    Ok(rules)
+}
 
 /// What every connector may need besides its venue; each worker gets its own clone.
 #[derive(Clone)]
@@ -63,6 +89,24 @@ pub(crate) fn connected_apis() -> ConnectedApis {
 pub(crate) mod tests {
     use super::*;
     use crate::gnosis_client::tests::unreachable_gnosis_client;
+    use layline::testing::test_instrument;
+    use layline::types::{Currency, UnderlyingType};
+
+    #[tokio::test]
+    async fn okx_has_no_instrument_rules() {
+        let instrument = test_instrument(
+            Exchange::Okx,
+            Currency::Btc,
+            Currency::Usdt,
+            UnderlyingType::Spot,
+        );
+        assert!(
+            fetch_instrument_rules(false, &HashSet::from([instrument]))
+                .await
+                .expect("the OKX dummy never fails")
+                .is_empty()
+        );
+    }
 
     /// For connectors that never fetch a key or alert, such as OKX's.
     pub(crate) fn test_connector_context() -> ConnectorContext {

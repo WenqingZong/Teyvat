@@ -7,6 +7,7 @@ pub mod build;
 pub mod celestia;
 pub mod config;
 pub mod gnosis;
+pub mod http;
 pub mod logging;
 pub mod noise;
 pub mod process_metrics;
