@@ -36,8 +36,7 @@ pub(super) const SPOT_EXCHANGE_INFO_LIVE: &str = "https://api.binance.com/api/v3
 pub(super) const SPOT_EXCHANGE_INFO_DEMO: &str = "https://demo-api.binance.com/api/v3/exchangeInfo";
 pub(super) const SPOT_DEPTH_LIVE: &str = "https://api.binance.com/api/v3/depth";
 pub(super) const SPOT_DEPTH_DEMO: &str = "https://demo-api.binance.com/api/v3/depth";
-// AI TODO: 这里写错了吧? 应该是https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#depth
-pub(super) const SPOT_DEPTH_DOC: &str = "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints#order-book";
+pub(super) const SPOT_DEPTH_DOC: &str = "https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#depth";
 pub(super) const FUTURES_EXCHANGE_INFO_LIVE: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 pub(super) const FUTURES_EXCHANGE_INFO_DEMO: &str =
     "https://demo-fapi.binance.com/fapi/v1/exchangeInfo";

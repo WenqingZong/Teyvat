@@ -26,7 +26,10 @@ pub use instrument_rule::{InstrumentRule, InstrumentRules};
 pub use latency_metric::LatencyMetric;
 pub use market_data::MarketData;
 pub use market_data_type::MarketDataType;
-pub use order_book::{ORDER_BOOK_DEPTH, OrderBook, PriceLevel};
+pub use order_book::{
+    ORDER_BOOK_DEPTH, OrderBook, OrderBookError, OrderBookSnapshot, OrderBookState,
+    OrderBookUpdate, OrderBookUpdateOutcome, PriceLevel,
+};
 pub use ring_key::RingKey;
 pub use side::Side;
 pub use strategy_name::StrategyName;

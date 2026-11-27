@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::future::Future;
 use std::panic::panic_any;
 
 use tracing::error;
@@ -11,7 +12,7 @@ const ALERT_SOUND: &str = "alarm";
 
 /// Best effort: a failed alert is logged, never returned, because callers alert on their way to stopping.
 pub(crate) trait SendAlert {
-    async fn send_alert(&self, title: &str, body: &str);
+    fn send_alert(&self, title: &str, body: &str) -> impl Future<Output = ()> + Send;
 }
 
 /// Logs `reason`, alerts the phone, then panics with `exit_reason`, which the binary's panic hook
@@ -28,15 +29,19 @@ pub(crate) async fn alert_and_panic(
 }
 
 impl SendAlert for Notifier {
-    async fn send_alert(&self, title: &str, body: &str) {
-        let message = BarkMessage {
-            title: title.to_owned(),
-            body: body.to_owned(),
-            sound: ALERT_SOUND.to_owned(),
-            group: ALERT_GROUP.to_owned(),
-        };
-        if let Err(error) = self.send(&message).await {
-            error!("failed to alert the phone: {error}; alert: {title}: {body}");
+    // The explicit `Send` bound lets a spawned task alert; an `async fn` would hide it from callers.
+    #[allow(clippy::manual_async_fn)]
+    fn send_alert(&self, title: &str, body: &str) -> impl Future<Output = ()> + Send {
+        async move {
+            let message = BarkMessage {
+                title: title.to_owned(),
+                body: body.to_owned(),
+                sound: ALERT_SOUND.to_owned(),
+                group: ALERT_GROUP.to_owned(),
+            };
+            if let Err(error) = self.send(&message).await {
+                error!("failed to alert the phone: {error}; alert: {title}: {body}");
+            }
         }
     }
 }
@@ -68,11 +73,15 @@ pub(crate) mod tests {
     }
 
     impl SendAlert for RecordingAlert {
-        async fn send_alert(&self, title: &str, body: &str) {
-            self.alerts
-                .lock()
-                .expect("no test panics while holding the record")
-                .push(format!("{title}: {body}"));
+        // See the `Notifier` impl: the `Send` bound is the contract, not an implementation detail.
+        #[allow(clippy::manual_async_fn)]
+        fn send_alert(&self, title: &str, body: &str) -> impl Future<Output = ()> + Send {
+            async move {
+                self.alerts
+                    .lock()
+                    .expect("no test panics while holding the record")
+                    .push(format!("{title}: {body}"));
+            }
         }
     }
 
