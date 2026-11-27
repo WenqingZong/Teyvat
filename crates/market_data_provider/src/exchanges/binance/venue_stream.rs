@@ -12,14 +12,14 @@ use layline::types::{Currency, Instrument, MarketDataType, Topic, UnderlyingType
 /// Room for the longest symbol plus channel, so per-frame names need no allocation.
 pub(super) const STREAM_NAME_CAPACITY: usize = 64;
 pub(super) const SBE_BEST_BID_ASK_CHANNEL: &str = "bestBidAsk";
+pub(super) const SBE_DEPTH_CHANNEL: &str = "depth";
 pub(super) const TRADE_CHANNEL: &str = "trade";
 const BOOK_TICKER_CHANNEL: &str = "bookTicker";
 const AGGREGATE_TRADE_CHANNEL: &str = "aggTrade";
 const DEPTH_CHANNEL: &str = "depth10@100ms";
 
-/// The endpoint and stream `topic` needs. Spot order book depth is implemented next, so it panics
-/// for now instead of complicating every caller. Binance accepts any stream name on any path and
-/// then sends nothing, so this mapping must stay under test.
+/// The endpoint and stream `topic` needs. Binance accepts any stream name on any path and then
+/// sends nothing, so this mapping must stay under test.
 pub(super) fn route(topic: &Topic) -> (BinanceEndpoint, String) {
     let (endpoint, channel) = match (topic.instrument.underlying_type, topic.market_data_type) {
         (UnderlyingType::Spot, MarketDataType::Bbo) => {
@@ -29,7 +29,7 @@ pub(super) fn route(topic: &Topic) -> (BinanceEndpoint, String) {
             (BinanceEndpoint::SpotSbe, TRADE_CHANNEL)
         }
         (UnderlyingType::Spot, MarketDataType::OrderBook) => {
-            unimplemented!("spot order book depth is not implemented yet")
+            (BinanceEndpoint::SpotSbe, SBE_DEPTH_CHANNEL)
         }
         (UnderlyingType::Perpetual, MarketDataType::Bbo) => {
             (BinanceEndpoint::FuturesPublic, BOOK_TICKER_CHANNEL)
@@ -153,6 +153,11 @@ mod tests {
                 BinanceEndpoint::FuturesMarket,
             ),
             (
+                UnderlyingType::Spot,
+                MarketDataType::OrderBook,
+                BinanceEndpoint::SpotSbe,
+            ),
+            (
                 UnderlyingType::Perpetual,
                 MarketDataType::OrderBook,
                 BinanceEndpoint::FuturesPublic,
@@ -216,6 +221,10 @@ mod tests {
                 MarketDataType::AggregateTrade
             ))
             .1
+        );
+        assert_eq!(
+            "btcusdt@depth",
+            route(&topic(UnderlyingType::Spot, MarketDataType::OrderBook)).1
         );
         assert_eq!(
             "btcusdt@depth10@100ms",

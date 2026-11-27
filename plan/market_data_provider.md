@@ -7,7 +7,6 @@
 - **Coindesk mapped / unmapped 检查**：具体内容待讨论。
 - **跨重启保留订阅集合**：目前行情服务重启后靠策略每 10 秒一次的 `/resubscribe` 恢复订阅；以后由行情服务自己持久化。
 - **OKX connector**：`OkxConnector` 目前是 dummy，每 10 ms 发合成数据；换成真实实现后删除 `exchanges/synthetic.rs`。
-- **现货增量深度 + 本地 order book**：现货用 SBE `<symbol>@depth`（20ms 增量）维护本地订单簿，对外仍只发布前 10 档；要解决快照与增量的对齐、`U/u` 缺口检测、断线重同步和薄 book 的处理。尚未实现，当前现货 `ORDER_BOOK` 在 connector 里还是 `unimplemented!()`；合约已经用 JSON `@depth10@100ms` 的部分深度快照实现。
 
 ## 长远规划（暂不实施：工作量大、收益要靠实测确认，只记录动机，供以后评估）
 

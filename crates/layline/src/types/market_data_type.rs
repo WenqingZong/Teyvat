@@ -1,9 +1,20 @@
 use serde::{Deserialize, Serialize};
-use strum::Display;
+use strum::{Display, EnumIter};
 
 /// Serde spelling matches `Display`, so JSON keys read like ring paths.
 #[derive(
-    Clone, Copy, Debug, Deserialize, Display, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Display,
+    EnumIter,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
 )]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]

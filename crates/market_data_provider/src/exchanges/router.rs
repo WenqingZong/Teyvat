@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use strum::IntoEnumIterator;
 
+use super::binance::HttpDepthSnapshots;
 use super::websocket::TungsteniteClient;
 use super::worker::{WorkerHandle, failed_reply, spawn_worker};
 use super::{BinanceConnector, ConnectorContext, OkxConnector};
@@ -97,6 +98,7 @@ fn spawn_exchange_worker(
                     context.gnosis_client,
                     context.notifier,
                     RealClock,
+                    HttpDepthSnapshots::new(demo),
                 )
             })
         }

@@ -34,6 +34,7 @@ use std::ops::Range;
 
 use anyhow::{Result, anyhow, ensure};
 use bcast::{HEADER_SIZE, METADATA_BUFFER_SIZE};
+use strum::IntoEnumIterator;
 
 use crate::types::MarketDataType;
 
@@ -70,15 +71,9 @@ pub(super) fn read_market_data_type(metadata: &[u8]) -> Result<MarketDataType> {
         "metadata is not format version {FORMAT_VERSION}"
     );
     let code = metadata[METADATA_MARKET_DATA_TYPE_INDEX];
-    [
-        MarketDataType::Bbo,
-        MarketDataType::Trade,
-        MarketDataType::AggregateTrade,
-        MarketDataType::OrderBook,
-    ]
-    .into_iter()
-    .find(|market_data_type| *market_data_type as u8 == code)
-    .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
+    MarketDataType::iter()
+        .find(|market_data_type| *market_data_type as u8 == code)
+        .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
 }
 
 #[cfg(test)]

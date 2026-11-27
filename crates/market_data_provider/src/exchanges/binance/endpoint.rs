@@ -32,11 +32,15 @@ const SPOT_SBE_DOC: &str =
 const FUTURES_DOC: &str = "https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams";
 
 pub(super) const SPOT_EXCHANGE_INFO_LIVE: &str = "https://api.binance.com/api/v3/exchangeInfo";
-pub(super) const SPOT_EXCHANGE_INFO_DEMO: &str =
-    "https://testnet.binance.vision/api/v3/exchangeInfo";
+/// Demo Mode, the same environment as the demo SBE websocket; the Spot testnet is another book.
+pub(super) const SPOT_EXCHANGE_INFO_DEMO: &str = "https://demo-api.binance.com/api/v3/exchangeInfo";
+pub(super) const SPOT_DEPTH_LIVE: &str = "https://api.binance.com/api/v3/depth";
+pub(super) const SPOT_DEPTH_DEMO: &str = "https://demo-api.binance.com/api/v3/depth";
+// AI TODO: 这里写错了吧? 应该是https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#depth
+pub(super) const SPOT_DEPTH_DOC: &str = "https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints#order-book";
 pub(super) const FUTURES_EXCHANGE_INFO_LIVE: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 pub(super) const FUTURES_EXCHANGE_INFO_DEMO: &str =
-    "https://testnet.binancefuture.com/fapi/v1/exchangeInfo";
+    "https://demo-fapi.binance.com/fapi/v1/exchangeInfo";
 pub(super) const SPOT_EXCHANGE_INFO_DOC: &str = "https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/general#exchange-info";
 pub(super) const FUTURES_EXCHANGE_INFO_DOC: &str = "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information";
 
@@ -100,6 +104,16 @@ pub(super) const CONNECTED_APIS: &[ConnectedApi] = &[
         doc: SPOT_EXCHANGE_INFO_DOC,
     },
     ConnectedApi {
+        description: "Spot order book snapshot, live",
+        api: SPOT_DEPTH_LIVE,
+        doc: SPOT_DEPTH_DOC,
+    },
+    ConnectedApi {
+        description: "Spot order book snapshot, demo",
+        api: SPOT_DEPTH_DEMO,
+        doc: SPOT_DEPTH_DOC,
+    },
+    ConnectedApi {
         description: "USDⓈ-M futures exchange information, live",
         api: FUTURES_EXCHANGE_INFO_LIVE,
         doc: FUTURES_EXCHANGE_INFO_DOC,
@@ -134,6 +148,13 @@ mod tests {
             FUTURES_EXCHANGE_INFO_LIVE,
             FUTURES_EXCHANGE_INFO_DEMO,
         ] {
+            assert!(CONNECTED_APIS.iter().any(|api| api.api == url), "{url}");
+        }
+    }
+
+    #[test]
+    fn depth_urls_are_listed_in_connected_apis() {
+        for url in [SPOT_DEPTH_LIVE, SPOT_DEPTH_DEMO] {
             assert!(CONNECTED_APIS.iter().any(|api| api.api == url), "{url}");
         }
     }

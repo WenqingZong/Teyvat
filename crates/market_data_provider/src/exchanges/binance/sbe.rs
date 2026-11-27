@@ -13,17 +13,23 @@ use crate::time::microseconds_to_nanoseconds;
 const SCHEMA_ID: u16 = 1;
 const TRADES_TEMPLATE_ID: u16 = 10000;
 const BEST_BID_ASK_TEMPLATE_ID: u16 = 10001;
+const DEPTH_DIFF_TEMPLATE_ID: u16 = 10003;
 const HEADER_LENGTH: usize = 8;
 /// eventTime, bookUpdateId, priceExponent, qtyExponent, bidPrice, bidQty, askPrice, askQty.
 const BEST_BID_ASK_ROOT_LENGTH: usize = 50;
 /// eventTime, transactTime, priceExponent, qtyExponent.
 const TRADES_ROOT_LENGTH: usize = 18;
+/// eventTime, firstBookUpdateId, lastBookUpdateId, priceExponent, qtyExponent.
+const DEPTH_DIFF_ROOT_LENGTH: usize = 26;
+/// price and qty.
+const DEPTH_LEVEL_LENGTH: usize = 16;
 /// id, price, qty, isBuyerMaker; isBestMatch is constant and not on the wire.
 const TRADE_ENTRY_LENGTH: usize = 25;
 
 pub(super) enum SbeFrame<'a> {
     Trades(SbeTrades<'a>),
     BestBidAsk(SbeBestBidAsk<'a>),
+    DepthDiff(SbeDepthDiff<'a>),
     /// Another template, which nothing subscribes to.
     Other {
         template_id: u16,
@@ -75,6 +81,64 @@ pub(super) struct SbeTrade {
     pub(super) buyer_is_maker: bool,
 }
 
+pub(super) struct SbeDepthDiff<'a> {
+    pub(super) symbol: &'a str,
+    pub(super) event_time_nanoseconds: NonZeroU64,
+    pub(super) first_update_id: u64,
+    pub(super) last_update_id: u64,
+    price_exponent: i8,
+    size_exponent: i8,
+    bids: &'a [u8],
+    asks: &'a [u8],
+    bid_count: usize,
+    ask_count: usize,
+    entry_length: usize,
+}
+
+impl SbeDepthDiff<'_> {
+    pub(super) fn bids(&self) -> impl Iterator<Item = Result<(Decimal, Decimal)>> + '_ {
+        depth_levels(
+            self.bids,
+            self.bid_count,
+            self.entry_length,
+            self.price_exponent,
+            self.size_exponent,
+        )
+    }
+
+    pub(super) fn asks(&self) -> impl Iterator<Item = Result<(Decimal, Decimal)>> + '_ {
+        depth_levels(
+            self.asks,
+            self.ask_count,
+            self.entry_length,
+            self.price_exponent,
+            self.size_exponent,
+        )
+    }
+}
+
+fn depth_levels(
+    entries: &[u8],
+    count: usize,
+    entry_length: usize,
+    price_exponent: i8,
+    size_exponent: i8,
+) -> impl Iterator<Item = Result<(Decimal, Decimal)>> + '_ {
+    entries
+        .chunks_exact(entry_length)
+        .take(count)
+        .map(move |entry| {
+            let mut reader = Reader {
+                frame: entry,
+                offset: 0,
+            };
+            Ok((
+                decimal(reader.i64()?, price_exponent)?,
+                decimal(reader.i64()?, size_exponent)?,
+            ))
+        })
+}
+
 pub(super) fn decode(frame: &[u8]) -> Result<SbeFrame<'_>> {
     let mut reader = Reader { frame, offset: 0 };
     let block_length = usize::from(reader.u16()?);
@@ -87,6 +151,7 @@ pub(super) fn decode(frame: &[u8]) -> Result<SbeFrame<'_>> {
     match template_id {
         TRADES_TEMPLATE_ID => decode_trades(reader, block_length),
         BEST_BID_ASK_TEMPLATE_ID => decode_best_bid_ask(reader, block_length),
+        DEPTH_DIFF_TEMPLATE_ID => decode_depth_diff(reader, block_length),
         _ => Ok(SbeFrame::Other { template_id }),
     }
 }
@@ -146,6 +211,57 @@ fn decode_trades(mut reader: Reader<'_>, block_length: usize) -> Result<SbeFrame
         entries,
         entry_length,
     }))
+}
+
+fn decode_depth_diff(mut reader: Reader<'_>, block_length: usize) -> Result<SbeFrame<'_>> {
+    if block_length < DEPTH_DIFF_ROOT_LENGTH {
+        bail!("depth diff block of {block_length} bytes is too short");
+    }
+    let event_time_nanoseconds = signed_microseconds_to_nanoseconds(reader.i64()?)?;
+    let first_update_id = u64::try_from(reader.i64()?).context("negative first update id")?;
+    let last_update_id = u64::try_from(reader.i64()?).context("negative last update id")?;
+    let price_exponent = reader.i8()?;
+    let size_exponent = reader.i8()?;
+    reader.seek(HEADER_LENGTH + block_length)?;
+
+    let (bid_entry_length, bid_count) = depth_group_header(&mut reader)?;
+    let bids = reader.bytes(
+        bid_count
+            .checked_mul(bid_entry_length)
+            .context("bid group length overflow")?,
+    )?;
+    let (ask_entry_length, ask_count) = depth_group_header(&mut reader)?;
+    let asks = reader.bytes(
+        ask_count
+            .checked_mul(ask_entry_length)
+            .context("ask group length overflow")?,
+    )?;
+    if bid_entry_length < DEPTH_LEVEL_LENGTH || ask_entry_length < DEPTH_LEVEL_LENGTH {
+        bail!("depth level is shorter than {DEPTH_LEVEL_LENGTH} bytes");
+    }
+    if bid_entry_length != ask_entry_length {
+        bail!("depth groups have different level lengths");
+    }
+    let symbol = reader.symbol()?;
+    Ok(SbeFrame::DepthDiff(SbeDepthDiff {
+        symbol,
+        event_time_nanoseconds,
+        first_update_id,
+        last_update_id,
+        price_exponent,
+        size_exponent,
+        bids,
+        asks,
+        bid_count,
+        ask_count,
+        entry_length: bid_entry_length,
+    }))
+}
+
+fn depth_group_header(reader: &mut Reader<'_>) -> Result<(usize, usize)> {
+    let entry_length = usize::from(reader.u16()?);
+    let count = usize::from(reader.u16()?);
+    Ok((entry_length, count))
 }
 
 /// Binance encodes microseconds as `i64`; a negative one is invalid.
@@ -303,6 +419,46 @@ pub(super) mod tests {
         frame
     }
 
+    /// A depth diff frame with `-8` exponents and microsecond times.
+    pub(in crate::exchanges::binance) fn encode_depth_diff(
+        symbol: &str,
+        event_time_microseconds: i64,
+        first_update_id: i64,
+        last_update_id: i64,
+        bids: &[(i64, i64)],
+        asks: &[(i64, i64)],
+    ) -> Vec<u8> {
+        let mut frame = Vec::new();
+        for value in [
+            DEPTH_DIFF_ROOT_LENGTH as u16,
+            DEPTH_DIFF_TEMPLATE_ID,
+            SCHEMA_ID,
+            0,
+        ] {
+            frame.extend(value.to_le_bytes());
+        }
+        frame.extend(event_time_microseconds.to_le_bytes());
+        frame.extend(first_update_id.to_le_bytes());
+        frame.extend(last_update_id.to_le_bytes());
+        frame.extend((-8_i8).to_le_bytes());
+        frame.extend((-8_i8).to_le_bytes());
+        for levels in [bids, asks] {
+            frame.extend((DEPTH_LEVEL_LENGTH as u16).to_le_bytes());
+            frame.extend(
+                u16::try_from(levels.len())
+                    .expect("few levels")
+                    .to_le_bytes(),
+            );
+            for (price, size) in levels {
+                frame.extend(price.to_le_bytes());
+                frame.extend(size.to_le_bytes());
+            }
+        }
+        frame.push(u8::try_from(symbol.len()).expect("short symbol"));
+        frame.extend(symbol.as_bytes());
+        frame
+    }
+
     fn two_trades() -> Vec<u8> {
         encode_trades(
             "BTCUSDT",
@@ -336,6 +492,7 @@ pub(super) mod tests {
                     .expect("every fill is expected to decode"),
             ),
             SbeFrame::BestBidAsk(_) => panic!("trades are expected"),
+            SbeFrame::DepthDiff(_) => panic!("trades are expected"),
             SbeFrame::Other { template_id } => panic!("unexpected template {template_id}"),
         }
     }
@@ -397,10 +554,10 @@ pub(super) mod tests {
     #[test]
     fn other_templates_are_reported_not_decoded() {
         let mut frame = two_trades();
-        frame[2..4].copy_from_slice(&10002_u16.to_le_bytes());
+        frame[2..4].copy_from_slice(&10004_u16.to_le_bytes());
         assert!(matches!(
             decode(&frame).expect("a known schema"),
-            SbeFrame::Other { template_id: 10002 }
+            SbeFrame::Other { template_id: 10004 }
         ));
     }
 
@@ -420,6 +577,52 @@ pub(super) mod tests {
         assert_eq!(dec!(2.841), best_bid_ask.bid_size);
         assert_eq!(dec!(2343.55), best_bid_ask.ask_price);
         assert_eq!(dec!(96.2171), best_bid_ask.ask_size);
+    }
+
+    #[test]
+    fn depth_diff_frame_decodes_both_sides() {
+        let frame = encode_depth_diff(
+            "BTCUSDT",
+            1_792_881_786_559_123,
+            10,
+            12,
+            &[(8_058_630_000_000, 284_100_000), (8_058_620_000_000, 0)],
+            &[(8_058_640_000_000, 962_171_000)],
+        );
+        let SbeFrame::DepthDiff(diff) = decode(&frame).expect("a valid frame") else {
+            panic!("a depth diff is expected");
+        };
+        assert_eq!("BTCUSDT", diff.symbol);
+        assert_eq!(1_792_881_786_559_123_000, diff.event_time_nanoseconds.get());
+        assert_eq!(10, diff.first_update_id);
+        assert_eq!(12, diff.last_update_id);
+        assert_eq!(
+            vec![(dec!(80586.3), dec!(2.841)), (dec!(80586.2), dec!(0)),],
+            diff.bids()
+                .collect::<Result<Vec<_>>>()
+                .expect("every bid decodes")
+        );
+        assert_eq!(
+            vec![(dec!(80586.4), dec!(9.62171))],
+            diff.asks()
+                .collect::<Result<Vec<_>>>()
+                .expect("every ask decodes")
+        );
+    }
+
+    #[test]
+    fn malformed_depth_diff_is_refused() {
+        let frame = encode_depth_diff("BTCUSDT", 1, 1, 2, &[(1, 1)], &[(2, 1)]);
+        for length in [0, 7, HEADER_LENGTH + 10, frame.len() - 1] {
+            assert!(decode(&frame[..length]).is_err(), "truncated to {length}");
+        }
+        let mut short_block = frame.clone();
+        short_block[0..2].copy_from_slice(&20_u16.to_le_bytes());
+        assert!(decode(&short_block).is_err());
+        let mut short_level = frame;
+        let group_start = HEADER_LENGTH + DEPTH_DIFF_ROOT_LENGTH;
+        short_level[group_start..group_start + 2].copy_from_slice(&8_u16.to_le_bytes());
+        assert!(decode(&short_level).is_err());
     }
 
     #[test]
