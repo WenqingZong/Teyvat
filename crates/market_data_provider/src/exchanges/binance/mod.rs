@@ -2,19 +2,24 @@ mod endpoint;
 pub(crate) mod instrument_rules;
 mod message;
 mod sbe;
+mod spot_depth;
 mod venue_stream;
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::pending;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 use futures::future::OptionFuture;
+use rust_decimal::Decimal;
 use secrecy::SecretString;
 use strum::EnumCount;
 use tokio::select;
-use tokio::time::{Instant, sleep_until, timeout};
+use tokio::spawn;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
@@ -27,22 +32,26 @@ use crate::aggregation::VolumeWeightedAveragePrice;
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::gnosis_client::{GnosisClient, GnosisSource, fetch_gnosis_or_panic};
-use crate::utils::{Clock, RealClock};
+use crate::utils::{Clock, RealClock, to_pretty_json};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use layline::bark::Notifier;
 use layline::gnosis::binance::BinanceSbeApiKey;
 use layline::types::ConnectedApi;
 use layline::types::{
-    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Topic, Trade,
+    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, OrderBookSnapshot,
+    OrderBookState, OrderBookUpdate, OrderBookUpdateOutcome, PriceLevel, Topic, Trade,
+    UnderlyingType,
 };
 use message::{
-    Request, Response, TextFrame, classify_text_frame, event_to_market_data, taker_side,
-    to_sequence,
+    Request, Response, TextFrame, classify_text_frame, depth_event_to_order_book,
+    event_to_market_data, taker_side,
 };
-use sbe::{SbeFrame, SbeTrades};
+use sbe::{SbeDepthDiff, SbeFrame, SbeTrades};
+use spot_depth::DepthSnapshotSource;
+pub(crate) use spot_depth::HttpDepthSnapshots;
 use venue_stream::{
-    SBE_BEST_BID_ASK_CHANNEL, STREAM_NAME_CAPACITY, TRADE_CHANNEL, endpoint_for_topic,
-    sbe_stream_name, stream_name,
+    SBE_BEST_BID_ASK_CHANNEL, SBE_DEPTH_CHANNEL, STREAM_NAME_CAPACITY, TRADE_CHANNEL, route,
+    sbe_stream_name,
 };
 
 /// Binance futures ping only every ~3 minutes, so we ping idle connections ourselves.
@@ -57,7 +66,8 @@ const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// A lost endpoint is restored at once, then retried after 1 s, doubling up to a minute.
 const FIRST_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
-const RESTORE_FAILURES_BEFORE_ALERT: u32 = 5;
+/// The phone is alerted after this many failures in a row, whether restoring an endpoint or syncing a book.
+const FAILURES_BEFORE_ALERT: u32 = 5;
 const SUBSCRIBE: &str = "SUBSCRIBE";
 const UNSUBSCRIBE: &str = "UNSUBSCRIBE";
 
@@ -75,6 +85,7 @@ pub(crate) struct BinanceConnector<
     KeySource = GnosisClient,
     Alerter = Notifier,
     TimeSource = RealClock,
+    SnapshotsSource = HttpDepthSnapshots,
 > {
     demo: bool,
     key_source: KeySource,
@@ -87,6 +98,10 @@ pub(crate) struct BinanceConnector<
     /// Parsed but not yet handed out; one SBE frame can carry several trades.
     pending: VecDeque<MarketData>,
     next_request_id: u64,
+    snapshot_source: SnapshotsSource,
+    snapshot_sender: UnboundedSender<(Instrument, OrderBookSnapshot)>,
+    snapshot_results: UnboundedReceiver<(Instrument, OrderBookSnapshot)>,
+    spot_books: HashMap<Instrument, SpotBook>,
 }
 
 const ENDPOINT_COUNT: usize = BinanceEndpoint::COUNT;
@@ -103,13 +118,40 @@ impl EndpointId for BinanceEndpoint {
     }
 }
 
-impl<WebSocket, KeySource, Alerter, TimeSource> ExchangeConnector
-    for BinanceConnector<WebSocket, KeySource, Alerter, TimeSource>
+/// One spot book and the background task fetching its next snapshot; merging is `OrderBookState`.
+struct SpotBook {
+    state: OrderBookState,
+    snapshot_task: Option<JoinHandle<()>>,
+    /// Consecutive snapshots that could not be applied because the buffered updates did not continue them.
+    sync_failures: u32,
+}
+
+impl SpotBook {
+    fn new(instrument: Instrument) -> Self {
+        Self {
+            state: OrderBookState::new(instrument),
+            snapshot_task: None,
+            sync_failures: 0,
+        }
+    }
+}
+
+impl Drop for SpotBook {
+    fn drop(&mut self) {
+        if let Some(task) = self.snapshot_task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl<WebSocket, KeySource, Alerter, TimeSource, SnapshotsSource> ExchangeConnector
+    for BinanceConnector<WebSocket, KeySource, Alerter, TimeSource, SnapshotsSource>
 where
     WebSocket: WebSocketClient,
     KeySource: GnosisSource,
-    Alerter: SendAlert,
+    Alerter: SendAlert + Clone + Send + 'static,
     TimeSource: Clock,
+    SnapshotsSource: DepthSnapshotSource,
 {
     const EXCHANGE: Exchange = Exchange::Binance;
     // Edited by hand: list every venue API this connector calls.
@@ -134,6 +176,11 @@ where
                 }
             }
         }
+        for topic in topics {
+            if is_spot_order_book(topic) {
+                self.start_spot_book(topic.instrument);
+            }
+        }
         Ok(())
     }
 
@@ -144,6 +191,11 @@ where
         for (endpoint, streams) in streams_by_endpoint {
             if let Err(error) = self.unsubscribe_streams(endpoint, &streams).await {
                 first_error_option.get_or_insert(error.context(endpoint.to_string()));
+            }
+        }
+        for topic in topics {
+            if is_spot_order_book(topic) {
+                self.spot_books.remove(&topic.instrument);
             }
         }
         first_error_option.map_or(Ok(()), Err)
@@ -167,6 +219,12 @@ where
             let futures_public_connected = futures_public.connection.is_connected();
             let futures_market_connected = futures_market.connection.is_connected();
             let (endpoint, message_result, received_time_nanoseconds) = select! {
+                snapshot_option = self.snapshot_results.recv() => {
+                    if let Some((instrument, snapshot)) = snapshot_option {
+                        self.handle_snapshot_result(instrument, snapshot);
+                    }
+                    continue;
+                }
                 (message_result, received_time_nanoseconds) = read(spot_sbe, clock), if spot_sbe_connected => {
                     (BinanceEndpoint::SpotSbe, message_result, received_time_nanoseconds)
                 }
@@ -200,13 +258,14 @@ where
     }
 }
 
-impl<WebSocket, KeySource, Alerter, TimeSource>
-    BinanceConnector<WebSocket, KeySource, Alerter, TimeSource>
+impl<WebSocket, KeySource, Alerter, TimeSource, SnapshotsSource>
+    BinanceConnector<WebSocket, KeySource, Alerter, TimeSource, SnapshotsSource>
 where
     WebSocket: WebSocketClient,
     KeySource: GnosisSource,
-    Alerter: SendAlert,
+    Alerter: SendAlert + Clone + Send + 'static,
     TimeSource: Clock,
+    SnapshotsSource: DepthSnapshotSource,
 {
     /// Connects nothing: an endpoint connects on its first stream. `create_websocket` makes each endpoint's client.
     pub(super) fn new(
@@ -215,9 +274,11 @@ where
         key_source: KeySource,
         alert: Alerter,
         clock: TimeSource,
+        snapshot_source: SnapshotsSource,
     ) -> Self {
         info!("BinanceConnector::new is called, demo: {demo}");
         let endpoints = EndpointSet::new(create_websocket, HEARTBEAT);
+        let (snapshot_sender, snapshot_results) = unbounded_channel();
         Self {
             demo,
             key_source,
@@ -227,6 +288,121 @@ where
             sbe_api_key: None,
             pending: VecDeque::new(),
             next_request_id: 1,
+            snapshot_source,
+            snapshot_sender,
+            snapshot_results,
+            spot_books: HashMap::new(),
+        }
+    }
+
+    fn start_spot_book(&mut self, instrument: Instrument) {
+        if self.spot_books.contains_key(&instrument) {
+            return;
+        }
+        self.spot_books
+            .insert(instrument, SpotBook::new(instrument));
+        self.request_snapshot(instrument, Duration::ZERO);
+    }
+
+    fn request_snapshot(&mut self, instrument: Instrument, delay: Duration) {
+        let Some(book) = self.spot_books.get_mut(&instrument) else {
+            return;
+        };
+        if book.snapshot_task.is_some() {
+            return;
+        }
+        let source = self.snapshot_source.clone();
+        let sender = self.snapshot_sender.clone();
+        let alert = self.alert.clone();
+        book.snapshot_task = Some(spawn(fetch_snapshot_until_success(
+            source, alert, sender, instrument, delay,
+        )));
+    }
+
+    fn handle_snapshot_result(&mut self, instrument: Instrument, snapshot: OrderBookSnapshot) {
+        let (order_book_result, failures) = {
+            let Some(book) = self.spot_books.get_mut(&instrument) else {
+                return;
+            };
+            book.snapshot_task = None;
+            match book.state.apply_snapshot(snapshot) {
+                Ok(order_book) => {
+                    book.sync_failures = 0;
+                    (Ok(order_book), 0)
+                }
+                Err(error) => {
+                    book.sync_failures += 1;
+                    (Err(error), book.sync_failures)
+                }
+            }
+        };
+        match order_book_result {
+            Ok(order_book) => self.pending.push_back(MarketData::OrderBook(order_book)),
+            Err(error) => {
+                let delay = retry_delay(failures);
+                warn!(
+                    "cannot sync the {instrument} spot order book: {error}; retrying in {delay:?}"
+                );
+                if failures == FAILURES_BEFORE_ALERT {
+                    let title = format!(
+                        "Market Data Provider Cannot Sync Binance Spot Depth for {instrument}"
+                    );
+                    let body =
+                        format!("{failures} snapshots in a row could not be applied: {error}");
+                    let alert = self.alert.clone();
+                    spawn(async move {
+                        alert.send_alert(&title, &body).await;
+                    });
+                }
+                self.request_snapshot(instrument, delay);
+            }
+        }
+    }
+
+    fn apply_spot_depth_update(&mut self, instrument: Instrument, update: OrderBookUpdate) {
+        let outcome = {
+            let Some(book) = self.spot_books.get_mut(&instrument) else {
+                return;
+            };
+            book.state.apply_update(update)
+        };
+        match outcome {
+            OrderBookUpdateOutcome::Published {
+                exchange_time_nanoseconds,
+                received_time_nanoseconds,
+            } => {
+                let Some(book) = self.spot_books.get(&instrument) else {
+                    return;
+                };
+                self.pending
+                    .push_back(MarketData::OrderBook(book.state.order_book(
+                        exchange_time_nanoseconds,
+                        LatencyMetric::received(received_time_nanoseconds),
+                    )));
+            }
+            OrderBookUpdateOutcome::Buffered | OrderBookUpdateOutcome::Ignored => {}
+            OrderBookUpdateOutcome::NeedsSnapshot => {
+                self.request_snapshot(instrument, Duration::ZERO)
+            }
+        }
+    }
+
+    fn reset_spot_book(&mut self, instrument: Instrument) {
+        if let Some(book) = self.spot_books.get_mut(&instrument) {
+            book.state.reset();
+            book.sync_failures = 0;
+        }
+        self.request_snapshot(instrument, Duration::ZERO);
+    }
+
+    fn resync_spot_books(&mut self) {
+        let instruments: Vec<Instrument> = self.spot_books.keys().copied().collect();
+        for instrument in instruments {
+            if let Some(book) = self.spot_books.get_mut(&instrument) {
+                book.state.reset();
+                book.sync_failures = 0;
+            }
+            self.request_snapshot(instrument, Duration::ZERO);
         }
     }
 
@@ -339,6 +515,9 @@ where
                     let stream_count = names.len();
                     info!("restored {endpoint} with {stream_count} streams");
                     self.endpoint_set.clear_restore(endpoint);
+                    if endpoint == BinanceEndpoint::SpotSbe {
+                        self.resync_spot_books();
+                    }
                 }
                 Err(error) => {
                     self.fail(endpoint).await;
@@ -347,7 +526,7 @@ where
                     error!(
                         "failed to restore {endpoint} ({failures} in a row): {error:#}; retrying in {next_retry_delay:?}"
                     );
-                    if failures == RESTORE_FAILURES_BEFORE_ALERT {
+                    if failures == FAILURES_BEFORE_ALERT {
                         self.alert
                             .send_alert(
                                 &format!("Market Data Provider Cannot Restore Binance {endpoint}"),
@@ -428,7 +607,7 @@ where
             id,
         };
         let text = serde_json::to_string(&request)?;
-        let pretty = serde_json::to_string_pretty(&request)?;
+        let pretty = to_pretty_json(&request);
         info!("sending to {endpoint}:\n{pretty}");
         self.endpoint_state_mut(endpoint)
             .connection
@@ -485,16 +664,7 @@ where
                     return FrameOutcome::Reconnect;
                 }
                 Ok(TextFrame::Event { stream, data }) => {
-                    let Some(topics) = self
-                        .endpoint_set
-                        .state(endpoint)
-                        .topics_by_key
-                        .get(stream.as_ref())
-                    else {
-                        debug!("dropping {stream} from {endpoint}: not subscribed");
-                        return FrameOutcome::None;
-                    };
-                    for topic in topics {
+                    for topic in json_topics(&self.endpoint_set, endpoint, &stream) {
                         match event_to_market_data(*topic, &data, received_time_nanoseconds) {
                             Ok(Some(market_data)) => self.pending.push_back(market_data),
                             Ok(None) => {
@@ -504,6 +674,16 @@ where
                                 warn!("failed to parse {stream} from {endpoint}: {error:#}: {text}")
                             }
                         }
+                    }
+                }
+                Ok(TextFrame::Depth { stream, data }) => {
+                    for topic in json_topics(&self.endpoint_set, endpoint, &stream) {
+                        self.pending
+                            .push_back(MarketData::OrderBook(depth_event_to_order_book(
+                                *topic,
+                                &data,
+                                received_time_nanoseconds,
+                            )));
                     }
                 }
                 Err(error) => warn!("unexpected text from {endpoint}: {error:#}: {text}"),
@@ -533,22 +713,16 @@ where
                 .first() else {
                     return;
                 };
-                match to_sequence(best_bid_ask.update_id) {
-                    Ok(sequence) => self.pending.push_back(MarketData::Bbo(Bbo {
-                        instrument: topic.instrument,
-                        exchange_time_nanoseconds: Some(best_bid_ask.event_time_nanoseconds),
-                        latency_metric: LatencyMetric::received(received_time_nanoseconds),
-                        ask_price: best_bid_ask.ask_price,
-                        ask_size: best_bid_ask.ask_size,
-                        bid_price: best_bid_ask.bid_price,
-                        bid_size: best_bid_ask.bid_size,
-                        sequence,
-                    })),
-                    Err(error) => {
-                        let symbol = best_bid_ask.symbol;
-                        warn!("dropping a {symbol} BBO from {endpoint}: {error:#}");
-                    }
-                }
+                self.pending.push_back(MarketData::Bbo(Bbo {
+                    instrument: topic.instrument,
+                    exchange_time_nanoseconds: Some(best_bid_ask.event_time_nanoseconds),
+                    latency_metric: LatencyMetric::received(received_time_nanoseconds),
+                    ask_price: best_bid_ask.ask_price,
+                    ask_size: best_bid_ask.ask_size,
+                    bid_price: best_bid_ask.bid_price,
+                    bid_size: best_bid_ask.bid_size,
+                    sequence: best_bid_ask.update_id as usize,
+                }));
             }
             Ok(SbeFrame::Trades(trades)) => {
                 let exchange_time_nanoseconds_option = Some(trades.transaction_time_nanoseconds);
@@ -567,25 +741,38 @@ where
                         continue;
                     }
                     for trade_result in trades.trades() {
-                        match trade_result.and_then(|trade| Ok((to_sequence(trade.id)?, trade))) {
-                            Ok((sequence, trade)) => {
-                                self.pending.push_back(MarketData::Trade(Trade {
-                                    instrument: topic.instrument,
-                                    exchange_time_nanoseconds: exchange_time_nanoseconds_option,
-                                    latency_metric: LatencyMetric::received(
-                                        received_time_nanoseconds,
-                                    ),
-                                    price: trade.price,
-                                    size: trade.size,
-                                    taker_side: taker_side(trade.buyer_is_maker),
-                                    sequence,
-                                }))
-                            }
+                        match trade_result {
+                            Ok(trade) => self.pending.push_back(MarketData::Trade(Trade {
+                                instrument: topic.instrument,
+                                exchange_time_nanoseconds: exchange_time_nanoseconds_option,
+                                latency_metric: LatencyMetric::received(received_time_nanoseconds),
+                                price: trade.price,
+                                size: trade.size,
+                                taker_side: taker_side(trade.buyer_is_maker),
+                                sequence: trade.id as usize,
+                            })),
                             Err(error) => {
                                 let symbol = trades.symbol;
                                 warn!("dropping a {symbol} trade from {endpoint}: {error:#}");
                             }
                         }
+                    }
+                }
+            }
+            Ok(SbeFrame::DepthDiff(diff)) => {
+                let Some(topic) =
+                    sbe_topics(&self.endpoint_set, endpoint, diff.symbol, SBE_DEPTH_CHANNEL)
+                        .first()
+                else {
+                    return;
+                };
+                let instrument = topic.instrument;
+                match depth_update_from_sbe(&diff, received_time_nanoseconds) {
+                    Ok(update) => self.apply_spot_depth_update(instrument, update),
+                    Err(error) => {
+                        let symbol = diff.symbol;
+                        warn!("dropping a {symbol} depth diff from {endpoint}: {error:#}");
+                        self.reset_spot_book(instrument);
                     }
                 }
             }
@@ -598,6 +785,89 @@ where
             }
         }
     }
+}
+
+/// Fetches one snapshot, retrying failures until it succeeds; the connector only sees successes.
+async fn fetch_snapshot_until_success<SnapshotsSource, Alerter>(
+    source: SnapshotsSource,
+    alert: Alerter,
+    sender: UnboundedSender<(Instrument, OrderBookSnapshot)>,
+    instrument: Instrument,
+    delay: Duration,
+) where
+    SnapshotsSource: DepthSnapshotSource,
+    Alerter: SendAlert + Send,
+{
+    sleep(delay).await;
+    let mut failures = 0;
+    loop {
+        match source.fetch(instrument).await {
+            Ok(snapshot) => {
+                let _ = sender.send((instrument, snapshot));
+                return;
+            }
+            Err(error) => {
+                failures += 1;
+                let delay = retry_delay(failures);
+                warn!(
+                    "cannot fetch the {instrument} spot order book snapshot: {error:#}; retrying in {delay:?}"
+                );
+                if failures == FAILURES_BEFORE_ALERT {
+                    alert
+                        .send_alert(
+                            &format!(
+                                "Market Data Provider Cannot Fetch Binance Spot Depth for {instrument}"
+                            ),
+                            &format!("{failures} attempts failed, still retrying: {error:#}"),
+                        )
+                        .await;
+                }
+                sleep(delay).await;
+            }
+        }
+    }
+}
+
+fn is_spot_order_book(topic: &Topic) -> bool {
+    topic.instrument.underlying_type == UnderlyingType::Spot
+        && topic.market_data_type == MarketDataType::OrderBook
+}
+
+fn depth_update_from_sbe(
+    diff: &SbeDepthDiff<'_>,
+    received_time_nanoseconds: NonZeroU64,
+) -> Result<OrderBookUpdate> {
+    Ok(OrderBookUpdate {
+        first_sequence: diff.first_update_id,
+        last_sequence: diff.last_update_id,
+        exchange_time_nanoseconds: Some(diff.event_time_nanoseconds),
+        received_time_nanoseconds,
+        bids: price_levels(diff.bids())?,
+        asks: price_levels(diff.asks())?,
+    })
+}
+
+fn price_levels(
+    levels: impl Iterator<Item = Result<(Decimal, Decimal)>>,
+) -> Result<Vec<PriceLevel>> {
+    levels
+        .map(|level_result| level_result.map(|(price, size)| PriceLevel { price, size }))
+        .collect()
+}
+
+/// The subscribed topics of a JSON event; none if nothing subscribes, and a free function for the
+/// same reason as `sbe_topics`.
+fn json_topics<'a, WebSocket: WebSocketClient>(
+    endpoint_set: &'a BinanceEndpointSet<WebSocket>,
+    endpoint: BinanceEndpoint,
+    stream: &str,
+) -> &'a [Topic] {
+    let topics_option = endpoint_set.state(endpoint).topics_by_key.get(stream);
+    let Some(topics) = topics_option else {
+        debug!("dropping {stream} from {endpoint}: not subscribed");
+        return &[];
+    };
+    topics
 }
 
 /// The subscribed topics of an SBE event, found without allocating; none if nothing subscribes. A
@@ -650,7 +920,7 @@ fn merge_trades(
         price: average.price().context("no fill of nonzero size")?,
         size: average.size(),
         taker_side: taker_side_option.context("no fills")?,
-        sequence: to_sequence(last_trade_id_option.context("no fills")?)?,
+        sequence: last_trade_id_option.context("no fills")? as usize,
     })
 }
 
@@ -679,10 +949,11 @@ fn retry_delay(failures: u32) -> Duration {
 fn group_streams_by_endpoint(topics: &HashSet<Topic>) -> BTreeMap<BinanceEndpoint, TopicsByKey> {
     let mut groups: BTreeMap<BinanceEndpoint, TopicsByKey> = BTreeMap::new();
     for topic in topics {
+        let (endpoint, stream) = route(topic);
         groups
-            .entry(endpoint_for_topic(topic))
+            .entry(endpoint)
             .or_default()
-            .entry(stream_name(topic))
+            .entry(stream)
             .or_default()
             .push(*topic);
     }
@@ -705,8 +976,9 @@ fn describe_streams(streams_by_endpoint: &BTreeMap<BinanceEndpoint, TopicsByKey>
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::collections::{HashMap, VecDeque};
+    use std::future::Future;
+    use std::sync::{Arc, Mutex};
 
     use rust_decimal::{Decimal, dec};
     use serde_json::{Value, json};
@@ -727,8 +999,10 @@ mod tests {
     use crate::utils::tests::MockClock;
     use layline::gnosis::{Gnosis, GnosisId};
     use layline::testing::{test_instrument, test_topic};
-    use layline::types::{Bbo, Currency, Exchange, MarketDataType, Side, UnderlyingType};
-    use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_trades};
+    use layline::types::{
+        Bbo, Currency, Exchange, MarketDataType, OrderBook, PriceLevel, Side, UnderlyingType,
+    };
+    use sbe::tests::{EncodedTrade, encode_best_bid_ask, encode_depth_diff, encode_trades};
 
     const SBE_API_KEY: &str = "dummy-sbe-api-key";
     /// The SBE gnosis as Phanes sends it.
@@ -738,8 +1012,54 @@ mod tests {
         NonZeroU64::new(1_792_800_000_000_000_000).expect("not zero");
     const MILLISECOND: Duration = Duration::from_millis(1);
 
-    type TestConnector =
-        BinanceConnector<MockWebSocketClient, MockGnosisSource, RecordingAlert, MockClock>;
+    type TestConnector = BinanceConnector<
+        MockWebSocketClient,
+        MockGnosisSource,
+        RecordingAlert,
+        MockClock,
+        MockDepthSnapshots,
+    >;
+
+    #[derive(Clone, Default)]
+    struct MockDepthSnapshots {
+        responses: Arc<Mutex<VecDeque<Result<OrderBookSnapshot>>>>,
+        requested: Arc<Mutex<Vec<Instrument>>>,
+    }
+
+    impl MockDepthSnapshots {
+        fn push(&self, snapshot_result: Result<OrderBookSnapshot>) {
+            self.responses
+                .lock()
+                .expect("the mock snapshot queue is not poisoned")
+                .push_back(snapshot_result);
+        }
+
+        fn requested(&self) -> Vec<Instrument> {
+            self.requested
+                .lock()
+                .expect("the mock request list is not poisoned")
+                .clone()
+        }
+    }
+
+    impl DepthSnapshotSource for MockDepthSnapshots {
+        fn fetch(
+            &self,
+            instrument: Instrument,
+        ) -> impl Future<Output = Result<OrderBookSnapshot>> + Send {
+            self.requested
+                .lock()
+                .expect("the mock request list is not poisoned")
+                .push(instrument);
+            let snapshot_result = self
+                .responses
+                .lock()
+                .expect("the mock snapshot queue is not poisoned")
+                .pop_front()
+                .unwrap_or_else(|| Err(anyhow!("no mock snapshot")));
+            async move { snapshot_result }
+        }
+    }
 
     /// The connector wired to a mock venue per endpoint that acknowledges every request, a mock Phanes
     /// granting the SBE key, a recording phone and a mock clock. Tests run on paused tokio time.
@@ -748,6 +1068,7 @@ mod tests {
         connector: TestConnector,
         venues: HashMap<BinanceEndpoint, MockVenue>,
         alert: RecordingAlert,
+        snapshots: MockDepthSnapshots,
     }
 
     impl BinanceFixture {
@@ -758,6 +1079,7 @@ mod tests {
                 ..MockGnosisSource::default()
             };
             let alert = RecordingAlert::default();
+            let snapshots = MockDepthSnapshots::default();
             let connector = BinanceConnector::new(
                 demo,
                 |endpoint| {
@@ -769,12 +1091,14 @@ mod tests {
                 key_source,
                 alert.clone(),
                 MockClock::new(NOW_NANOSECONDS),
+                snapshots.clone(),
             );
             Self {
                 demo,
                 connector,
                 venues,
                 alert,
+                snapshots,
             }
         }
 
@@ -956,6 +1280,22 @@ mod tests {
         )
     }
 
+    fn spot_order_book() -> Topic {
+        topic(
+            Currency::Btc,
+            UnderlyingType::Spot,
+            MarketDataType::OrderBook,
+        )
+    }
+
+    fn perpetual_order_book() -> Topic {
+        topic(
+            Currency::Btc,
+            UnderlyingType::Perpetual,
+            MarketDataType::OrderBook,
+        )
+    }
+
     fn normal_close() -> Message {
         Message::Close(Some(CloseFrame {
             code: CloseCode::Normal,
@@ -968,6 +1308,48 @@ mod tests {
         let event = json!({"stream": stream, "data": {"e": "bookTicker", "u": update_id, "s": "BTCUSDT",
             "b": "80570.70", "B": "2.6914", "a": "80570.80", "A": "187.5753", "T": 1_792_881_786_559_u64}});
         Message::text(event.to_string())
+    }
+
+    /// A futures partial-depth event with two bids and one ask.
+    fn depth_event(stream: &str, update_id: u64) -> Message {
+        let event = json!({"stream": stream, "data": {"e": "depthUpdate", "E": 1_792_881_786_571_u64,
+            "T": 1_792_881_786_559_u64, "s": "BTCUSDT", "U": 1, "u": update_id, "pu": 0,
+            "b": [["80570.70", "2.6914"], ["80570.60", "1"]],
+            "a": [["80570.80", "1.5"]]}});
+        Message::text(event.to_string())
+    }
+
+    fn depth_snapshot(sequence: u64) -> OrderBookSnapshot {
+        OrderBookSnapshot {
+            sequence,
+            exchange_time_nanoseconds: None,
+            received_time_nanoseconds: NOW_NANOSECONDS,
+            bids: vec![
+                PriceLevel {
+                    price: dec!(100),
+                    size: dec!(1),
+                },
+                PriceLevel {
+                    price: dec!(99),
+                    size: dec!(1),
+                },
+            ],
+            asks: vec![PriceLevel {
+                price: dec!(101),
+                size: dec!(1),
+            }],
+        }
+    }
+
+    fn depth_diff(first_update_id: i64, last_update_id: i64) -> Message {
+        Message::binary(encode_depth_diff(
+            "BTCUSDT",
+            1_792_881_786_559_123,
+            first_update_id,
+            last_update_id,
+            &[(10_000_000_000, 0), (9_900_000_000, 500_000_000)],
+            &[],
+        ))
     }
 
     fn topics_of(produced: &[MarketData]) -> Vec<Topic> {
@@ -992,6 +1374,13 @@ mod tests {
         match market_data {
             MarketData::AggregateTrade(trade) => *trade,
             other => panic!("an aggregate trade is expected, got {other:?}"),
+        }
+    }
+
+    fn expect_order_book(market_data: &MarketData) -> OrderBook {
+        match market_data {
+            MarketData::OrderBook(order_book) => *order_book,
+            other => panic!("an order book is expected, got {other:?}"),
         }
     }
 
@@ -1060,6 +1449,124 @@ mod tests {
         expect_request(&mut connection, SUBSCRIBE, &["btcusdt@trade"]);
         fixture.expect_no_new_connection();
         fixture.expect_connected_endpoints(&[BinanceEndpoint::FuturesPublic]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn perpetual_order_book_uses_the_partial_depth_stream() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.subscribe(&[perpetual_order_book()]).await;
+        let mut connection = fixture.expect_futures();
+        expect_request(&mut connection, SUBSCRIBE, &["btcusdt@depth10@100ms"]);
+        fixture.expect_phanes_asked_for(&[]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn spot_order_book_uses_sbe_depth_and_an_initial_snapshot() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.snapshots.push(Ok(depth_snapshot(1)));
+        fixture.subscribe(&[spot_order_book()]).await;
+        let mut spot = fixture.expect_spot();
+        expect_request(&mut spot, SUBSCRIBE, &["btcusdt@depth"]);
+
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(vec![spot_order_book()], topics_of(&produced));
+        let order_book = expect_order_book(&produced[0]);
+        assert_eq!(2, order_book.bids().len());
+        assert_eq!(1, order_book.asks().len());
+        assert_eq!(None, order_book.exchange_time_nanoseconds);
+        assert_eq!(
+            vec![spot_order_book().instrument],
+            fixture.snapshots.requested()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spot_depth_diff_updates_the_local_book() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.snapshots.push(Ok(depth_snapshot(1)));
+        fixture.subscribe(&[spot_order_book()]).await;
+        let mut spot = fixture.expect_spot();
+        expect_request(&mut spot, SUBSCRIBE, &["btcusdt@depth"]);
+        fixture.run_for(MILLISECOND).await;
+
+        spot.send(depth_diff(2, 2));
+        let produced = fixture.run_for(MILLISECOND).await;
+        let order_book = expect_order_book(&produced[0]);
+        assert_eq!(1, order_book.bids().len());
+        assert_eq!(dec!(99), order_book.bids()[0].price);
+        assert_eq!(2, order_book.sequence);
+        assert_eq!(
+            Some(NonZeroU64::new(1_792_881_786_559_123_000).expect("the timestamp is not zero")),
+            order_book.exchange_time_nanoseconds
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_spot_snapshot_is_retried() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.snapshots.push(Err(anyhow!("temporary failure")));
+        fixture.subscribe(&[spot_order_book()]).await;
+        let mut spot = fixture.expect_spot();
+        expect_request(&mut spot, SUBSCRIBE, &["btcusdt@depth"]);
+        assert!(fixture.run_for(MILLISECOND).await.is_empty());
+
+        fixture.snapshots.push(Ok(depth_snapshot(1)));
+        let produced = fixture.run_for(FIRST_RETRY_DELAY + MILLISECOND).await;
+        assert_eq!(vec![spot_order_book()], topics_of(&produced));
+        assert_eq!(2, fixture.snapshots.requested().len());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_spot_snapshots_are_replaced_and_alert_after_repeated_failures() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.snapshots.push(Ok(depth_snapshot(1)));
+        fixture.subscribe(&[spot_order_book()]).await;
+        let mut spot = fixture.expect_spot();
+        expect_request(&mut spot, SUBSCRIBE, &["btcusdt@depth"]);
+        fixture.run_for(MILLISECOND).await;
+
+        spot.send(depth_diff(10, 10));
+        for _ in 0..FAILURES_BEFORE_ALERT {
+            fixture.snapshots.push(Ok(depth_snapshot(5)));
+        }
+        fixture.snapshots.push(Ok(depth_snapshot(10)));
+        // The five stale snapshots back off for 1 + 2 + 4 + 8 + 16 seconds.
+        let produced = fixture.run_for(Duration::from_secs(31) + MILLISECOND).await;
+
+        let order_book = expect_order_book(&produced[0]);
+        assert_eq!(2, order_book.bids().len());
+        assert_eq!(10, order_book.sequence);
+        assert_eq!(
+            1 + usize::try_from(FAILURES_BEFORE_ALERT).expect("the count fits usize") + 1,
+            fixture.snapshots.requested().len()
+        );
+        let alerts = fixture.alert.alerts();
+        assert_eq!(1, alerts.len(), "{alerts:?}");
+        assert!(
+            alerts[0].contains("Cannot Sync Binance Spot Depth"),
+            "{alerts:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn futures_depth_event_becomes_an_order_book() {
+        let mut fixture = BinanceFixture::new(false);
+        fixture.subscribe(&[perpetual_order_book()]).await;
+        let futures = fixture.expect_futures();
+        futures.send(depth_event("btcusdt@depth10@100ms", 12));
+
+        let produced = fixture.run_for(MILLISECOND).await;
+        assert_eq!(vec![perpetual_order_book()], topics_of(&produced));
+        let order_book = expect_order_book(&produced[0]);
+        assert_eq!(2, order_book.bids().len());
+        assert_eq!(1, order_book.asks().len());
+        assert_eq!(dec!(80570.70), order_book.bids()[0].price);
+        assert_eq!(dec!(80570.80), order_book.asks()[0].price);
+        assert_eq!(12, order_book.sequence);
+        assert_eq!(
+            Some(NonZeroU64::new(1_792_881_786_559_000_000).expect("the timestamp is not zero")),
+            order_book.exchange_time_nanoseconds
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1550,7 +2057,7 @@ mod tests {
         futures.break_read();
 
         let mut until_alert = Duration::ZERO;
-        for failures in 1..RESTORE_FAILURES_BEFORE_ALERT {
+        for failures in 1..FAILURES_BEFORE_ALERT {
             until_alert += retry_delay(failures);
         }
         fixture.run_for(until_alert - MILLISECOND).await;
@@ -1565,7 +2072,7 @@ mod tests {
             .venue(BinanceEndpoint::FuturesPublic)
             .accept_connections();
         fixture
-            .run_for(retry_delay(RESTORE_FAILURES_BEFORE_ALERT) + MILLISECOND)
+            .run_for(retry_delay(FAILURES_BEFORE_ALERT) + MILLISECOND)
             .await;
         let mut restored = fixture.expect_futures();
         expect_request(&mut restored, SUBSCRIBE, &["btcusdt@bookTicker"]);
@@ -1669,7 +2176,7 @@ mod tests {
     /// Spot needs an SBE key from Phanes, which the long-running local setup covers instead.
     #[tokio::test]
     #[ignore = "connects to Binance"]
-    async fn live_futures_endpoints_deliver_bbo_and_trades() {
+    async fn live_futures_endpoints_deliver_bbo_trades_and_depth() {
         for demo in [false, true] {
             let context = test_connector_context();
             let mut connector = BinanceConnector::new(
@@ -1678,24 +2185,55 @@ mod tests {
                 context.gnosis_client,
                 context.notifier,
                 RealClock,
+                HttpDepthSnapshots::new(demo),
             );
             let topics = HashSet::from([
                 perpetual_bbo(),
                 perpetual_trade(),
                 perpetual_aggregate_trade(),
+                perpetual_order_book(),
             ]);
             connector
                 .subscribe(&topics)
                 .await
                 .expect("Binance is expected to accept the subscriptions");
             let mut received = HashSet::new();
+            let mut order_book_option = None;
             timeout(Duration::from_secs(60), async {
                 while received.len() < topics.len() {
-                    received.insert(connector.next_event().await.topic());
+                    let market_data = connector.next_event().await;
+                    received.insert(market_data.topic());
+                    if let MarketData::OrderBook(order_book) = market_data {
+                        order_book_option = Some(order_book);
+                    }
                 }
             })
             .await
             .expect("every topic is expected to deliver within a minute");
+            let order_book = order_book_option.expect("a depth topic is expected to deliver");
+            assert_eq!(10, order_book.bids().len());
+            assert_eq!(10, order_book.asks().len());
+            assert!(
+                order_book
+                    .bids()
+                    .windows(2)
+                    .all(|levels| levels[0].price > levels[1].price)
+            );
+            assert!(
+                order_book
+                    .asks()
+                    .windows(2)
+                    .all(|levels| levels[0].price < levels[1].price)
+            );
+            assert!(
+                order_book
+                    .bids()
+                    .iter()
+                    .chain(order_book.asks())
+                    .all(|level| level.size > Decimal::ZERO)
+            );
+            assert!(order_book.sequence > 0);
+            assert!(order_book.exchange_time_nanoseconds.is_some());
             connector.disconnect().await;
         }
     }

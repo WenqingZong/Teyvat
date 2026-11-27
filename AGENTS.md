@@ -45,6 +45,20 @@ listed in the workspace's `exclude` and keeping their own `Cargo.lock`.
   without consulting git history; a one-off migration note belongs in the PR description.
 - **Comments explain why, and must match the code.** A comment that describes an older behaviour,
   a removed field or a stale number is a bug: fix the comment, not the code.
+- **Pull request descriptions on GitHub are written in English**, whatever language the
+  discussion around them uses.
+
+## Review workflow
+
+The user reviews every change line by line. Unless the user explicitly allows a commit or push for
+one named change, never run `git commit` or `git push` (including `--amend` or a force-push); that
+permission ends with that change. `git add`, `git stash` and `git diff` are fine, and finished work
+stays in the working tree.
+
+The user leaves review comments in code as `AI TODO:` comments. Treat each one as a review request:
+either fix it and remove the comment, or reply with a concrete reason the proposal would make the
+code worse, plus a simpler alternative; never silently ignore one. The user decides whether that
+reason is acceptable.
 
 ## Commands
 

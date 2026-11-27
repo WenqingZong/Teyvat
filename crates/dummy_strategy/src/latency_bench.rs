@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::strategy::Strategy;
 use layline::time::get_current_timestamp_nanoseconds;
-use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
+use layline::types::{Bbo, LatencyMetric, MarketDataType, OrderBook, Topic, Trade};
 
 const PERCENTILES: [f64; 4] = [0.5, 0.9, 0.99, 0.999];
 const NANOSECONDS_PER_MICROSECOND: f64 = 1_000.0;
@@ -229,6 +229,14 @@ impl Strategy for LatencyBench {
         };
         self.record(topic, trade.latency_metric, received_at_nanoseconds);
     }
+
+    fn on_order_book(&mut self, order_book: &OrderBook, received_at_nanoseconds: NonZeroU64) {
+        let topic = Topic {
+            instrument: order_book.instrument,
+            market_data_type: MarketDataType::OrderBook,
+        };
+        self.record(topic, order_book.latency_metric, received_at_nanoseconds);
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +244,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use layline::testing::test_order_book;
     use layline::types::{Currency, Exchange, Instrument, MarketData, Side, UnderlyingType};
 
     /// The most a reported percentile may differ from the exact one.
@@ -290,6 +299,13 @@ mod tests {
             size: Decimal::ONE,
             taker_side: Side::Buy,
             sequence: 2,
+        })
+    }
+
+    fn order_book(latency_metric: LatencyMetric) -> MarketData {
+        MarketData::OrderBook(OrderBook {
+            latency_metric,
+            ..test_order_book(instrument(), 3)
         })
     }
 
@@ -372,6 +388,7 @@ mod tests {
         let now = now_nanoseconds();
         bench.on_market_data(&bbo(latency_metric(now.get(), 2_000, 5_000)), now);
         bench.on_market_data(&trade(latency_metric(now.get(), 1_000, 3_000)), now);
+        bench.on_market_data(&order_book(latency_metric(now.get(), 1_000, 2_000)), now);
         assert!(receiver.try_recv().is_err(), "the window is still open");
 
         bench.report_interval = Duration::ZERO;
@@ -381,7 +398,7 @@ mod tests {
             .expect("the window is expected to close");
         assert!(bench.samples.is_empty());
         let lines = report_lines(report);
-        assert_eq!(4, lines.len(), "{lines:#?}");
+        assert_eq!(5, lines.len(), "{lines:#?}");
         assert!(
             lines[1].starts_with("Binance/BTC-USDT-SPOT/BBO n=1 | provider 2.00/"),
             "{}",
@@ -393,11 +410,16 @@ mod tests {
             lines[1]
         );
         assert!(
-            lines[2].starts_with("Binance/BTC-USDT-SPOT/TRADE n=2 | provider 1.00/"),
+            lines[2].starts_with("Binance/BTC-USDT-SPOT/ORDER_BOOK n=1 | provider 1.00/"),
             "{}",
             lines[2]
         );
-        assert!(lines[3].starts_with("all topics n=3 |"), "{}", lines[3]);
+        assert!(
+            lines[3].starts_with("Binance/BTC-USDT-SPOT/TRADE n=2 | provider 1.00/"),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[4].starts_with("all topics n=4 |"), "{}", lines[4]);
     }
 
     #[test]

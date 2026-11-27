@@ -18,22 +18,26 @@ phanes_celestia_public_key = "<copied from /etc/market_data_provider/market_data
 # provider's HTTP API. The provider fetches each instrument's rules from the exchange on demand and
 # refreshes them on the first request after 24 hours; a topic whose rules are unavailable stops the provider and names the instrument.
 # A stock's spot pair is its bStock: AAPL-USDT-SPOT is AAPLB/USDT on the exchange, while
-# AAPL-USDT-PERP is AAPLUSDT. Demo testnet lists all seven bStocks but not AAPL/MSFT perpetuals, so
+# AAPL-USDT-PERP is AAPLUSDT. Binance demo lists all seven bStocks but not AAPL/MSFT perpetuals, so
 # those two perpetuals can only be added when demo = false.
+# ORDER_BOOK is the top ten levels of each side; Binance spot uses the SBE diff stream with a REST
+# snapshot, so the provider needs the SBE key and the depth snapshot endpoint.
 [topics.Binance]
-BTC-USDT-SPOT = ["BBO", "TRADE"]
-BTC-USDT-PERP = ["BBO", "TRADE"]
-ETH-USDT-SPOT = ["BBO", "TRADE"]
-ETH-USDT-PERP = ["BBO", "TRADE"]
-AAPL-USDT-SPOT = ["BBO", "TRADE"]
-MSFT-USDT-SPOT = ["BBO", "TRADE"]
-GOOGL-USDT-SPOT = ["BBO", "TRADE"]
-AMZN-USDT-SPOT = ["BBO", "TRADE"]
-NVDA-USDT-SPOT = ["BBO", "TRADE"]
-META-USDT-SPOT = ["BBO", "TRADE"]
-TSLA-USDT-SPOT = ["BBO", "TRADE"]
-GOOGL-USDT-PERP = ["BBO", "TRADE"]
-AMZN-USDT-PERP = ["BBO", "TRADE"]
-NVDA-USDT-PERP = ["BBO", "TRADE"]
-META-USDT-PERP = ["BBO", "TRADE"]
-TSLA-USDT-PERP = ["BBO", "TRADE"]
+AAPL-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+AAPL-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+AMZN-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+AMZN-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+BTC-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+BTC-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+ETH-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+ETH-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+GOOGL-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+GOOGL-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+META-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+META-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+MSFT-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+MSFT-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+NVDA-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+NVDA-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+TSLA-USDT-PERP = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]
+TSLA-USDT-SPOT = ["AGGREGATE_TRADE", "BBO", "ORDER_BOOK", "TRADE"]

@@ -6,7 +6,10 @@ use rust_decimal::{Decimal, dec};
 use tokio::time::{Duration, Interval, MissedTickBehavior, interval};
 
 use crate::utils::Clock;
-use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
+use layline::types::{
+    Bbo, LatencyMetric, MarketData, MarketDataType, ORDER_BOOK_DEPTH, OrderBook, PriceLevel, Side,
+    Topic, Trade,
+};
 
 const SYNTHETIC_INTERVAL: Duration = Duration::from_millis(10);
 const TICK_SIZE: Decimal = dec!(0.01);
@@ -97,7 +100,27 @@ fn synthetic_data(topic: Topic, latency_metric: LatencyMetric, sequence: usize) 
             taker_side: Side::Buy,
             sequence,
         }),
+        MarketDataType::OrderBook => MarketData::OrderBook(OrderBook {
+            instrument: topic.instrument,
+            exchange_time_nanoseconds: None,
+            latency_metric,
+            bid_levels: synthetic_levels(SYNTHETIC_BID_PRICE, -TICK_SIZE),
+            ask_levels: synthetic_levels(ask_price, TICK_SIZE),
+            bid_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
+            ask_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
+            sequence,
+        }),
     }
+}
+
+fn synthetic_levels(best_price: Decimal, step: Decimal) -> [PriceLevel; ORDER_BOOK_DEPTH] {
+    let mut levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+    let size = SYNTHETIC_LOTS * LOT_SIZE;
+    for (index, level) in levels.iter_mut().enumerate() {
+        level.price = best_price + step * Decimal::from(index);
+        level.size = size;
+    }
+    levels
 }
 
 #[cfg(test)]
@@ -154,6 +177,32 @@ mod tests {
                 feed.next_event(&RealClock).await.topic().market_data_type
             );
         }
+    }
+
+    #[test]
+    fn synthetic_order_book_has_ten_levels_per_side() {
+        let MarketData::OrderBook(order_book) = synthetic_data(
+            topic(MarketDataType::OrderBook),
+            LatencyMetric::received(get_current_timestamp_nanoseconds()),
+            1,
+        ) else {
+            panic!("an order book topic is expected to produce an order book");
+        };
+        assert_eq!(10, order_book.bids().len());
+        assert_eq!(10, order_book.asks().len());
+        assert_eq!(
+            TICK_SIZE,
+            order_book.asks()[0].price - order_book.bids()[0].price
+        );
+        assert_eq!(
+            TICK_SIZE,
+            order_book.bids()[0].price - order_book.bids()[1].price
+        );
+        assert_eq!(
+            TICK_SIZE,
+            order_book.asks()[1].price - order_book.asks()[0].price
+        );
+        assert_eq!(dec!(1), order_book.bids()[0].size);
     }
 
     #[test]

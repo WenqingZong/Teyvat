@@ -12,24 +12,40 @@ use layline::types::{Currency, Instrument, MarketDataType, Topic, UnderlyingType
 /// Room for the longest symbol plus channel, so per-frame names need no allocation.
 pub(super) const STREAM_NAME_CAPACITY: usize = 64;
 pub(super) const SBE_BEST_BID_ASK_CHANNEL: &str = "bestBidAsk";
+pub(super) const SBE_DEPTH_CHANNEL: &str = "depth";
 pub(super) const TRADE_CHANNEL: &str = "trade";
 const BOOK_TICKER_CHANNEL: &str = "bookTicker";
 const AGGREGATE_TRADE_CHANNEL: &str = "aggTrade";
+const DEPTH_CHANNEL: &str = "depth10@100ms";
 
-/// Binance accepts any stream name on any path and then sends nothing, so this mapping must stay under test.
-pub(super) fn endpoint_for_topic(topic: &Topic) -> BinanceEndpoint {
-    match (topic.instrument.underlying_type, topic.market_data_type) {
-        (
-            UnderlyingType::Spot,
-            MarketDataType::Bbo | MarketDataType::Trade | MarketDataType::AggregateTrade,
-        ) => BinanceEndpoint::SpotSbe,
+/// The endpoint and stream `topic` needs. Binance accepts any stream name on any path and then
+/// sends nothing, so this mapping must stay under test.
+pub(super) fn route(topic: &Topic) -> (BinanceEndpoint, String) {
+    let (endpoint, channel) = match (topic.instrument.underlying_type, topic.market_data_type) {
+        (UnderlyingType::Spot, MarketDataType::Bbo) => {
+            (BinanceEndpoint::SpotSbe, SBE_BEST_BID_ASK_CHANNEL)
+        }
+        (UnderlyingType::Spot, MarketDataType::Trade | MarketDataType::AggregateTrade) => {
+            (BinanceEndpoint::SpotSbe, TRADE_CHANNEL)
+        }
+        (UnderlyingType::Spot, MarketDataType::OrderBook) => {
+            (BinanceEndpoint::SpotSbe, SBE_DEPTH_CHANNEL)
+        }
+        (UnderlyingType::Perpetual, MarketDataType::Bbo) => {
+            (BinanceEndpoint::FuturesPublic, BOOK_TICKER_CHANNEL)
+        }
+        (UnderlyingType::Perpetual, MarketDataType::Trade) => {
+            (BinanceEndpoint::FuturesPublic, TRADE_CHANNEL)
+        }
         (UnderlyingType::Perpetual, MarketDataType::AggregateTrade) => {
-            BinanceEndpoint::FuturesMarket
+            (BinanceEndpoint::FuturesMarket, AGGREGATE_TRADE_CHANNEL)
         }
-        (UnderlyingType::Perpetual, MarketDataType::Bbo | MarketDataType::Trade) => {
-            BinanceEndpoint::FuturesPublic
+        (UnderlyingType::Perpetual, MarketDataType::OrderBook) => {
+            (BinanceEndpoint::FuturesPublic, DEPTH_CHANNEL)
         }
-    }
+    };
+    let symbol = venue_symbol(topic.instrument).to_lowercase();
+    (endpoint, format!("{symbol}@{channel}"))
 }
 
 /// How the venue spells the instrument. A stock's spot pair is its bStock: `AAPL-USDT-SPOT` is
@@ -57,21 +73,7 @@ pub(super) fn venue_symbol(instrument: Instrument) -> String {
     format!("{base}{quote}")
 }
 
-/// As Binance names it in SUBSCRIBE and in each event. Spot SBE has no aggregate stream, so a spot
-/// instrument's trades and aggregate trades share its `@trade` stream, which the connector merges.
-pub(super) fn stream_name(topic: &Topic) -> String {
-    let channel = match (topic.instrument.underlying_type, topic.market_data_type) {
-        (UnderlyingType::Spot, MarketDataType::Bbo) => SBE_BEST_BID_ASK_CHANNEL,
-        (UnderlyingType::Perpetual, MarketDataType::Bbo) => BOOK_TICKER_CHANNEL,
-        (UnderlyingType::Spot, MarketDataType::Trade | MarketDataType::AggregateTrade)
-        | (UnderlyingType::Perpetual, MarketDataType::Trade) => TRADE_CHANNEL,
-        (UnderlyingType::Perpetual, MarketDataType::AggregateTrade) => AGGREGATE_TRADE_CHANNEL,
-    };
-    let symbol = venue_symbol(topic.instrument).to_lowercase();
-    format!("{symbol}@{channel}")
-}
-
-/// `stream_name` of an SBE event, which carries its symbol but not its stream. Written into `buffer`,
+/// The stream name of an SBE event, which carries its symbol but not its stream. Written into `buffer`,
 /// since it runs for every frame; `None` if it does not fit.
 pub(super) fn sbe_stream_name<'a>(
     symbol: &str,
@@ -150,12 +152,19 @@ mod tests {
                 MarketDataType::AggregateTrade,
                 BinanceEndpoint::FuturesMarket,
             ),
+            (
+                UnderlyingType::Spot,
+                MarketDataType::OrderBook,
+                BinanceEndpoint::SpotSbe,
+            ),
+            (
+                UnderlyingType::Perpetual,
+                MarketDataType::OrderBook,
+                BinanceEndpoint::FuturesPublic,
+            ),
         ];
         for (underlying_type, market_data_type, endpoint) in cases {
-            assert_eq!(
-                endpoint,
-                endpoint_for_topic(&topic(underlying_type, market_data_type))
-            );
+            assert_eq!(endpoint, route(&topic(underlying_type, market_data_type)).0);
         }
     }
 
@@ -171,13 +180,14 @@ mod tests {
 
     #[test]
     fn stream_names_follow_binance_spelling() {
-        let spot_bbo = stream_name(&topic(UnderlyingType::Spot, MarketDataType::Bbo));
+        let (spot_endpoint, spot_bbo) = route(&topic(UnderlyingType::Spot, MarketDataType::Bbo));
+        assert_eq!(BinanceEndpoint::SpotSbe, spot_endpoint);
         assert_eq!("btcusdt@bestBidAsk", spot_bbo);
-        let spot_trade = stream_name(&topic(UnderlyingType::Spot, MarketDataType::Trade));
+        let (_, spot_trade) = route(&topic(UnderlyingType::Spot, MarketDataType::Trade));
         assert_eq!("btcusdt@trade", spot_trade);
         assert_eq!(
             spot_trade,
-            stream_name(&topic(UnderlyingType::Spot, MarketDataType::AggregateTrade))
+            route(&topic(UnderlyingType::Spot, MarketDataType::AggregateTrade)).1
         );
         let mut buffer = [0; STREAM_NAME_CAPACITY];
         assert_eq!(
@@ -198,26 +208,43 @@ mod tests {
         );
         assert_eq!(
             "btcusdt@bookTicker",
-            stream_name(&topic(UnderlyingType::Perpetual, MarketDataType::Bbo))
+            route(&topic(UnderlyingType::Perpetual, MarketDataType::Bbo)).1
         );
         assert_eq!(
             "btcusdt@trade",
-            stream_name(&topic(UnderlyingType::Perpetual, MarketDataType::Trade))
+            route(&topic(UnderlyingType::Perpetual, MarketDataType::Trade)).1
         );
         assert_eq!(
             "btcusdt@aggTrade",
-            stream_name(&topic(
+            route(&topic(
                 UnderlyingType::Perpetual,
                 MarketDataType::AggregateTrade
             ))
+            .1
+        );
+        assert_eq!(
+            "btcusdt@depth",
+            route(&topic(UnderlyingType::Spot, MarketDataType::OrderBook)).1
+        );
+        assert_eq!(
+            "btcusdt@depth10@100ms",
+            route(&topic(UnderlyingType::Perpetual, MarketDataType::OrderBook)).1
         );
         assert_eq!(
             "aaplbusdt@bestBidAsk",
-            stream_name(&stock_topic(UnderlyingType::Spot, MarketDataType::Bbo))
+            route(&stock_topic(UnderlyingType::Spot, MarketDataType::Bbo)).1
         );
         assert_eq!(
             "aaplusdt@bookTicker",
-            stream_name(&stock_topic(UnderlyingType::Perpetual, MarketDataType::Bbo))
+            route(&stock_topic(UnderlyingType::Perpetual, MarketDataType::Bbo)).1
+        );
+        assert_eq!(
+            "aaplusdt@depth10@100ms",
+            route(&stock_topic(
+                UnderlyingType::Perpetual,
+                MarketDataType::OrderBook
+            ))
+            .1
         );
     }
 }

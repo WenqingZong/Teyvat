@@ -1,6 +1,6 @@
 use std::num::NonZeroU64;
 
-use layline::types::{Bbo, MarketData, Trade};
+use layline::types::{Bbo, MarketData, OrderBook, Trade};
 
 pub trait Strategy {
     fn on_bbo(&mut self, bbo: &Bbo, received_at_nanoseconds: NonZeroU64);
@@ -9,12 +9,17 @@ pub trait Strategy {
 
     fn on_aggregate_trade(&mut self, trade: &Trade, received_at_nanoseconds: NonZeroU64);
 
+    fn on_order_book(&mut self, order_book: &OrderBook, received_at_nanoseconds: NonZeroU64);
+
     fn on_market_data(&mut self, data: &MarketData, received_at_nanoseconds: NonZeroU64) {
         match data {
             MarketData::Bbo(bbo) => self.on_bbo(bbo, received_at_nanoseconds),
             MarketData::Trade(trade) => self.on_trade(trade, received_at_nanoseconds),
             MarketData::AggregateTrade(trade) => {
                 self.on_aggregate_trade(trade, received_at_nanoseconds)
+            }
+            MarketData::OrderBook(order_book) => {
+                self.on_order_book(order_book, received_at_nanoseconds)
             }
         }
     }
@@ -25,7 +30,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use layline::testing::test_trade;
+    use layline::testing::{test_order_book, test_trade};
     use layline::time::get_current_timestamp_nanoseconds;
     use layline::types::{Currency, Exchange, Instrument, LatencyMetric, Side, UnderlyingType};
 
@@ -34,6 +39,7 @@ mod tests {
         bbo_sequences: Vec<usize>,
         trade_sequences: Vec<usize>,
         aggregate_trade_sequences: Vec<usize>,
+        order_book_sequences: Vec<usize>,
     }
 
     impl Strategy for Recorder {
@@ -47,6 +53,10 @@ mod tests {
 
         fn on_aggregate_trade(&mut self, trade: &Trade, _received_at_nanoseconds: NonZeroU64) {
             self.aggregate_trade_sequences.push(trade.sequence);
+        }
+
+        fn on_order_book(&mut self, order_book: &OrderBook, _received_at_nanoseconds: NonZeroU64) {
+            self.order_book_sequences.push(order_book.sequence);
         }
     }
 
@@ -87,8 +97,11 @@ mod tests {
         recorder.on_market_data(&trade, now_nanoseconds);
         let aggregate_trade = MarketData::AggregateTrade(test_trade(instrument(), 3));
         recorder.on_market_data(&aggregate_trade, now_nanoseconds);
+        let order_book = MarketData::OrderBook(test_order_book(instrument(), 4));
+        recorder.on_market_data(&order_book, now_nanoseconds);
         assert_eq!(vec![1], recorder.bbo_sequences);
         assert_eq!(vec![2], recorder.trade_sequences);
         assert_eq!(vec![3], recorder.aggregate_trade_sequences);
+        assert_eq!(vec![4], recorder.order_book_sequences);
     }
 }

@@ -18,3 +18,6 @@ pub mod shutdown;
 pub mod testing;
 pub mod time;
 pub mod types;
+
+// Connectors cast venue u64 ids to usize without checking; every supported target is 64-bit.
+const _: () = assert!(size_of::<usize>() >= size_of::<u64>());

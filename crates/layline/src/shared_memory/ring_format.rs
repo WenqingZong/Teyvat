@@ -17,13 +17,14 @@
 //!        | magic    | u32 LE        | u8 (1 BBO,      |                                     |
 //!        |          |               |     2 Trade, 3  |                                     |
 //!        |          |               |     Aggregate-  |                                     |
-//!        |          |               |     Trade)      |                                     |
+//!        |          |               |     Trade,      |                                     |
+//!        |          |               |     4 OrderBook)|                                     |
 //!        +----------+---------------+-----------------+-------------------------------------+
 //!
 //! data: one frame per message, 8-byte aligned; a frame that would cross the end is preceded by a padding frame.
 //!        +--------------------------+------------------+---------------------+---------+----------
-//!        | fields: u32              | user_defined: u32| rkyv Bbo or Trade   | pad to  | next
-//!        | bit 31 fin, 30 continued,| (unused, 0)      | (at most 512 B)     | 8 bytes | frame ...
+//!        | fields: u32              | user_defined: u32| rkyv Bbo/Trade/Book | pad to  | next
+//!        | bit 31 fin, 30 continued,| (unused, 0)      | (at most 1024 B)    | 8 bytes | frame ...
 //!        | 29 padding, 28 heartbeat,|                  |                     |         |
 //!        | bits 0-27 payload length |                  |                     |         |
 //!        +--------------------------+------------------+---------------------+---------+----------
@@ -33,6 +34,7 @@ use std::ops::Range;
 
 use anyhow::{Result, anyhow, ensure};
 use bcast::{HEADER_SIZE, METADATA_BUFFER_SIZE};
+use strum::IntoEnumIterator;
 
 use crate::types::MarketDataType;
 
@@ -69,14 +71,9 @@ pub(super) fn read_market_data_type(metadata: &[u8]) -> Result<MarketDataType> {
         "metadata is not format version {FORMAT_VERSION}"
     );
     let code = metadata[METADATA_MARKET_DATA_TYPE_INDEX];
-    [
-        MarketDataType::Bbo,
-        MarketDataType::Trade,
-        MarketDataType::AggregateTrade,
-    ]
-    .into_iter()
-    .find(|market_data_type| *market_data_type as u8 == code)
-    .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
+    MarketDataType::iter()
+        .find(|market_data_type| *market_data_type as u8 == code)
+        .ok_or_else(|| anyhow!("metadata holds unknown market data type code {code}"))
 }
 
 #[cfg(test)]
@@ -89,6 +86,7 @@ mod tests {
             MarketDataType::Bbo,
             MarketDataType::Trade,
             MarketDataType::AggregateTrade,
+            MarketDataType::OrderBook,
         ] {
             let mut metadata = [0; METADATA_BUFFER_SIZE];
             write_metadata(&mut metadata, market_data_type);
