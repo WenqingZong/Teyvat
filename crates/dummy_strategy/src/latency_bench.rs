@@ -14,8 +14,18 @@ use layline::types::{Bbo, LatencyMetric, MarketDataType, Topic, Trade};
 
 const PERCENTILES: [f64; 4] = [0.5, 0.9, 0.99, 0.999];
 const NANOSECONDS_PER_MICROSECOND: f64 = 1_000.0;
-/// Enough significant figures to report microseconds to two decimals.
-const HISTOGRAM_SIGNIFICANT_FIGURES: u8 = 5;
+/// Three figures keep the relative error under 0.1 %, far below what a report needs. The count array
+/// grows with `2 * 10^figures`, so each extra figure multiplies the memory by ten: five figures cost
+/// 2 MiB per histogram before recording anything, three cost 200 KiB.
+const HISTOGRAM_SIGNIFICANT_FIGURES: u8 = 3;
+/// One nanosecond, because provider latencies are often below a microsecond and rounding them up to
+/// one would distort the percentiles the report exists to show.
+const HISTOGRAM_LOWEST_DISCERNIBLE_NANOSECONDS: u64 = 1;
+/// Ten seconds, comfortably above the worst sample seen on either host (1.09 s on oversold Osaka).
+/// A bounded histogram never resizes, so its count array keeps its size no matter what arrives: a
+/// stalled host cannot make the bench allocate more than that. Samples above the bound are clamped,
+/// so a reported max of exactly 10.00 s means "at least 10 s".
+const HISTOGRAM_HIGHEST_TRACKABLE_NANOSECONDS: u64 = 10_000_000_000;
 
 /// One window's samples of one topic, in nanoseconds.
 struct LatencySamples {
@@ -37,8 +47,12 @@ impl Default for LatencySamples {
 }
 
 fn histogram() -> Histogram<u64> {
-    Histogram::new(HISTOGRAM_SIGNIFICANT_FIGURES)
-        .expect("five significant figures are a valid histogram")
+    Histogram::new_with_bounds(
+        HISTOGRAM_LOWEST_DISCERNIBLE_NANOSECONDS,
+        HISTOGRAM_HIGHEST_TRACKABLE_NANOSECONDS,
+        HISTOGRAM_SIGNIFICANT_FIGURES,
+    )
+    .expect("the bounds and the figure count are valid")
 }
 
 struct Report {
@@ -91,22 +105,20 @@ impl LatencyBench {
             .get()
             .saturating_sub(received_at_nanoseconds.get());
         let samples = self.samples.entry(topic).or_default();
+        // A sample beyond the bound is clamped, not an error: measuring must never bring down the
+        // process it measures.
         samples
             .provider_nanoseconds
-            .record(provider_nanoseconds)
-            .expect("a histogram records any u64");
+            .saturating_record(provider_nanoseconds);
         samples
             .transport_nanoseconds
-            .record(transport_nanoseconds)
-            .expect("a histogram records any u64");
+            .saturating_record(transport_nanoseconds);
         samples
             .parse_nanoseconds
-            .record(parse_nanoseconds)
-            .expect("a histogram records any u64");
+            .saturating_record(parse_nanoseconds);
         samples
             .internal_nanoseconds
-            .record(provider_nanoseconds + transport_nanoseconds)
-            .expect("a histogram records any u64");
+            .saturating_record(provider_nanoseconds.saturating_add(transport_nanoseconds));
         let window = Duration::from_nanos(
             handled_at_nanoseconds
                 .get()
@@ -226,6 +238,11 @@ mod tests {
     use super::*;
     use layline::types::{Currency, Exchange, Instrument, MarketData, Side, UnderlyingType};
 
+    /// The most a reported percentile may differ from the exact one.
+    const PERCENTILE_RELATIVE_TOLERANCE: f64 = 0.001;
+    /// The count array each histogram allocates once; `a_histogram_never_grows` fails if it changes.
+    const HISTOGRAM_COUNTERS: usize = 25_600;
+
     fn instrument() -> Instrument {
         Instrument {
             exchange: Exchange::Binance,
@@ -283,22 +300,69 @@ mod tests {
     fn histogram_from(values: impl IntoIterator<Item = u64>) -> Histogram<u64> {
         let mut histogram = histogram();
         for value in values {
-            histogram
-                .record(value)
-                .expect("a histogram records any u64");
+            histogram.saturating_record(value);
         }
         histogram
+    }
+
+    /// Two decimals of microseconds cannot be asserted exactly once the histogram keeps three
+    /// figures, so compare the numbers rather than the formatted string.
+    fn assert_percentiles(percentiles_text: &str, expected_microseconds: [f64; 5]) {
+        let actual: Vec<f64> = percentiles_text
+            .split('/')
+            .map(|value| value.parse().expect("a percentile is a number"))
+            .collect();
+        assert_eq!(
+            expected_microseconds.len(),
+            actual.len(),
+            "{percentiles_text}"
+        );
+        for (actual_value, expected_value) in actual.iter().zip(expected_microseconds) {
+            let relative_error = (actual_value - expected_value).abs() / expected_value;
+            assert!(
+                relative_error <= PERCENTILE_RELATIVE_TOLERANCE,
+                "{percentiles_text}: {actual_value} is not within {PERCENTILE_RELATIVE_TOLERANCE} of {expected_value}"
+            );
+        }
     }
 
     #[test]
     fn percentiles_are_hdr_quantiles_in_microseconds() {
         let samples = histogram_from((1..=1000).rev().map(|value| value * 1_000));
-        assert_eq!("500.00/900.00/990.00/999.00/1000.00", percentiles(&samples));
+        assert_percentiles(
+            &percentiles(&samples),
+            [500.0, 900.0, 990.0, 999.0, 1_000.0],
+        );
         assert_eq!(
             "1.50/1.50/1.50/1.50/1.50",
             percentiles(&histogram_from([1_500]))
         );
         assert_eq!("-", percentiles(&histogram()));
+    }
+
+    #[test]
+    fn a_histogram_never_grows() {
+        assert_eq!(HISTOGRAM_COUNTERS, histogram().distinct_values());
+        // A sample far beyond the bound is clamped instead of resizing the histogram, so a stalled
+        // host costs no memory.
+        let mut samples = histogram();
+        samples.saturating_record(HISTOGRAM_HIGHEST_TRACKABLE_NANOSECONDS * 10);
+        assert_eq!(HISTOGRAM_COUNTERS, samples.distinct_values());
+    }
+
+    #[test]
+    fn a_clamped_sample_is_reported_as_the_bound() {
+        let mut samples = histogram();
+        samples.saturating_record(HISTOGRAM_HIGHEST_TRACKABLE_NANOSECONDS * 100);
+        let microseconds_text = microseconds(samples.max());
+        let bound_microseconds =
+            HISTOGRAM_HIGHEST_TRACKABLE_NANOSECONDS as f64 / NANOSECONDS_PER_MICROSECOND;
+        let reported: f64 = microseconds_text.parse().expect("a percentile is a number");
+        assert!(
+            (reported - bound_microseconds).abs() / bound_microseconds
+                <= PERCENTILE_RELATIVE_TOLERANCE,
+            "{microseconds_text}"
+        );
     }
 
     #[test]
