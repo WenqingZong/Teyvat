@@ -60,6 +60,13 @@ fn okx_ether_spot_bbo() -> Topic {
     }
 }
 
+fn okx_bitcoin_spot_order_book() -> Topic {
+    Topic {
+        market_data_type: MarketDataType::OrderBook,
+        ..okx_bitcoin_spot_bbo()
+    }
+}
+
 /// OKX only: its connector is still a dummy, while Binance's would reach the venue and Phanes.
 /// The two spot BBO topics share one ring.
 fn topics() -> HashSet<Topic> {
@@ -74,6 +81,7 @@ fn topics() -> HashSet<Topic> {
             instrument: instrument(Exchange::Okx, Currency::Btc, UnderlyingType::Perpetual),
             market_data_type: MarketDataType::Bbo,
         },
+        okx_bitcoin_spot_order_book(),
     ])
 }
 

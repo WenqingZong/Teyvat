@@ -13,7 +13,7 @@ use super::MAX_PAYLOAD_LENGTH;
 use super::ring_format::{METADATA_RANGE, RING_FILE_LENGTH, read_market_data_type};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::Subscription;
-use crate::types::{Bbo, MarketData, MarketDataType, Trade};
+use crate::types::{Bbo, MarketData, MarketDataType, OrderBook, Trade};
 
 // rkyv requires the archived bytes to be aligned.
 #[repr(C, align(16))]
@@ -78,7 +78,7 @@ impl RingReader {
                     self.reader.reset();
                     break;
                 }
-                // Only `InsufficientBufferSize` is left: no Bbo or Trade is that large.
+                // Only `InsufficientBufferSize` is left: no message type is that large.
                 Err(error) => {
                     let path = self.path.display();
                     bail!("cannot read a message of {path}: {error}");
@@ -95,6 +95,9 @@ impl RingReader {
                 }
                 MarketDataType::AggregateTrade => {
                     MarketData::AggregateTrade(rkyv::from_bytes::<Trade, RkyvError>(payload)?)
+                }
+                MarketDataType::OrderBook => {
+                    MarketData::OrderBook(rkyv::from_bytes::<OrderBook, RkyvError>(payload)?)
                 }
             };
             on_data(data, received_at_nanoseconds);

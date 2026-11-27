@@ -19,7 +19,7 @@ pub struct SerializedMarketData {
 
 impl SerializedMarketData {
     /// Stamps the provider write time first, so serialization and every ring copy count as transport.
-    /// Panics if serialization fails: a `Bbo` or `Trade` always fits, so a failure is a bug.
+    /// Panics if serialization fails: a `Bbo`, `Trade` or `OrderBook` always fits, so a failure is a bug.
     pub fn new(data: &MarketData) -> Self {
         let provider_write_time_nanoseconds = get_current_timestamp_nanoseconds();
         let bytes = match *data {
@@ -32,6 +32,11 @@ impl SerializedMarketData {
                 trade.latency_metric.provider_write_time_nanoseconds =
                     provider_write_time_nanoseconds;
                 rkyv::to_bytes::<RkyvError>(&trade).expect("a Trade always serializes")
+            }
+            MarketData::OrderBook(mut order_book) => {
+                order_book.latency_metric.provider_write_time_nanoseconds =
+                    provider_write_time_nanoseconds;
+                rkyv::to_bytes::<RkyvError>(&order_book).expect("an OrderBook always serializes")
             }
         };
         Self {
@@ -121,9 +126,12 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     use super::*;
+    use crate::shared_memory::MAX_PAYLOAD_LENGTH;
     use crate::shared_memory::MarketDataReader;
     use crate::shared_memory::ring_format::RING_CAPACITY;
-    use crate::testing::{test_bbo, test_instrument, test_subscription, test_topic, test_trade};
+    use crate::testing::{
+        test_bbo, test_instrument, test_order_book, test_subscription, test_topic, test_trade,
+    };
     use crate::types::Subscription;
     use crate::types::{
         Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, UnderlyingType,
@@ -137,6 +145,7 @@ mod tests {
         bbo_sequences: Vec<usize>,
         trade_sequences: Vec<usize>,
         aggregate_trade_sequences: Vec<usize>,
+        order_book_sequences: Vec<usize>,
     }
 
     impl Collector {
@@ -146,6 +155,9 @@ mod tests {
                 MarketData::Trade(trade) => self.trade_sequences.push(trade.sequence),
                 MarketData::AggregateTrade(trade) => {
                     self.aggregate_trade_sequences.push(trade.sequence)
+                }
+                MarketData::OrderBook(order_book) => {
+                    self.order_book_sequences.push(order_book.sequence)
                 }
             }
         }
@@ -196,6 +208,10 @@ mod tests {
         MarketData::AggregateTrade(test_trade(instrument(), sequence))
     }
 
+    fn order_book(sequence: usize) -> MarketData {
+        MarketData::OrderBook(test_order_book(instrument(), sequence))
+    }
+
     fn ether_instrument() -> Instrument {
         test_instrument(
             Exchange::Binance,
@@ -229,13 +245,16 @@ mod tests {
         let bbo_subscription = subscription(&directory, MarketDataType::Bbo);
         let trade_subscription = subscription(&directory, MarketDataType::Trade);
         let aggregate_trade_subscription = subscription(&directory, MarketDataType::AggregateTrade);
+        let order_book_subscription = subscription(&directory, MarketDataType::OrderBook);
         let bbo_writer = writer(&directory, MarketDataType::Bbo);
         let trade_writer = writer(&directory, MarketDataType::Trade);
         let aggregate_trade_writer = writer(&directory, MarketDataType::AggregateTrade);
+        let order_book_writer = writer(&directory, MarketDataType::OrderBook);
         let market_data_reader = market_data_reader(&[
             bbo_subscription,
             trade_subscription,
             aggregate_trade_subscription,
+            order_book_subscription,
         ]);
         let mut collector = Collector::default();
 
@@ -244,11 +263,13 @@ mod tests {
         publish(&bbo_writer, bbo(8));
         publish(&trade_writer, trade(9));
         publish(&aggregate_trade_writer, aggregate_trade(10));
+        publish(&order_book_writer, order_book(11));
 
-        assert_eq!(4, poll(&market_data_reader, &mut collector));
+        assert_eq!(5, poll(&market_data_reader, &mut collector));
         assert_eq!(vec![7, 8], collector.bbo_sequences);
         assert_eq!(vec![9], collector.trade_sequences);
         assert_eq!(vec![10], collector.aggregate_trade_sequences);
+        assert_eq!(vec![11], collector.order_book_sequences);
     }
 
     #[test]
@@ -326,6 +347,16 @@ mod tests {
             received[0].provider_receive_time_nanoseconds
         );
         assert!(received[0].provider_write_time_nanoseconds > NonZeroU64::MIN);
+    }
+
+    #[test]
+    fn an_order_book_fits_the_payload_buffer() {
+        let serialized = serialized(&order_book(1));
+        assert!(
+            serialized.bytes.len() <= MAX_PAYLOAD_LENGTH,
+            "an order book serializes to {} bytes",
+            serialized.bytes.len()
+        );
     }
 
     #[test]

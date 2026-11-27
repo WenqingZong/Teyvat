@@ -10,10 +10,14 @@ use std::num::NonZeroU64;
 use anyhow::{Context, Result, anyhow};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tracing::error;
 
 use crate::time::milliseconds_to_nanoseconds;
-use layline::types::{Bbo, LatencyMetric, MarketData, MarketDataType, Side, Topic, Trade};
+use layline::types::{
+    Bbo, LatencyMetric, MarketData, MarketDataType, ORDER_BOOK_DEPTH, OrderBook, PriceLevel, Side,
+    Topic, Trade,
+};
 
 /// Futures `@trade` also reports insurance fund and ADL fills, which are not market prints.
 const MARKET_ORDER_TYPE: &str = "MARKET";
@@ -23,6 +27,7 @@ const COMPACT_SUFFIX: &str = "}}";
 const COMPACT_ACKNOWLEDGEMENT_PREFIX: &str = "{\"result\":null,\"id\":";
 const COMPACT_ACKNOWLEDGEMENT_SUFFIX: &str = "}";
 const SERVER_SHUTDOWN_PREFIX: &str = "{\"e\":\"serverShutdown\"";
+const DEPTH_CHANNEL_PREFIX: &str = "depth";
 
 #[derive(Serialize)]
 pub(super) struct Request<'a> {
@@ -38,8 +43,26 @@ pub(super) enum TextFrame<'a> {
         stream: Cow<'a, str>,
         data: EventData<'a>,
     },
+    Depth {
+        stream: Cow<'a, str>,
+        data: DepthEventData,
+    },
     /// The venue is going down; reconnect at once.
     ServerShutdown,
+}
+
+/// A futures partial-depth event: the top ten levels of each side at one moment.
+#[derive(Deserialize)]
+pub(super) struct DepthEventData {
+    #[serde(rename = "T")]
+    transaction_time_milliseconds: NonZeroU64,
+    #[serde(rename = "u")]
+    last_update_id: u64,
+    /// Each level as `[price, quantity]`, as Binance sends it.
+    #[serde(rename = "b")]
+    bids: Vec<(Decimal, Decimal)>,
+    #[serde(rename = "a")]
+    asks: Vec<(Decimal, Decimal)>,
 }
 
 #[derive(Debug)]
@@ -62,6 +85,11 @@ impl Display for VenueError {
 }
 
 #[derive(Deserialize)]
+struct DepthEnvelope {
+    data: DepthEventData,
+}
+
+#[derive(Deserialize)]
 struct Envelope<'a> {
     #[serde(borrow)]
     stream: Option<Cow<'a, str>>,
@@ -74,7 +102,8 @@ struct Envelope<'a> {
 /// Every field any parsed event uses, so one pass reads the frame whatever its stream.
 #[derive(Default, Deserialize)]
 pub(super) struct EventData<'a> {
-    /// Book update id of a `bookTicker`.
+    /// Book update id of a `bookTicker`. Each field is optional because one frame carries only its
+    /// own event type's fields, and `event_to_market_data` requires the ones its topic needs.
     #[serde(rename = "u")]
     update_id: Option<u64>,
     #[serde(rename = "b")]
@@ -130,6 +159,15 @@ pub(super) fn classify_text_frame(text: &str) -> Result<TextFrame<'_>> {
     if text.starts_with(SERVER_SHUTDOWN_PREFIX) {
         return Ok(TextFrame::ServerShutdown);
     }
+    if let Some(stream) = compact_stream(text)
+        && is_depth_stream(stream)
+    {
+        let DepthEnvelope { data } = serde_json::from_str(text)?;
+        return Ok(TextFrame::Depth {
+            stream: Cow::Borrowed(stream),
+            data,
+        });
+    }
     if let Some((stream, data)) = parse_compact_event(text) {
         return Ok(TextFrame::Event {
             stream: Cow::Borrowed(stream),
@@ -144,6 +182,18 @@ pub(super) fn classify_text_frame(text: &str) -> Result<TextFrame<'_>> {
     }
     error!("the hand-written JSON parser does not recognise {text}; falling back to serde_json");
     parse_with_serde(text)
+}
+
+fn compact_stream(text: &str) -> Option<&str> {
+    text.strip_prefix(COMPACT_STREAM_PREFIX)?
+        .split_once('"')
+        .map(|(stream, _)| stream)
+}
+
+fn is_depth_stream(stream: &str) -> bool {
+    stream
+        .split_once('@')
+        .is_some_and(|(_, channel)| channel.starts_with(DEPTH_CHANNEL_PREFIX))
 }
 
 /// Reads `{"result":null,"id":N}`, Binance's answer to a request that succeeded.
@@ -229,6 +279,19 @@ impl<'a> Cursor<'a> {
 }
 
 fn parse_with_serde(text: &str) -> Result<TextFrame<'_>> {
+    let value: Value = serde_json::from_str(text)?;
+    if let Some(stream) = value.get("stream").and_then(Value::as_str)
+        && is_depth_stream(stream)
+    {
+        let data = value
+            .get("data")
+            .cloned()
+            .context("a depth event has data")?;
+        return Ok(TextFrame::Depth {
+            stream: Cow::Owned(stream.to_owned()),
+            data: serde_json::from_value(data)?,
+        });
+    }
     let envelope: Envelope = serde_json::from_str(text)?;
     match (envelope.stream, envelope.data) {
         (Some(stream), Some(data)) => Ok(TextFrame::Event { stream, data }),
@@ -261,7 +324,7 @@ pub(super) fn event_to_market_data(
             ask_size: required(data.ask_size, "A")?,
             bid_price: required(data.bid_price, "b")?,
             bid_size: required(data.bid_size, "B")?,
-            sequence: to_sequence(required(data.update_id, "u")?)?,
+            sequence: required(data.update_id, "u")? as usize,
         }),
         MarketDataType::Trade => {
             if data.order_type.as_deref() != Some(MARKET_ORDER_TYPE) {
@@ -274,7 +337,7 @@ pub(super) fn event_to_market_data(
                 price: required(data.price, "p")?,
                 size: required(data.size, "q")?,
                 taker_side: taker_side(required(data.buyer_is_maker, "m")?),
-                sequence: to_sequence(required(data.trade_id, "t")?)?,
+                sequence: required(data.trade_id, "t")? as usize,
             })
         }
         // Binance aggregates only market trades, so no order type is checked.
@@ -285,18 +348,54 @@ pub(super) fn event_to_market_data(
             price: required(data.price, "p")?,
             size: required(data.size, "q")?,
             taker_side: taker_side(required(data.buyer_is_maker, "m")?),
-            sequence: to_sequence(required(data.last_trade_id, "l")?)?,
+            sequence: required(data.last_trade_id, "l")? as usize,
         }),
+        MarketDataType::OrderBook => {
+            return Err(anyhow!("an order book arrives on its own depth event"));
+        }
     };
     Ok(Some(market_data))
 }
 
-fn required<Value>(value_option: Option<Value>, field: &str) -> Result<Value> {
-    value_option.with_context(|| format!("missing field {field}"))
+/// A futures partial-depth event as one order book; only the top `ORDER_BOOK_DEPTH` levels are kept.
+pub(super) fn depth_event_to_order_book(
+    topic: Topic,
+    data: &DepthEventData,
+    received_time_nanoseconds: NonZeroU64,
+) -> OrderBook {
+    let exchange_time_nanoseconds = Some(milliseconds_to_nanoseconds(
+        data.transaction_time_milliseconds.get(),
+    ));
+    let (bid_levels, bid_count) = price_levels(&data.bids);
+    let (ask_levels, ask_count) = price_levels(&data.asks);
+    OrderBook {
+        instrument: topic.instrument,
+        exchange_time_nanoseconds,
+        latency_metric: LatencyMetric::received(received_time_nanoseconds),
+        bid_levels,
+        ask_levels,
+        bid_count,
+        ask_count,
+        // Development, tests and production are all 64-bit, where every u64 id is a usize.
+        sequence: data.last_update_id as usize,
+    }
 }
 
-pub(super) fn to_sequence(id: u64) -> Result<usize> {
-    usize::try_from(id).with_context(|| format!("id {id} does not fit usize"))
+/// Binance sends positional `[price, quantity]` levels; convert them to the shared named type here.
+fn price_levels(levels: &[(Decimal, Decimal)]) -> ([PriceLevel; ORDER_BOOK_DEPTH], u8) {
+    let mut output = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+    for (slot, (price, size)) in output.iter_mut().zip(levels) {
+        *slot = PriceLevel {
+            price: *price,
+            size: *size,
+        };
+    }
+    let count = u8::try_from(levels.len().min(ORDER_BOOK_DEPTH)).expect("the depth fits u8");
+    (output, count)
+}
+
+fn required<Value>(value_option: Option<Value>, field: &str) -> Result<Value> {
+    value_option.with_context(|| format!("missing field {field}"))
 }
 
 /// The buyer resting on the book means the seller took liquidity.
@@ -311,6 +410,7 @@ pub(super) fn taker_side(buyer_is_maker: bool) -> Side {
 #[cfg(test)]
 mod tests {
     use rust_decimal::dec;
+    use serde_json::json;
 
     use super::*;
     use layline::types::{Currency, Exchange, Instrument, UnderlyingType};
@@ -321,6 +421,8 @@ mod tests {
     const SPOT_BOOK_TICKER: &str = r#"{"stream":"btcusdt@bookTicker","data":{"u":6230799530,"s":"BTCUSDT","b":"80586.30000000","B":"3.17369000","a":"80586.31000000","A":"10.52077000"}}"#;
     const FUTURES_BOOK_TICKER: &str = r#"{"stream":"btcusdt@bookTicker","data":{"e":"bookTicker","u":462733955406,"s":"BTCUSDT","ps":"BTCUSDT","b":"80570.70","B":"2.6914","a":"80570.80","A":"187.5753","T":1792881786559,"E":1792881786571,"st":1}}"#;
     const FUTURES_TRADE: &str = r#"{"stream":"btcusdt@trade","data":{"e":"trade","E":1792881786571,"T":1792881786559,"s":"BTCUSDT","t":550507694,"p":"80570.70","q":"0.0015","X":"MARKET","m":true,"st":1}}"#;
+    /// Captured from `wss://fstream.binance.com/public/stream` on 2026-11-27.
+    const LIVE_FUTURES_DEPTH: &str = r#"{"stream":"btcusdt@depth10@100ms","data":{"e":"depthUpdate","E":1795723910613,"T":1795723910611,"s":"BTCUSDT","ps":"BTCUSDT","U":12250879510569,"u":12250879517064,"pu":12250879510448,"b":[["60726.20","10.649"],["60726.10","0.198"],["60726.00","0.009"],["60725.70","0.001"],["60725.60","0.051"],["60725.50","0.002"],["60725.40","0.002"],["60725.00","0.001"],["60724.90","0.001"],["60724.80","0.003"]],"a":[["60726.30","2.686"],["60726.40","0.027"],["60726.50","0.001"],["60726.90","0.003"],["60727.00","0.001"],["60727.10","0.001"],["60727.30","0.003"],["60727.50","0.003"],["60727.60","0.007"],["60727.70","0.004"]],"st":1}}"#;
     /// Captured on the live `/market` endpoint.
     const FUTURES_AGGREGATE_TRADE: &str = r#"{"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1794415042275,"a":3516577516,"s":"BTCUSDT","p":"74306.60","q":"0.033","nq":"0.033","f":8256744487,"l":8256744489,"T":1794415042160,"m":true,"st":1}}"#;
 
@@ -426,6 +528,139 @@ mod tests {
         assert_eq!(dec!(0.033), trade.size);
         assert_eq!(Side::Sell, trade.taker_side);
         assert_eq!(8_256_744_489, trade.sequence);
+    }
+
+    const DEPTH_EVENT_TIME_MILLISECONDS: u64 = 1_792_881_786_571;
+    const DEPTH_TRANSACTION_TIME_MILLISECONDS: u64 = 1_792_881_786_559;
+    const DEPTH_UPDATE_ID: u64 = 7;
+
+    fn depth_event(bid_count: usize, ask_count: usize) -> String {
+        let bids: Vec<Value> = (0..bid_count)
+            .map(|index| json!([(100 - index).to_string(), "1"]))
+            .collect();
+        let asks: Vec<Value> = (0..ask_count)
+            .map(|index| json!([(101 + index).to_string(), "1"]))
+            .collect();
+        json!({
+            "stream": "btcusdt@depth10@100ms",
+            "data": {
+                "e": "depthUpdate",
+                "E": DEPTH_EVENT_TIME_MILLISECONDS,
+                "T": DEPTH_TRANSACTION_TIME_MILLISECONDS,
+                "s": "BTCUSDT",
+                "U": 1,
+                "u": DEPTH_UPDATE_ID,
+                "pu": 0,
+                "b": bids,
+                "a": asks,
+            }
+        })
+        .to_string()
+    }
+
+    fn parse_depth(text: &str) -> OrderBook {
+        let TextFrame::Depth { stream, data } =
+            classify_text_frame(text).expect("a depth frame is expected to parse")
+        else {
+            panic!("a depth frame is expected");
+        };
+        assert_eq!("btcusdt@depth10@100ms", stream.as_ref());
+        depth_event_to_order_book(
+            topic(UnderlyingType::Perpetual, MarketDataType::OrderBook),
+            &data,
+            RECEIVED_TIME_NANOSECONDS,
+        )
+    }
+
+    #[test]
+    fn futures_partial_depth_becomes_an_order_book() {
+        let order_book = parse_depth(&depth_event(10, 10));
+        assert_eq!(
+            topic(UnderlyingType::Perpetual, MarketDataType::OrderBook).instrument,
+            order_book.instrument
+        );
+        assert_eq!(10, order_book.bids().len());
+        assert_eq!(10, order_book.asks().len());
+        assert_eq!(dec!(100), order_book.bids()[0].price);
+        assert_eq!(dec!(91), order_book.bids()[9].price);
+        assert_eq!(dec!(101), order_book.asks()[0].price);
+        assert_eq!(dec!(110), order_book.asks()[9].price);
+        assert_eq!(dec!(1), order_book.bids()[0].size);
+        assert_eq!(
+            Some(NonZeroU64::new(1_792_881_786_559_000_000).expect("the timestamp is not zero")),
+            order_book.exchange_time_nanoseconds
+        );
+        assert_eq!(7, order_book.sequence);
+        assert_eq!(
+            RECEIVED_TIME_NANOSECONDS,
+            order_book.latency_metric.provider_receive_time_nanoseconds
+        );
+    }
+
+    #[test]
+    fn a_live_futures_depth_frame_parses_into_ten_levels() {
+        let order_book = parse_depth(LIVE_FUTURES_DEPTH);
+        assert_eq!(10, order_book.bids().len());
+        assert_eq!(10, order_book.asks().len());
+        assert_eq!(dec!(60726.20), order_book.bids()[0].price);
+        assert_eq!(dec!(60724.80), order_book.bids()[9].price);
+        assert_eq!(dec!(60726.30), order_book.asks()[0].price);
+        assert_eq!(dec!(60727.70), order_book.asks()[9].price);
+        assert_eq!(12_250_879_517_064, order_book.sequence);
+        assert_eq!(
+            Some(NonZeroU64::new(1_795_723_910_611_000_000).expect("the timestamp is not zero")),
+            order_book.exchange_time_nanoseconds
+        );
+    }
+
+    #[test]
+    fn levels_beyond_the_first_ten_are_dropped() {
+        let order_book = parse_depth(&depth_event(12, 3));
+        assert_eq!(10, order_book.bids().len());
+        assert_eq!(dec!(91), order_book.bids()[9].price);
+        assert_eq!(3, order_book.asks().len());
+    }
+
+    #[test]
+    fn order_book_topics_are_not_trade_events() {
+        let error = event_to_market_data(
+            topic(UnderlyingType::Perpetual, MarketDataType::OrderBook),
+            &EventData::default(),
+            RECEIVED_TIME_NANOSECONDS,
+        )
+        .expect_err("an order book topic has no trade event");
+        assert!(error.to_string().contains("depth event"), "{error}");
+    }
+
+    #[test]
+    fn depth_without_a_transaction_time_is_refused() {
+        let text = depth_event(1, 1).replace("\"T\":1792881786559,", "");
+        assert!(classify_text_frame(&text).is_err());
+    }
+
+    #[test]
+    fn depth_with_a_zero_transaction_time_is_refused() {
+        let text = depth_event(1, 1).replace("\"T\":1792881786559", "\"T\":0");
+        assert!(classify_text_frame(&text).is_err());
+    }
+
+    #[test]
+    fn depth_without_a_final_update_id_is_refused() {
+        let text = depth_event(1, 1).replace("\"u\":7", "\"x\":7");
+        assert!(classify_text_frame(&text).is_err());
+    }
+
+    #[test]
+    fn a_depth_frame_without_data_is_refused() {
+        let text = "{ \"stream\": \"btcusdt@depth10@100ms\" }";
+        assert!(classify_text_frame(text).is_err());
+    }
+
+    #[test]
+    fn unusual_depth_frames_take_the_serde_fallback() {
+        let spaced = depth_event(2, 2).replace("{\"stream\"", "{ \"stream\"");
+        let order_book = parse_depth(&spaced);
+        assert_eq!(2, order_book.bids().len());
     }
 
     /// Both paths turn `text` into the same market data, or the fast path declines it.

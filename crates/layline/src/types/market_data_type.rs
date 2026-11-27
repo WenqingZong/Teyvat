@@ -14,6 +14,8 @@ pub enum MarketDataType {
     /// Fills merged into one `Trade`: the venue's own aggregate stream as it is, or, where the venue
     /// has none, one taker order's fills merged by the provider at their volume-weighted average price.
     AggregateTrade = 3,
+    /// The top `ORDER_BOOK_DEPTH` price levels of each side, as one snapshot.
+    OrderBook = 4,
 }
 
 #[cfg(test)]
@@ -29,6 +31,16 @@ mod tests {
         assert_eq!(
             MarketDataType::AggregateTrade,
             serde_json::from_str::<MarketDataType>("\"AGGREGATE_TRADE\"")
+                .expect("deserialization is expected to not fail")
+        );
+    }
+
+    #[test]
+    fn order_book_is_spelled_with_an_underscore() {
+        assert_eq!("ORDER_BOOK", MarketDataType::OrderBook.to_string());
+        assert_eq!(
+            MarketDataType::OrderBook,
+            serde_json::from_str::<MarketDataType>("\"ORDER_BOOK\"")
                 .expect("deserialization is expected to not fail")
         );
     }

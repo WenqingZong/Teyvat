@@ -5,15 +5,15 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use rust_decimal::dec;
+use rust_decimal::{Decimal, dec};
 use secrecy::SecretBox;
 
 use crate::noise::{StaticKey, generate_keypair};
 use crate::process_metrics::{MemoryUsage, ProcessSample, ThreadSample};
 use crate::time::get_current_timestamp_nanoseconds;
 use crate::types::{
-    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, Side, StrategyName,
-    Subscription, Topic, Trade, UnderlyingType,
+    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketDataType, ORDER_BOOK_DEPTH,
+    OrderBook, PriceLevel, Side, StrategyName, Subscription, Topic, Trade, UnderlyingType,
 };
 
 pub fn test_instrument(
@@ -104,6 +104,29 @@ pub fn test_trade(instrument: Instrument, sequence: usize) -> Trade {
         price: dec!(101.5),
         size: dec!(0.25),
         taker_side: Side::Buy,
+        sequence,
+    }
+}
+
+pub fn test_order_book(instrument: Instrument, sequence: usize) -> OrderBook {
+    let mut bid_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+    let mut ask_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+    for (index, level) in bid_levels.iter_mut().enumerate() {
+        level.price = dec!(101.4) - Decimal::from(index) * dec!(0.1);
+        level.size = dec!(4);
+    }
+    for (index, level) in ask_levels.iter_mut().enumerate() {
+        level.price = dec!(101.5) + Decimal::from(index) * dec!(0.1);
+        level.size = dec!(2);
+    }
+    OrderBook {
+        instrument,
+        exchange_time_nanoseconds: None,
+        latency_metric: LatencyMetric::received(get_current_timestamp_nanoseconds()),
+        bid_levels,
+        ask_levels,
+        bid_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
+        ask_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
         sequence,
     }
 }

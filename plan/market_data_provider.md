@@ -7,12 +7,13 @@
 - **Coindesk mapped / unmapped 检查**：具体内容待讨论。
 - **跨重启保留订阅集合**：目前行情服务重启后靠策略每 10 秒一次的 `/resubscribe` 恢复订阅；以后由行情服务自己持久化。
 - **OKX connector**：`OkxConnector` 目前是 dummy，每 10 ms 发合成数据；换成真实实现后删除 `exchanges/synthetic.rs`。
+- **现货增量深度 + 本地 order book**：现货用 SBE `<symbol>@depth`（20ms 增量）维护本地订单簿，对外仍只发布前 10 档；要解决快照与增量的对齐、`U/u` 缺口检测、断线重同步和薄 book 的处理。尚未实现，当前现货 `ORDER_BOOK` 在 connector 里还是 `unimplemented!()`；合约已经用 JSON `@depth10@100ms` 的部分深度快照实现。
 
 ## 长远规划（暂不实施：工作量大、收益要靠实测确认，只记录动机，供以后评估）
 
 ### 用自研的定长槽 ring 替换 bcast
 
-**动机**：每个 ring 只装一种行情类型，`Bbo`、`Trade` 又都是不含变长字段的 `Copy` 结构，所以同一个 ring 里每条 rkyv 帧的长度本来就恒定（实际大小用 `size_of::<ArchivedBbo>()` 等实测）。bcast 是通用的字节 ring，没有利用这一点：每帧带长度头，绕回末尾时要插入 padding 帧，reader 还要先把帧拷进 `PayloadBuffer`、再 `rkyv::from_bytes` 反序列化（见 `crates/layline/src/shared_memory/reader.rs` 里 `MarketDataReader::poll` 上方的 PERFORMANCE 注释）。
+**动机**：每个 ring 只装一种行情类型，`Bbo`、`Trade`、`OrderBook` 都是不含变长字段的 `Copy` 结构，所以同一个 ring 里每条 rkyv 帧的长度本来就恒定（实际大小用 `size_of::<ArchivedBbo>()` 等实测）。bcast 是通用的字节 ring，没有利用这一点：每帧带长度头，绕回末尾时要插入 padding 帧，reader 还要先把帧拷进 `PayloadBuffer`、再 `rkyv::from_bytes` 反序列化（见 `crates/layline/src/shared_memory/reader.rs` 里 `MarketDataReader::poll` 上方的 PERFORMANCE 注释）。
 
 **潜在收益**（类似 Disruptor 的定长槽设计）：
 
@@ -29,3 +30,5 @@
 | `src/time.rs` | 给毫秒、微秒、纳秒各自独立的时间戳类型，让类型系统拒绝混用单位；在此之前，裸整数时间戳在名字里带单位 |
 | `src/exchanges/worker.rs` | 每个交易所一个 worker 适合现在的 Oracle 免费实例；换更强的机器后，考虑按（交易所，行情类型）拆分 worker |
 | `src/exchanges/mod.rs` | `ExchangeConnector::next_event` 的接口形状是临时的，需要详细讨论 |
+
+另有一个已知优化，不在上表（代码在 layline）：`layline/src/types/market_data.rs` 的 `OrderBook` 变体让 `MarketData` 从约 100 字节涨到约 700 字节，BBO/trade 的 move 也跟着变大。当前按“先正确、后优化”保留内联、不加堆分配；以后用 latency bench 决定是否装箱或拆分传输。

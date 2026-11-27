@@ -19,10 +19,11 @@ use layline::provider_api::Subscription;
 use layline::shared_memory::{
     MAX_PAYLOAD_LENGTH, MarketDataReader, MarketDataWriter, SerializedMarketData,
 };
+use layline::testing::test_order_book;
 use layline::time::get_current_timestamp_nanoseconds;
 use layline::types::{
-    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, Side,
-    StrategyName, Topic, Trade, UnderlyingType,
+    Bbo, Currency, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, OrderBook,
+    Side, StrategyName, Topic, Trade, UnderlyingType,
 };
 
 const SHARED_MEMORY_DIRECTORY: &str = "/dev/shm";
@@ -51,7 +52,11 @@ fn topics(count: usize) -> Vec<Topic> {
         for base in currencies {
             for quote in currencies {
                 for underlying_type in [UnderlyingType::Spot, UnderlyingType::Perpetual] {
-                    for market_data_type in [MarketDataType::Bbo, MarketDataType::Trade] {
+                    for market_data_type in [
+                        MarketDataType::Bbo,
+                        MarketDataType::Trade,
+                        MarketDataType::OrderBook,
+                    ] {
                         topics.push(Topic {
                             instrument: Instrument {
                                 exchange,
@@ -129,6 +134,9 @@ fn market_data(topic: Topic, sequence: usize) -> MarketData {
         MarketDataType::AggregateTrade => {
             MarketData::AggregateTrade(trade(topic.instrument, sequence))
         }
+        MarketDataType::OrderBook => {
+            MarketData::OrderBook(test_order_book(topic.instrument, sequence))
+        }
     }
 }
 
@@ -144,6 +152,9 @@ fn write_time(data: &MarketData) -> NonZeroU64 {
         MarketData::Trade(trade) | MarketData::AggregateTrade(trade) => {
             trade.latency_metric.provider_write_time_nanoseconds
         }
+        MarketData::OrderBook(order_book) => {
+            order_book.latency_metric.provider_write_time_nanoseconds
+        }
     }
 }
 
@@ -152,6 +163,7 @@ fn codec(criterion: &mut Criterion) {
     let instrument = topics(1)[0].instrument;
     let bbo = bbo(instrument, 1);
     let trade = trade(instrument, 1);
+    let order_book = test_order_book(instrument, 1);
 
     group.bench_function("serialize/BBO", |bencher| {
         bencher.iter(|| {
@@ -162,6 +174,12 @@ fn codec(criterion: &mut Criterion) {
     group.bench_function("serialize/TRADE", |bencher| {
         bencher.iter(|| {
             rkyv::to_bytes::<RkyvError>(black_box(&trade))
+                .expect("serialization is expected to not fail")
+        });
+    });
+    group.bench_function("serialize/ORDER_BOOK", |bencher| {
+        bencher.iter(|| {
+            rkyv::to_bytes::<RkyvError>(black_box(&order_book))
                 .expect("serialization is expected to not fail")
         });
     });
@@ -184,6 +202,16 @@ fn codec(criterion: &mut Criterion) {
             let payload = &mut buffer.0[..trade_bytes.len()];
             payload.copy_from_slice(black_box(&trade_bytes));
             rkyv::from_bytes::<Trade, RkyvError>(payload)
+                .expect("deserialization is expected to not fail")
+        });
+    });
+    let order_book_bytes =
+        rkyv::to_bytes::<RkyvError>(&order_book).expect("serialization is expected to not fail");
+    group.bench_function("copy_and_deserialize/ORDER_BOOK", |bencher| {
+        bencher.iter(|| {
+            let payload = &mut buffer.0[..order_book_bytes.len()];
+            payload.copy_from_slice(black_box(&order_book_bytes));
+            rkyv::from_bytes::<OrderBook, RkyvError>(payload)
                 .expect("deserialization is expected to not fail")
         });
     });

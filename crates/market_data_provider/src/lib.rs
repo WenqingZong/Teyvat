@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 pub mod aggregation;
 mod alert;
 pub mod config;
