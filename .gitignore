@@ -27,3 +27,6 @@ tmp/
 
 # Windows download markers (from copying files in via WSL)
 *:Zone.Identifier
+
+# AI tooling and state for the nightly test (see AGENTS.md); never reviewed or deployed
+.nightly_test/

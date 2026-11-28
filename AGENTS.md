@@ -157,39 +157,125 @@ lifecycle. Our job is to watch the logs and report; nothing else.
 **Read-only, without exception.** While a nightly test runs, never stop, start, restart or kill a
 service, never edit a config, never build or copy a binary on a host, and never touch the rings
 under `/dev/shm`. Only read-only SSH commands are allowed on the hosts: `ps`, `pgrep`, `curl`,
-`grep`, `tail`, `free`, `df`. `pkill`, `systemctl`, `setsid`, `scp`, `cargo` and anything like
-`install_teyvat` are off limits there. A missing or stopped process is **reported, never
-restarted**: only the user restarts it, from their own tmux session.
+`grep`, `tail`, `free`, `df`, `sed` and, on RedmiBook, `journalctl -u phanes` without `--vacuum*`,
+`--rotate` or `--flush`. `pkill`, `systemctl`, `setsid`, `scp`, `cargo`, `journalctl --vacuum*`
+and anything like `install_teyvat` are off limits there. A missing or stopped process is
+**reported, never restarted**: only the user restarts it, from their own tmux session. The
+read-only rule covers the whole session the patrol runs in, not only the hosts: do not edit
+repository files either (this section, `plan/` entries and scheduled-task prompts included) while
+a test runs; propose the change in the report and apply it once the user ends the test. The one
+exception is `.nightly_test/`, the AI tooling directory described below: it is gitignored, never
+reaches a host and is meant to be improved mid-test.
 
-Hosts and paths (SSH aliases `Osaka`, `Tokyo` exist locally):
+Hosts and paths (SSH aliases `Osaka`, `Tokyo`, `RedmiBook` exist locally). `ssh` needs
+`-F ~/.ssh/config` locally: the system `/etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf` is not
+readable by the agent, and without the flag every `ssh` fails with "Bad owner or permissions".
 
-| Host | Services | Logs |
+| Host | Role | Services and logs |
 |---|---|---|
-| `Osaka` | `/home/ubuntu/Services/MarketDataProvider/`, `/home/ubuntu/Services/DummyStrategy/` | `*.log` in each directory |
-| `Tokyo` | same paths | same |
+| `Osaka` | demo environment | `/home/ubuntu/Services/MarketDataProvider/market_data_provider.log`, `/home/ubuntu/Services/DummyStrategy/strategy.log` |
+| `Tokyo` | live environment | `/home/ubuntu/Services/MarketDataProvider/market_data_provider.log`, `/home/ubuntu/Services/DummyStrategy/dummy_strategy.log` |
+| `RedmiBook` | Phanes (control centre) | `journalctl --namespace=phanes -u phanes`, reached as the read-only account: `ssh -F ~/.ssh/config RedmiBook journalctl ...` (the name is `journalctl` exactly, so no quote, `|`, `>` or `2>&1` in that command line; filter locally) |
+
+The old `dummy_strategy.log` in Osaka's `DummyStrategy/` is a 11-23 leftover: read `strategy.log`.
 
 Assumptions about the run, which must not be changed by the watcher: the strategy reports latency
 every 30 minutes (`--report-interval-seconds=1800`, so windows compare across nights), and Osaka
 runs the demo environment while Tokyo runs live; read each host's `strategy.toml` for the
-exact topic set (Tokyo includes `AGGREGATE_TRADE`; demo testnet does not list AAPL/MSFT
-perpetuals).
+exact topic set (Tokyo includes `AGGREGATE_TRADE` and AAPL/MSFT, demo does not).
 
-Patrol every two hours, scheduled with DSH's scheduler (`this_session`,
-`FREQ=HOURLY;INTERVAL=2`), not with cron, so the reports arrive in the conversation. Per host:
+Patrol **every hour**, scheduled with DSH's scheduler (`this_session`, `FREQ=HOURLY;INTERVAL=1`),
+not with cron, so the reports arrive in the conversation. A patrol is one command:
 
 ```bash
-ssh <host> 'pgrep -af "^\./market_data_provider --config"; pgrep -af "^\./dummy_strategy --config";
-  curl -s --max-time 3 http://127.0.0.1:6666/health; echo;
-  grep -cE " ERROR|panic|CRITICAL" ~/Services/*/*.log;
-  tail -c 4000 ~/Services/MarketDataProvider/market_data_provider.log;
-  tail -c 4000 ~/Services/DummyStrategy/dummy_strategy.log'
+python3 .nightly_test/patrol.py --name nightly --save
 ```
 
-Look for, in this order: a missing process; an `ERROR`, `panic` or non-zero exit; repeated
-Celestia disconnects between the hosts; topics missing from `/subscribed`; a missing 30-minute
-latency report; a large p99/max regression against the previous window; memory growth; disk or
-inode pressure. `WARN` alone is not an anomaly (Cloudflare resets the Celestia connection
-occasionally; the client reconnects and resends).
+It reads every host over one SSH round trip with read-only commands only, applies all the checks
+below, compares them with the previous run's saved counters, and prints a compact report with
+only the anomalies and the log lines that prove them. Exit status `0` means healthy, `2` means at
+least one `HIGH` anomaly. Inspect the result, then report to the user yourself; never paste the
+whole tool output when the night was healthy.
+
+`.nightly_test/` is AI tooling, not part of the project: it is gitignored and never reviewed,
+deployed or imported by the crates, and its `README.md` documents the tools. Keep it that way:
+change it freely during a test (it is the one exception to "do not edit repository files while a
+test runs", because nothing there reaches a host), run `python3 .nightly_test/selftest.py` after
+changing a rule, and add a fixture for every new judgement. When the tool cannot read something,
+do the same read by hand with:
+
+```bash
+ssh -F ~/.ssh/config <host> 'pgrep -af "^\./market_data_provider --config"; pgrep -af "^\./dummy_strategy --config";
+  curl -s --max-time 3 http://127.0.0.1:6666/health; echo;
+  grep -acE "(WARN|ERROR)" ~/Services/*/*.log;
+  tail -c 4000 ~/Services/MarketDataProvider/market_data_provider.log;
+  tail -c 4000 ~/Services/DummyStrategy/<strategy.log|dummy_strategy.log>'
+ssh -F ~/.ssh/config RedmiBook journalctl --namespace=phanes -u phanes --no-hostname -n 400
+```
+
+The logs carry ANSI colour, every data snapshot line starts with a two-space ` INFO` field, and
+the `DEBUG` in testnet symbols (`BTCUSDT_DEBUG`) contains `ERROR` as a substring: strip colour with
+`sed -E "s/\x1b\[[0-9;]*m//g"`, grep with `-a` and count on `(WARN|ERROR)` as a whole field, never
+with `grep -c " ERROR"`.
+
+The strategy logs one snapshot of each topic per minute (`src/bin/dummy_strategy.rs`, `INFO
+{topic}: {data:?}`), so data correctness is checked on every patrol as well as liveness:
+
+- Every topic in `/subscribed` appears in the strategy log with all four message types
+  (`Bbo`, `Trade`, `AggregateTrade`, `OrderBook`); a topic that only has some of them is either
+  idle or broken, so look at the other three types of the same instrument. Spot stock orders are
+  on `SESSION_NOT_OPEN` outside US hours (`idle: 32` from year 16, the stock's PRNG price walks
+  instead), and trades then vanish while its BBO and order book keep updating every minute; a type
+  that is missing while the instrument's other types arrive, or the same silence on a perpetual
+  (24×7), is a fault.
+- Order books: each side prints all `ORDER_BOOK_DEPTH` (10) levels, of which only the first
+  `bid_count`/`ask_count` are valid and the rest are `PriceLevel::EMPTY` (price and size zero), so
+  check the *valid* prefix: it descends/ascends from level 0, has no empty level, is not crossed
+  (`bid < ask`), and the padding really is empty.
+- Sequences: within a topic they never go backwards, with one exception that is the venue's and
+  not ours: Binance's USDT-M futures update ids (`u`) wrapped at 2^32 on 2026-11-28 06:17–06:18
+  CST, so all nine perpetuals restarted from a few hundred thousand (the mechanism is recorded in
+  [`architecture/market_data_provider.md`](architecture/market_data_provider.md) under 类型). A
+  reset is only a note when the price is continuous (under 1% change across it) and the book stays
+  consistent; a backward jump together with a price jump is a desync. Gaps are **expected**
+  between two minute snapshots (`@depth10@100ms` and `@depth` are throttled, `@bookTicker` culls
+  stale updates, and `@aggTrade`/`@trade` are per trade), so a gap is only judged together with
+  the price: a bid/ask that jumps several percent, or a spread far outside the instrument's own
+  distribution over the session (the tool uses max(40 bps, 10 x the session median): BTC/USDT
+  spot sits at 0 bps and a stock perpetual at night at 6-12 bps, so one constant cannot judge
+  both; on 11-28 NVDA's perpetual held a resting ask 0.8% above the bids for two hours while its
+  bids drifted, which is a thin book, not corruption), is a desync.
+- The first `OrderBook` of each spot instrument has `exchange_time_nanoseconds: None`: it is the
+  REST snapshot, which has no venue time.
+- Provider latency (`provider_write_time_nanoseconds - provider_receive_time_nanoseconds`) is
+  never negative, and a snapshot's exchange time is not in the future.
+- Phanes' Celestia samples are the only view of the hosts' own process tables from that side, and
+  they arrive every `process_metrics_interval_seconds` (30 min), not every minute, so "no new
+  journal line" between two patrols usually means "no sample was due": report each reporter's last
+  sample age and the next one instead. On every sample check that `taken at` is at most a few
+  seconds before the receipt time (a large lag means the Outbox resent after a reconnect), that
+  `memory anon + file + shmem` matches the host's `VmRSS` for the same pid (a mismatch means the
+  sample and `ps` disagree), that the thread count and fd count are the code's usual ones (5/22
+  for the provider, 3/14 for the strategy; the sampling itself holds three extra `/proc` handles),
+  and that `anon` does not trend up over consecutive samples — `shmem` growing is expected and
+  stops at the rings' size, because those pages are the strategy's ring mappings.
+
+Look for, in this order: a missing process; an `ERROR`, `panic` or non-zero exit; topics missing
+from `/subscribed`; the data-correctness checks above; repeated Celestia disconnects between the
+hosts or in Phanes; a missing 30-minute latency report; a large p99/max regression against the
+previous window; memory growth (in Osaka the strategy's RSS must hold well below the host's
+~950 MB, on Tokyo check the trend hour to hour); disk or inode pressure. `WARN` alone is not an
+anomaly (Cloudflare resets the Celestia connection occasionally; the client reconnects and
+resends). In Phanes' log, look for a restart (a new `release build of commit` line), a different
+commit from the hosts' or the repository's, `ERROR`/panic/`CRITICAL`, and Celestia events that do
+not match what the hosts' own logs say.
+
+A transport-latency percentile is only meaningful next to the host's CPU: both machines run the
+strategy as a busy poller, so it owns a core and the provider writes are microseconds away. Osaka's
+transit p90 in the tens of milliseconds with 27–46% of `steal` in `/proc/stat` means the free
+instance's hypervisor descheduled it, not that the code is slow: that is the expected state of
+Osaka, mention it only when the latency is being compared with Tokyo, and never treat it as
+something to fix. `steal` on Tokyo, which sits at 0–1%, is news if it moves.
 
 Report concisely: what changed since the last patrol, and only anomalies with the log line that
 proves them; never paste whole logs. When a process is down, say when it was last seen, quote its
