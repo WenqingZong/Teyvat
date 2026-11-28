@@ -16,7 +16,8 @@ pub(super) const SBE_DEPTH_CHANNEL: &str = "depth";
 pub(super) const TRADE_CHANNEL: &str = "trade";
 const BOOK_TICKER_CHANNEL: &str = "bookTicker";
 const AGGREGATE_TRADE_CHANNEL: &str = "aggTrade";
-const DEPTH_CHANNEL: &str = "depth10@100ms";
+/// The perpetual partial-depth stream; `message.rs` matches it exactly to read whole levels.
+pub(super) const FUTURES_DEPTH_CHANNEL: &str = "depth10@100ms";
 
 /// The endpoint and stream `topic` needs. Binance accepts any stream name on any path and then
 /// sends nothing, so this mapping must stay under test.
@@ -41,7 +42,7 @@ pub(super) fn route(topic: &Topic) -> (BinanceEndpoint, String) {
             (BinanceEndpoint::FuturesMarket, AGGREGATE_TRADE_CHANNEL)
         }
         (UnderlyingType::Perpetual, MarketDataType::OrderBook) => {
-            (BinanceEndpoint::FuturesPublic, DEPTH_CHANNEL)
+            (BinanceEndpoint::FuturesPublic, FUTURES_DEPTH_CHANNEL)
         }
     };
     let symbol = venue_symbol(topic.instrument).to_lowercase();

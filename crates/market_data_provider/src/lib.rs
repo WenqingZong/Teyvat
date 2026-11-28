@@ -4,6 +4,7 @@ pub mod config;
 mod exchanges;
 pub mod exit_reason;
 mod gnosis_client;
+mod order_book_state;
 pub mod server;
 mod time;
 mod utils;

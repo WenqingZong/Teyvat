@@ -106,15 +106,15 @@ fn synthetic_data(topic: Topic, latency_metric: LatencyMetric, sequence: usize) 
             latency_metric,
             bid_levels: synthetic_levels(SYNTHETIC_BID_PRICE, -TICK_SIZE),
             ask_levels: synthetic_levels(ask_price, TICK_SIZE),
-            bid_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
-            ask_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
+            bid_count: ORDER_BOOK_DEPTH,
+            ask_count: ORDER_BOOK_DEPTH,
             sequence,
         }),
     }
 }
 
-fn synthetic_levels(best_price: Decimal, step: Decimal) -> [PriceLevel; ORDER_BOOK_DEPTH] {
-    let mut levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+fn synthetic_levels(best_price: Decimal, step: Decimal) -> [PriceLevel; ORDER_BOOK_DEPTH as usize] {
+    let mut levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH as usize];
     let size = SYNTHETIC_LOTS * LOT_SIZE;
     for (index, level) in levels.iter_mut().enumerate() {
         level.price = best_price + step * Decimal::from(index);

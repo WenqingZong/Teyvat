@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
 
+use super::venue_stream::FUTURES_DEPTH_CHANNEL;
 use crate::time::milliseconds_to_nanoseconds;
 use layline::types::{
     Bbo, LatencyMetric, MarketData, MarketDataType, ORDER_BOOK_DEPTH, OrderBook, PriceLevel, Side,
@@ -27,7 +28,6 @@ const COMPACT_SUFFIX: &str = "}}";
 const COMPACT_ACKNOWLEDGEMENT_PREFIX: &str = "{\"result\":null,\"id\":";
 const COMPACT_ACKNOWLEDGEMENT_SUFFIX: &str = "}";
 const SERVER_SHUTDOWN_PREFIX: &str = "{\"e\":\"serverShutdown\"";
-const DEPTH_CHANNEL_PREFIX: &str = "depth";
 
 #[derive(Serialize)]
 pub(super) struct Request<'a> {
@@ -160,12 +160,11 @@ pub(super) fn classify_text_frame(text: &str) -> Result<TextFrame<'_>> {
         return Ok(TextFrame::ServerShutdown);
     }
     if let Some(stream) = compact_stream(text)
-        && is_depth_stream(stream)
+        && is_partial_depth_stream(stream)
     {
-        let DepthEnvelope { data } = serde_json::from_str(text)?;
         return Ok(TextFrame::Depth {
             stream: Cow::Borrowed(stream),
-            data,
+            data: depth_event_data(text)?,
         });
     }
     if let Some((stream, data)) = parse_compact_event(text) {
@@ -190,10 +189,18 @@ fn compact_stream(text: &str) -> Option<&str> {
         .map(|(stream, _)| stream)
 }
 
-fn is_depth_stream(stream: &str) -> bool {
+/// Only the partial-depth stream carries whole levels; a diff stream's `b`/`a` are changes to them,
+/// so reading one as a snapshot would publish a book that is missing every untouched level.
+fn is_partial_depth_stream(stream: &str) -> bool {
     stream
         .split_once('@')
-        .is_some_and(|(_, channel)| channel.starts_with(DEPTH_CHANNEL_PREFIX))
+        .is_some_and(|(_, channel)| channel == FUTURES_DEPTH_CHANNEL)
+}
+
+/// A depth event's `data`, wherever the frame came from.
+fn depth_event_data(text: &str) -> Result<DepthEventData> {
+    let DepthEnvelope { data } = serde_json::from_str(text)?;
+    Ok(data)
 }
 
 /// Reads `{"result":null,"id":N}`, Binance's answer to a request that succeeded.
@@ -281,15 +288,11 @@ impl<'a> Cursor<'a> {
 fn parse_with_serde(text: &str) -> Result<TextFrame<'_>> {
     let value: Value = serde_json::from_str(text)?;
     if let Some(stream) = value.get("stream").and_then(Value::as_str)
-        && is_depth_stream(stream)
+        && is_partial_depth_stream(stream)
     {
-        let data = value
-            .get("data")
-            .cloned()
-            .context("a depth event has data")?;
         return Ok(TextFrame::Depth {
             stream: Cow::Owned(stream.to_owned()),
-            data: serde_json::from_value(data)?,
+            data: depth_event_data(text)?,
         });
     }
     let envelope: Envelope = serde_json::from_str(text)?;
@@ -366,8 +369,8 @@ pub(super) fn depth_event_to_order_book(
     let exchange_time_nanoseconds = Some(milliseconds_to_nanoseconds(
         data.transaction_time_milliseconds.get(),
     ));
-    let (bid_levels, bid_count) = price_levels(&data.bids);
-    let (ask_levels, ask_count) = price_levels(&data.asks);
+    let (bid_levels, bid_count) = top_price_levels(&data.bids);
+    let (ask_levels, ask_count) = top_price_levels(&data.asks);
     OrderBook {
         instrument: topic.instrument,
         exchange_time_nanoseconds,
@@ -381,16 +384,16 @@ pub(super) fn depth_event_to_order_book(
     }
 }
 
-/// Binance sends positional `[price, quantity]` levels; convert them to the shared named type here.
-fn price_levels(levels: &[(Decimal, Decimal)]) -> ([PriceLevel; ORDER_BOOK_DEPTH], u8) {
-    let mut output = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
-    for (slot, (price, size)) in output.iter_mut().zip(levels) {
-        *slot = PriceLevel {
-            price: *price,
-            size: *size,
-        };
+/// The first `ORDER_BOOK_DEPTH` of a partial-depth event, which may be shorter on a thin book.
+fn top_price_levels(
+    levels: &[(Decimal, Decimal)],
+) -> ([PriceLevel; ORDER_BOOK_DEPTH as usize], u8) {
+    let mut output = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH as usize];
+    let mut count = 0;
+    for (slot, level) in output.iter_mut().zip(levels) {
+        *slot = PriceLevel::from(*level);
+        count += 1;
     }
-    let count = u8::try_from(levels.len().min(ORDER_BOOK_DEPTH)).expect("the depth fits u8");
     (output, count)
 }
 
@@ -594,6 +597,15 @@ mod tests {
         assert_eq!(
             RECEIVED_TIME_NANOSECONDS,
             order_book.latency_metric.provider_receive_time_nanoseconds
+        );
+    }
+
+    #[test]
+    fn a_diff_depth_stream_is_not_read_as_a_snapshot() {
+        let diff = depth_event(1, 1).replace("btcusdt@depth10@100ms", "btcusdt@depth@100ms");
+        assert!(
+            classify_text_frame(&diff).is_err(),
+            "a diff stream must not become an order book"
         );
     }
 

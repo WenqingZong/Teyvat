@@ -32,14 +32,16 @@ use crate::aggregation::VolumeWeightedAveragePrice;
 use crate::alert::{SendAlert, alert_and_panic};
 use crate::exit_reason::ExitReason;
 use crate::gnosis_client::{GnosisClient, GnosisSource, fetch_gnosis_or_panic};
+use crate::order_book_state::{
+    OrderBookSnapshot, OrderBookState, OrderBookUpdate, OrderBookUpdateOutcome,
+};
 use crate::utils::{Clock, RealClock, to_pretty_json};
 use endpoint::{API_KEY_HEADER, BinanceEndpoint};
 use layline::bark::Notifier;
 use layline::gnosis::binance::BinanceSbeApiKey;
 use layline::types::ConnectedApi;
 use layline::types::{
-    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, OrderBookSnapshot,
-    OrderBookState, OrderBookUpdate, OrderBookUpdateOutcome, PriceLevel, Topic, Trade,
+    Bbo, Exchange, Instrument, LatencyMetric, MarketData, MarketDataType, PriceLevel, Topic, Trade,
     UnderlyingType,
 };
 use message::{
@@ -842,16 +844,17 @@ fn depth_update_from_sbe(
         last_sequence: diff.last_update_id,
         exchange_time_nanoseconds: Some(diff.event_time_nanoseconds),
         received_time_nanoseconds,
-        bids: price_levels(diff.bids())?,
-        asks: price_levels(diff.asks())?,
+        bids: sbe_price_levels(diff.bids())?,
+        asks: sbe_price_levels(diff.asks())?,
     })
 }
 
-fn price_levels(
+/// Every level of one side of an SBE diff, which is `None` if any of them fails to decode.
+fn sbe_price_levels(
     levels: impl Iterator<Item = Result<(Decimal, Decimal)>>,
 ) -> Result<Vec<PriceLevel>> {
     levels
-        .map(|level_result| level_result.map(|(price, size)| PriceLevel { price, size }))
+        .map(|level_result| level_result.map(PriceLevel::from))
         .collect()
 }
 

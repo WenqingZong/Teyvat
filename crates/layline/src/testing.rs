@@ -109,8 +109,8 @@ pub fn test_trade(instrument: Instrument, sequence: usize) -> Trade {
 }
 
 pub fn test_order_book(instrument: Instrument, sequence: usize) -> OrderBook {
-    let mut bid_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
-    let mut ask_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH];
+    let mut bid_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH as usize];
+    let mut ask_levels = [PriceLevel::EMPTY; ORDER_BOOK_DEPTH as usize];
     for (index, level) in bid_levels.iter_mut().enumerate() {
         level.price = dec!(101.4) - Decimal::from(index) * dec!(0.1);
         level.size = dec!(4);
@@ -125,8 +125,8 @@ pub fn test_order_book(instrument: Instrument, sequence: usize) -> OrderBook {
         latency_metric: LatencyMetric::received(get_current_timestamp_nanoseconds()),
         bid_levels,
         ask_levels,
-        bid_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
-        ask_count: u8::try_from(ORDER_BOOK_DEPTH).expect("the depth fits u8"),
+        bid_count: ORDER_BOOK_DEPTH,
+        ask_count: ORDER_BOOK_DEPTH,
         sequence,
     }
 }

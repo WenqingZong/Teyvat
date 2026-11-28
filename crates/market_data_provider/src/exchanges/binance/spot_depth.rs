@@ -9,12 +9,12 @@ use serde::Deserialize;
 
 use crate::exchanges::binance::endpoint::{SPOT_DEPTH_DEMO, SPOT_DEPTH_LIVE};
 use crate::exchanges::binance::venue_stream::venue_symbol;
+use crate::order_book_state::OrderBookSnapshot;
 use layline::http::REQUEST_TIMEOUT;
 use layline::time::get_current_timestamp_nanoseconds;
-use layline::types::{Instrument, OrderBookSnapshot, PriceLevel};
+use layline::types::{Instrument, PriceLevel};
 
-/// Binance charges weight 1 up to this many levels; the local book only needs the top ten.
-const SNAPSHOT_LIMIT: u16 = 20;
+const SNAPSHOT_LIMIT: u16 = 50;
 
 pub(crate) trait DepthSnapshotSource: Clone + Send + 'static {
     fn fetch(
@@ -75,16 +75,9 @@ impl DepthSnapshotSource for HttpDepthSnapshots {
                 sequence: body.last_update_id,
                 exchange_time_nanoseconds: None,
                 received_time_nanoseconds: get_current_timestamp_nanoseconds(),
-                bids: price_levels(body.bids),
-                asks: price_levels(body.asks),
+                bids: body.bids.into_iter().map(PriceLevel::from).collect(),
+                asks: body.asks.into_iter().map(PriceLevel::from).collect(),
             })
         }
     }
-}
-
-fn price_levels(levels: Vec<(Decimal, Decimal)>) -> Vec<PriceLevel> {
-    levels
-        .into_iter()
-        .map(|(price, size)| PriceLevel { price, size })
-        .collect()
 }
